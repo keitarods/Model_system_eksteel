@@ -1,0 +1,2132 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import type { ShapeMesh, Solid } from "replicad";
+import { createClient } from "@/lib/supabase/client";
+import { SketchToolPalette } from "@/components/sketch/SketchToolPalette";
+import { useSketchKeyboardShortcuts } from "@/lib/sketch/useSketchKeyboardShortcuts";
+import { Viewer3D } from "@/components/viewer/Viewer3D";
+import {
+  IconChamfer,
+  IconExtrude,
+  IconFillet,
+  IconFinish,
+  IconHole,
+  IconLogout,
+  IconRedo,
+  IconRevolve,
+  IconSketch,
+  IconSplit,
+  IconUndo,
+} from "@/components/icons/ToolIcons";
+import { useSketchStore } from "@/lib/sketch/store";
+import { BASE_SKETCH_PLANE } from "@/lib/sketch/types";
+import type { SketchPlane } from "@/lib/sketch/types";
+import { loadOpenCascade } from "@/lib/replicad/opencascade";
+import { findCenterLine, findLastCircle, findProfileSource } from "@/lib/replicad/geometry";
+import { rebuildModel, findFlangeParentId } from "@/lib/replicad/build-model";
+import { sketchPlaneFromHit, worldToLocalPoint, offsetOrigin, STANDARD_PLANES, STANDARD_AXES } from "@/lib/replicad/plane";
+import { useFeatureStore } from "@/lib/features/store";
+import type { Feature } from "@/lib/features/types";
+import type { ExtrudeDirection } from "@/lib/replicad/geometry";
+import { redoModel, undoModel, useUndoStore } from "@/lib/history/store";
+import { NATIVE_FILE_EXTENSION, parseProject, serializeProject } from "@/lib/project/nativeFormat";
+import { buildDxf } from "@/lib/project/dxf";
+import { exportFaceToDxf } from "@/lib/replicad/faceExport";
+import { findClickedAxis } from "@/lib/replicad/axisTools";
+import { findClickedEdge, listLinearEdges } from "@/lib/replicad/edgeTools";
+import {
+  isFileSystemAccessSupported,
+  loadRememberedFolder,
+  pickFileToOpen,
+  pickProjectFolder,
+  pickSaveFileHandle,
+  saveOrDownload,
+  writeToFileHandle,
+} from "@/lib/project/folder";
+
+function createId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+// Exceções vindas do WASM/OpenCascade às vezes não são Error de verdade
+// (podem ser só um número/ponteiro do embind) — isso extrai uma descrição
+// legível de qualquer coisa que possa ter sido lançada, pra não perder o
+// valor bruto quando isso acontece.
+function describeThrown(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return `valor bruto lançado: ${String(err)}`;
+}
+
+function isBasePlane(plane: SketchPlane) {
+  return (
+    plane.origin.every((v, i) => Math.abs(v - BASE_SKETCH_PLANE.origin[i]) < 1e-6) &&
+    plane.normal.every((v, i) => Math.abs(v - BASE_SKETCH_PLANE.normal[i]) < 1e-6)
+  );
+}
+
+const FEATURE_BADGE: Record<Feature["type"], { label: string; className: string }> = {
+  sketch: { label: "SK", className: "bg-primary-100 text-primary-700" },
+  extrude: { label: "EX", className: "bg-primary-600 text-white" },
+  revolve: { label: "RV", className: "bg-primary-400 text-primary-900" },
+  hole: { label: "FR", className: "bg-primary-800 text-white" },
+  split: { label: "CT", className: "bg-primary-300 text-primary-900" },
+  plane: { label: "PL", className: "bg-amber-200 text-amber-900" },
+  axis: { label: "EI", className: "bg-teal-200 text-teal-900" },
+  fillet: { label: "AR", className: "bg-emerald-200 text-emerald-900" },
+  chamfer: { label: "CH", className: "bg-orange-200 text-orange-900" },
+  sheetMetal: { label: "CP", className: "bg-sky-200 text-sky-900" },
+  face: { label: "FC", className: "bg-sky-600 text-white" },
+  flange: { label: "FL", className: "bg-sky-400 text-sky-900" },
+};
+
+export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
+  const router = useRouter();
+  const shapes = useSketchStore((s) => s.shapes);
+  const points = useSketchStore((s) => s.points);
+  const dimensions = useSketchStore((s) => s.dimensions);
+  const activePlane = useSketchStore((s) => s.activePlane);
+  const setActivePlane = useSketchStore((s) => s.setActivePlane);
+  const clearSketch = useSketchStore((s) => s.clear);
+
+  const features = useFeatureStore((s) => s.features);
+  const addFeature = useFeatureStore((s) => s.addFeature);
+  const updateFeature = useFeatureStore((s) => s.updateFeature);
+  const removeFeature = useFeatureStore((s) => s.removeFeature);
+
+  const canUndo = useUndoStore((s) => s.past.length > 0);
+  const canRedo = useUndoStore((s) => s.future.length > 0);
+
+  // Ao estilo Inventor: ou você está esboçando (só ferramentas de sketch,
+  // sem aplicar features) ou está no modelo (aplica Extrudar/Revolucionar/
+  // Furo/Cortar sobre o último esboço concluído). Começa em modo esboço,
+  // no plano base, pra não exigir um clique extra antes do primeiro desenho.
+  const [sketching, setSketching] = useState(true);
+  const [pickingPlane, setPickingPlane] = useState(false);
+  // Criar Plano (ao estilo Inventor/SolidWorks "Plane"): creatingPlane liga
+  // o modo inteiro; planeBase null = ainda escolhendo a referência (plano
+  // padrão ou face), planeBase preenchido = ajustando o deslocamento
+  // (arrastando no 3D ou digitando) antes de confirmar como operação.
+  const [creatingPlane, setCreatingPlane] = useState(false);
+  const [planeBase, setPlaneBase] = useState<SketchPlane | null>(null);
+  const [planeOffset, setPlaneOffset] = useState(20);
+  // Criar Eixo (ao estilo Inventor/SolidWorks "Axis"): clica numa face
+  // cilíndrica (parede de furo — eixo pelo centroide, ao longo dela) ou
+  // plana (eixo normal, pelo centroide) e a operação já é criada na hora,
+  // sem etapa de ajuste (diferente do Plano, não tem um valor pra digitar).
+  const [pickingAxisFace, setPickingAxisFace] = useState(false);
+  // Arredondar/Chanfrar (ao estilo Inventor/SolidWorks "Fillet"/"Chamfer"):
+  // clica em uma ou mais arestas do sólido (mesmo pickMode do resto),
+  // acumulando em selectedEdgePoints — só vira operação de verdade ao
+  // confirmar (uma feature só, com todas as arestas escolhidas).
+  const [edgeToolMode, setEdgeToolMode] = useState<"fillet" | "chamfer" | null>(null);
+  const [selectedEdgePoints, setSelectedEdgePoints] = useState<[number, number, number][]>([]);
+  const [filletRadius3d, setFilletRadius3d] = useState(3);
+  const [chamferDistance3d, setChamferDistance3d] = useState(3);
+  // Ambiente de Chapa (ao estilo Inventor "Sheet Metal"): a espessura vive
+  // numa SheetMetalFeature única na árvore, não em estado local — isso é só
+  // o valor sugerido pro campo de "Virar Chapa" antes de existir uma.
+  const [newSheetThickness, setNewSheetThickness] = useState(2);
+  const [faceDirection, setFaceDirection] = useState<ExtrudeDirection>("normal");
+  // Flange: clique direto na LINHA de uma aresta reta da chapa (ao estilo
+  // Inventor — ver LinearEdgePicker3D em Viewer3D.tsx), não mais na face —
+  // flangeCandidate guarda a aresta exata enquanto os parâmetros (ângulo,
+  // comprimento) ainda estão sendo ajustados, antes de confirmar.
+  const [flangePicking, setFlangePicking] = useState(false);
+  const [flangeCandidate, setFlangeCandidate] = useState<{
+    start: [number, number, number];
+    end: [number, number, number];
+  } | null>(null);
+  const [flangeLength, setFlangeLength] = useState(20);
+  const [flangeAngle, setFlangeAngle] = useState(90);
+  // Alterna a visualização inteira entre dobrada (3D real) e planificada
+  // (padrão plano pra corte/DXF) — não mexe na árvore de features, só como
+  // rebuildModel trata as Flanges dessa reconstrução em diante.
+  const [flattenView, setFlattenView] = useState(false);
+  // Em telas estreitas, os 2 painéis (histórico/3D) não cabem lado a lado —
+  // só um fica visível por vez, alternado por abas. Em md+ os dois
+  // continuam lado a lado como sempre (esse estado é ignorado nesse caso).
+  // O 3D agora é o único viewport (desenhar/selecionar funciona nele
+  // direto), então não existe mais uma aba "Esboço" separada.
+  const [mobileTab, setMobileTab] = useState<"viewer" | "history">("viewer");
+
+  useSketchKeyboardShortcuts();
+  // Qual SketchFeature da árvore o esboço ao vivo representa — null quando é
+  // um esboço novo ainda não salvo. Concluir Esboço cria ou atualiza essa
+  // entrada, em vez de duplicar uma nova toda vez.
+  const [editingSketchId, setEditingSketchId] = useState<string | null>(null);
+  // Incrementa a cada plano escolhido/reaberto — o Viewer3D usa isso (não a
+  // referência do plano em si) como gatilho pra reorientar a câmera de
+  // frente pro plano, ao estilo Inventor/SolidWorks, mesmo que o mesmo
+  // plano padrão seja escolhido duas vezes seguidas.
+  const [planeFocusToken, setPlaneFocusToken] = useState(0);
+  // Pasta local do projeto (File System Access — só Chrome/Edge por
+  // enquanto). null não bloqueia salvar/exportar, só faz cair pro download
+  // comum do navegador em vez de gravar direto na pasta.
+  const [projectFolder, setProjectFolder] = useState<FileSystemDirectoryHandle | null>(null);
+  const [currentFileHandle, setCurrentFileHandle] = useState<FileSystemFileHandle | null>(null);
+  const [currentFileName, setCurrentFileName] = useState<string | null>(null);
+  // null = ainda não checou (evita mismatch de hidratação: no servidor
+  // isFileSystemAccessSupported() sempre dá false por não ter `window`).
+  // Só depois de montado no client é que sabemos de verdade se o navegador
+  // suporta — sem isso, "Salvar" nunca consegue gravar no mesmo arquivo,
+  // sempre cai no window.prompt() de nome (por isso "Salvar" parece "Salvar
+  // Como" toda vez nesse caso).
+  const [fsAccessSupported, setFsAccessSupported] = useState<boolean | null>(null);
+  useEffect(() => {
+    setFsAccessSupported(isFileSystemAccessSupported());
+  }, []);
+
+  const [extrudeDepth, setExtrudeDepth] = useState(20);
+  const [extrudeCut, setExtrudeCut] = useState(false);
+  // Sentido ao estilo Inventor: segue a normal do plano, vai pro lado
+  // oposto, ou sai simétrico (metade pra cada lado, centrado no plano).
+  const [extrudeDirection, setExtrudeDirection] = useState<ExtrudeDirection>("normal");
+  const [revolveAngle, setRevolveAngle] = useState(360);
+  const [revolveReversed, setRevolveReversed] = useState(false);
+  const [holeThrough, setHoleThrough] = useState(true);
+  const [holeDepth, setHoleDepth] = useState(10);
+  // "flipped" reproduz o comportamento que o furo cego sempre teve (entra
+  // pro lado oposto da normal) — é o padrão pra não mudar o resultado de
+  // quem já usava a ferramenta antes desse controle existir.
+  const [holeDirection, setHoleDirection] = useState<"normal" | "flipped">("flipped");
+  const [splitKeepSide, setSplitKeepSide] = useState<"positive" | "negative">("positive");
+
+  const [mesh, setMesh] = useState<ShapeMesh | null>(null);
+  // Arestas do sólido ativo em coordenadas de mundo (flat, pares de pontos
+  // xyz) — servem de referência visual no esboço 2D, ao estilo "Project
+  // Geometry" do Inventor, sem precisar desenhar o esboço dentro do 3D.
+  const [edgeLines, setEdgeLines] = useState<number[]>([]);
+  // Arestas RETAS do sólido ativo, com os dois extremos exatos — alimenta a
+  // camada de linhas clicáveis do Flange (LinearEdgePicker3D em
+  // Viewer3D.tsx), que substitui o antigo clique-na-face + busca da aresta
+  // mais próxima (impreciso perto de cantos/arestas vizinhas curtas).
+  const [linearEdges, setLinearEdges] = useState<
+    { start: [number, number, number]; end: [number, number, number] }[]
+  >([]);
+  const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
+  const solidRef = useRef<Solid | null>(null);
+  const generationRef = useRef(0);
+
+  // Projeta as arestas do sólido no plano ativo do sketch (2D local) — só
+  // matemática, recalcula quando o sólido OU o plano muda, sem precisar de
+  // WASM. É a referência visual "onde estou na peça" pedida.
+  const referenceGeometry = useMemo(() => {
+    const segments: { x1: number; y1: number; x2: number; y2: number }[] = [];
+    for (let i = 0; i + 5 < edgeLines.length; i += 6) {
+      const a = worldToLocalPoint(activePlane, [edgeLines[i], edgeLines[i + 1], edgeLines[i + 2]]);
+      const b = worldToLocalPoint(activePlane, [edgeLines[i + 3], edgeLines[i + 4], edgeLines[i + 5]]);
+      segments.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y });
+    }
+    return segments;
+  }, [edgeLines, activePlane]);
+
+  const profile = findProfileSource(shapes, points);
+  const lastCircle = findLastCircle(shapes, points);
+  // Ao estilo Inventor: Revolução exige uma linha de centro explícita no
+  // sketch — sem ela, o eixo não está definido e só Extrudar fica disponível.
+  const centerLine = findCenterLine(shapes, points);
+  const hasActiveSolid = mesh !== null;
+  const hasFinishedSketch = shapes.length > 0 || Object.keys(points).length > 0;
+  const sheetMetalFeature = features.find(
+    (f): f is Extract<Feature, { type: "sheetMetal" }> => f.type === "sheetMetal"
+  );
+  const isSheetMetal = !!sheetMetalFeature;
+  const hasFlangeFeature = features.some((f) => f.type === "flange");
+
+  const showNotice = useCallback((message: string) => {
+    setNoticeMessage(message);
+    window.setTimeout(() => {
+      setNoticeMessage((current) => (current === message ? null : current));
+    }, 2500);
+  }, []);
+
+  // Ctrl+Z desfaz, Ctrl+Y ou Ctrl+Shift+Z refaz (Cmd no Mac) — cobre as duas
+  // convenções mais comuns. Ignora quando o foco está num campo de texto.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const isMac = navigator.platform.toLowerCase().includes("mac");
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      if (!mod) return;
+
+      const target = e.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undoModel();
+      } else if (key === "y" || (key === "z" && e.shiftKey)) {
+        e.preventDefault();
+        redoModel();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // Garante que a aba mobile mostre o 3D (onde esboço/escolha de plano
+  // acontecem) sempre que entrar num desses modos — evita o usuário ficar
+  // preso na aba Histórico sem ver o que precisa clicar.
+  useEffect(() => {
+    if (sketching || pickingPlane || creatingPlane || pickingAxisFace || edgeToolMode || flangePicking)
+      setMobileTab("viewer");
+  }, [sketching, pickingPlane, creatingPlane, pickingAxisFace, edgeToolMode, flangePicking]);
+
+  // Título da aba ao estilo Inventor: mostra o nome do arquivo aberto/salvo
+  // por último, não só o nome genérico do app.
+  useEffect(() => {
+    document.title = currentFileName ? `${currentFileName} — Modelador Eksteel` : "Modelador Eksteel";
+  }, [currentFileName]);
+
+  // Recupera a pasta do projeto lembrada de uma sessão anterior (se o
+  // navegador suportar) — não pede permissão de novo aqui, só reidrata o
+  // handle; a permissão de escrita é reconfirmada na hora de salvar.
+  useEffect(() => {
+    loadRememberedFolder().then((handle) => {
+      if (handle) setProjectFolder(handle);
+    });
+  }, []);
+
+  // Reconstrói o sólido do zero sempre que o histórico de features muda —
+  // mais simples e mais seguro do que tentar atualizar incrementalmente.
+  // Sem features ainda, nem vale a pena baixar o WASM (~10MB) só pra
+  // confirmar que o resultado é "nenhum sólido".
+  useEffect(() => {
+    if (features.length === 0) {
+      solidRef.current?.delete();
+      solidRef.current = null;
+      setMesh(null);
+      setEdgeLines([]);
+      setLinearEdges([]);
+      setStatus("idle");
+      setErrorMessage(null);
+      return;
+    }
+
+    let cancelled = false;
+    const generation = ++generationRef.current;
+
+    (async () => {
+      setStatus("loading");
+      try {
+        await loadOpenCascade();
+
+        let next: Solid | null;
+        try {
+          next = rebuildModel(features, { flatten: flattenView });
+        } catch (err) {
+          throw new Error(`Falha ao construir o sólido (${describeThrown(err)}).`);
+        }
+
+        if (cancelled || generation !== generationRef.current) {
+          next?.delete();
+          return;
+        }
+
+        solidRef.current?.delete();
+        solidRef.current = next;
+
+        let nextMesh: ShapeMesh | null = null;
+        let nextEdgeLines: number[] = [];
+        let nextLinearEdges: { start: [number, number, number]; end: [number, number, number] }[] = [];
+        try {
+          nextMesh = next ? next.mesh() : null;
+          nextEdgeLines = next ? next.meshEdges().lines : [];
+          nextLinearEdges = next ? listLinearEdges(next) : [];
+        } catch (err) {
+          // O sólido foi construído mas é topologicamente inválido demais
+          // pra triangular (geometria auto-interseptante, por exemplo) —
+          // acontece principalmente com Flange mal posicionada.
+          throw new Error(`Sólido construído mas inválido para exibir (${describeThrown(err)}).`);
+        }
+        setMesh(nextMesh);
+        setEdgeLines(nextEdgeLines);
+        setLinearEdges(nextLinearEdges);
+        setStatus("idle");
+        setErrorMessage(null);
+      } catch (err) {
+        if (cancelled || generation !== generationRef.current) return;
+        // Exceções vindas do replicad/OpenCascade (WASM) às vezes não são
+        // Error de verdade (podem ser um número, string ou objeto do
+        // embind) — sem logar aqui, o valor real fica invisível e só sobra
+        // a mensagem genérica de baixo pro usuário.
+        console.error("Erro ao reconstruir o sólido:", err);
+        setStatus("error");
+        setErrorMessage(
+          err instanceof Error ? err.message : "Erro ao gerar o sólido."
+        );
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [features, flattenView]);
+
+  // Ao estilo Inventor/SolidWorks: sempre mostra as opções de plano (os 3
+  // planos padrão de origem, mais qualquer face do sólido existente) em vez
+  // de assumir XY direto — o usuário escolhe visualmente no 3D ou pelos
+  // botões da barra.
+  const handleCreateSketch = useCallback(() => {
+    setEditingSketchId(null);
+    setPickingPlane(true);
+  }, []);
+
+  // Atalho S ao estilo Inventor: fora do modo esboço, inicia "Criar
+  // Esboço" (abre a escolha de plano). Dentro de um esboço já em edição,
+  // "S" continua sendo a ferramenta Selecionar — esse atalho não interfere
+  // nesse caso (useSketchKeyboardShortcuts cuida dele à parte).
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key.toLowerCase() !== "s") return;
+
+      const target = e.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (!sketching && !pickingPlane && !creatingPlane && !pickingAxisFace && !edgeToolMode && !flangePicking) {
+        e.preventDefault();
+        handleCreateSketch();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [sketching, pickingPlane, creatingPlane, pickingAxisFace, edgeToolMode, flangePicking, handleCreateSketch]);
+
+  const handleUseStandardPlane = useCallback(
+    (plane: SketchPlane) => {
+      setEditingSketchId(null);
+      setActivePlane(plane);
+      clearSketch();
+      setPickingPlane(false);
+      setSketching(true);
+      setPlaneFocusToken((t) => t + 1);
+      showNotice("Esboçando no plano selecionado.");
+    },
+    [setActivePlane, clearSketch, showNotice]
+  );
+
+  const handlePickPlane = useCallback(
+    (origin: [number, number, number], normal: [number, number, number]) => {
+      setEditingSketchId(null);
+      setActivePlane(sketchPlaneFromHit(origin, normal));
+      clearSketch();
+      setPickingPlane(false);
+      setSketching(true);
+      setPlaneFocusToken((t) => t + 1);
+      showNotice("Esboçando na face selecionada.");
+    },
+    [setActivePlane, clearSketch, showNotice]
+  );
+
+  // Ao estilo Inventor: exporta o contorno da face clicada como DXF 2D
+  // "achatado" no próprio plano dela — não precisa de sketch nenhum, lê
+  // direto do sólido já construído. Disparado pelo menu de contexto (botão
+  // direito numa face), não por um modo de escolha separado.
+  const handleExportFaceDxf = useCallback(
+    async (origin: [number, number, number], normal: [number, number, number]) => {
+      if (!solidRef.current) return;
+
+      const dxfText = exportFaceToDxf(solidRef.current, origin, normal);
+      if (!dxfText) {
+        setErrorMessage("Não consegui identificar uma face plana nesse ponto — tente clicar mais perto do centro da face.");
+        return;
+      }
+
+      const blob = new Blob([dxfText], { type: "application/dxf" });
+      const result = await saveOrDownload(projectFolder, blob, "face.dxf");
+      showNotice(result === "folder" ? "Face exportada em DXF na pasta selecionada." : "Face exportada em DXF.");
+    },
+    [projectFolder, showNotice]
+  );
+
+  const handleCreateAxis = useCallback(() => {
+    setPickingAxisFace(true);
+  }, []);
+
+  // Ao estilo Inventor: os 3 eixos padrão de origem (X/Y/Z) — clique único,
+  // sem etapa de ajuste (eles são retas fixas, não tem "deslocamento" como
+  // um plano offset).
+  const handleUseStandardAxis = useCallback(
+    (axis: { label: string; origin: [number, number, number]; direction: [number, number, number] }) => {
+      setPickingAxisFace(false);
+      addFeature({
+        id: createId(),
+        type: "axis",
+        label: axis.label,
+        origin: axis.origin,
+        direction: axis.direction,
+      });
+      showNotice(`${axis.label} criado.`);
+    },
+    [addFeature, showNotice]
+  );
+
+  // Ao estilo Inventor: clica numa face cilíndrica/cônica (eixo pelo
+  // centroide, ao longo dela — é o centro real de um furo, por exemplo) ou
+  // plana (eixo normal, pelo centroide) e a operação já entra na árvore na
+  // hora, sem etapa extra de ajuste.
+  const handleAxisFacePicked = useCallback(
+    (origin: [number, number, number]) => {
+      setPickingAxisFace(false);
+      if (!solidRef.current) return;
+
+      const axis = findClickedAxis(solidRef.current, origin);
+      if (!axis) {
+        setErrorMessage(
+          "Não consegui identificar um eixo nessa face — tente clicar numa face cilíndrica (parede de um furo) ou plana."
+        );
+        return;
+      }
+
+      addFeature({
+        id: createId(),
+        type: "axis",
+        label: "Eixo (centroide)",
+        origin: axis.origin,
+        direction: axis.direction,
+      });
+      showNotice("Eixo criado.");
+    },
+    [addFeature, showNotice]
+  );
+
+  // Arredondar/Chanfrar: cada clique numa aresta soma (ou tira, se já
+  // estava escolhida) selectedEdgePoints — a operação em si só é criada ao
+  // confirmar (handleConfirmEdgeTool), permitindo escolher várias arestas
+  // antes de aplicar um raio/distância só.
+  const handleEdgePicked = useCallback((origin: [number, number, number]) => {
+    if (!solidRef.current) return;
+    const hit = findClickedEdge(solidRef.current, origin);
+    if (!hit) {
+      setErrorMessage(
+        "Não consegui identificar uma aresta nesse ponto — tente clicar mais perto de uma borda do sólido."
+      );
+      return;
+    }
+    setSelectedEdgePoints((prev) => {
+      const idx = prev.findIndex(
+        (p) => Math.hypot(p[0] - hit.point[0], p[1] - hit.point[1], p[2] - hit.point[2]) < 1
+      );
+      if (idx >= 0) return prev.filter((_, i) => i !== idx);
+      return [...prev, hit.point];
+    });
+  }, []);
+
+  const handleStartFillet = useCallback(() => {
+    setEdgeToolMode("fillet");
+    setSelectedEdgePoints([]);
+  }, []);
+
+  const handleStartChamfer = useCallback(() => {
+    setEdgeToolMode("chamfer");
+    setSelectedEdgePoints([]);
+  }, []);
+
+  const handleCancelEdgeTool = useCallback(() => {
+    setEdgeToolMode(null);
+    setSelectedEdgePoints([]);
+  }, []);
+
+  const handleConfirmEdgeTool = useCallback(() => {
+    if (!edgeToolMode || selectedEdgePoints.length === 0) return;
+    const count = selectedEdgePoints.length;
+    const suffix = count > 1 ? `s (${count} arestas)` : " (1 aresta)";
+
+    if (edgeToolMode === "fillet") {
+      addFeature({
+        id: createId(),
+        type: "fillet",
+        label: `Arredondar R${filletRadius3d}mm${suffix}`,
+        radius: filletRadius3d,
+        edgePoints: selectedEdgePoints,
+      });
+    } else {
+      addFeature({
+        id: createId(),
+        type: "chamfer",
+        label: `Chanfrar ${chamferDistance3d}mm${suffix}`,
+        distance: chamferDistance3d,
+        edgePoints: selectedEdgePoints,
+      });
+    }
+
+    showNotice(edgeToolMode === "fillet" ? "Arredondamento criado." : "Chanfro criado.");
+    setEdgeToolMode(null);
+    setSelectedEdgePoints([]);
+  }, [edgeToolMode, selectedEdgePoints, filletRadius3d, chamferDistance3d, addFeature, showNotice]);
+
+  // Ambiente de Chapa: "Virar Chapa" cria a SheetMetalFeature única da
+  // árvore (espessura compartilhada por Face/Flange dela em diante);
+  // "Voltar a ser Peça" só remove essa feature — as Face/Flange já criadas
+  // continuam existindo como geometria comum, só perdem as ferramentas
+  // específicas de chapa.
+  const handleToggleSheetMetal = useCallback(() => {
+    if (sheetMetalFeature) {
+      removeFeature(sheetMetalFeature.id);
+      showNotice("Voltou a ser peça comum.");
+      return;
+    }
+    addFeature({
+      id: createId(),
+      type: "sheetMetal",
+      label: `Chapa ${newSheetThickness}mm`,
+      thickness: newSheetThickness,
+    });
+    showNotice(`Peça virou chapa de ${newSheetThickness}mm.`);
+  }, [sheetMetalFeature, newSheetThickness, addFeature, removeFeature, showNotice]);
+
+  // "Face" (Inventor): igual Extrudar, mas a profundidade é sempre a
+  // espessura da chapa ativa, nunca escolhida aqui.
+  const handleAddFace = useCallback(() => {
+    if (!profile || !sheetMetalFeature) return;
+    const arrow = faceDirection === "flipped" ? " ←" : faceDirection === "symmetric" ? " ↔" : " →";
+    addFeature({
+      id: createId(),
+      type: "face",
+      label: `Face ${sheetMetalFeature.thickness}mm${arrow}`,
+      profile,
+      plane: activePlane,
+      direction: faceDirection,
+    });
+    clearSketch();
+    setEditingSketchId(null);
+  }, [profile, sheetMetalFeature, faceDirection, activePlane, addFeature, clearSketch]);
+
+  const handleStartFlange = useCallback(() => {
+    setFlangePicking(true);
+    setFlangeCandidate(null);
+  }, []);
+
+  const handleCancelFlange = useCallback(() => {
+    setFlangePicking(false);
+    setFlangeCandidate(null);
+  }, []);
+
+  // Clique direto na LINHA de uma aresta durante o picking de Flange (ao
+  // estilo Inventor — ver LinearEdgePicker3D em Viewer3D.tsx): o segmento
+  // clicado já É a aresta exata do sólido, sem precisar de nenhuma busca
+  // "mais próxima do ponto clicado na face" — isso eliminava a ambiguidade
+  // perto de cantos/arestas curtas vizinhas que causava dobras nascendo na
+  // aresta errada.
+  const handleFlangeLinePicked = useCallback(
+    (start: [number, number, number], end: [number, number, number]) => {
+      setFlangeCandidate({ start, end });
+    },
+    []
+  );
+
+  const handleConfirmFlange = useCallback(() => {
+    if (!flangeCandidate) return;
+    // O pai é a Face/Flange que REALMENTE originou a aresta clicada — nunca
+    // "a última da árvore" (isso quebra assim que a peça ramifica: duas
+    // Flanges irmãs direto da base, ou uma encadeada criada depois de uma
+    // irmã). build-model.ts usa esse parentId pra desfazer a dobra dele (se
+    // houver) na hora de planificar.
+    const parentId = findFlangeParentId(features, flangeCandidate.start, flangeCandidate.end);
+    if (!parentId) {
+      setErrorMessage(
+        "Não consegui identificar de qual Face/Flange essa aresta nasceu — tente clicar em outra aresta."
+      );
+      return;
+    }
+
+    addFeature({
+      id: createId(),
+      type: "flange",
+      label: `Flange ${flangeLength}mm ${flangeAngle}°`,
+      parentId,
+      edgeStart: flangeCandidate.start,
+      edgeEnd: flangeCandidate.end,
+      length: flangeLength,
+      angle: flangeAngle,
+    });
+    setFlangePicking(false);
+    setFlangeCandidate(null);
+    showNotice("Flange criada.");
+  }, [features, flangeCandidate, flangeLength, flangeAngle, addFeature, showNotice]);
+
+  // Roteia o clique numa face do 3D conforme o que estava pedindo o clique
+  // — mesmo pickMode serve pra escolher plano de esboço, escolher a face de
+  // um eixo, escolher arestas pra Arredondar/Chanfrar. Flange NÃO passa mais
+  // por aqui — ela escolhe a aresta clicando direto na linha (ver
+  // handleFlangeLinePicked/LinearEdgePicker3D), então um clique na face
+  // enquanto flangePicking está ativo não deve fazer nada.
+  const handleFacePicked = useCallback(
+    (origin: [number, number, number], normal: [number, number, number]) => {
+      if (flangePicking) return;
+      if (edgeToolMode) {
+        handleEdgePicked(origin);
+        return;
+      }
+      if (pickingAxisFace) {
+        handleAxisFacePicked(origin);
+        return;
+      }
+      if (creatingPlane && !planeBase) {
+        setPlaneBase(sketchPlaneFromHit(origin, normal));
+        return;
+      }
+      handlePickPlane(origin, normal);
+    },
+    [
+      flangePicking,
+      edgeToolMode,
+      handleEdgePicked,
+      pickingAxisFace,
+      creatingPlane,
+      planeBase,
+      handleAxisFacePicked,
+      handlePickPlane,
+    ]
+  );
+
+  // Roteia o clique num dos 3 planos padrão — igual handleFacePicked, mas
+  // pro seletor de planos (que já entrega um SketchPlane pronto).
+  const handleStandardPlanePicked = useCallback(
+    (plane: SketchPlane) => {
+      if (creatingPlane && !planeBase) {
+        setPlaneBase(plane);
+        return;
+      }
+      handleUseStandardPlane(plane);
+    },
+    [creatingPlane, planeBase, handleUseStandardPlane]
+  );
+
+  const handleCreatePlane = useCallback(() => {
+    setCreatingPlane(true);
+    setPlaneBase(null);
+    setPlaneOffset(20);
+  }, []);
+
+  const handleConfirmPlane = useCallback(() => {
+    if (!planeBase) return;
+    addFeature({
+      id: createId(),
+      type: "plane",
+      label: `Plano (offset ${planeOffset.toFixed(1)}mm)`,
+      plane: { ...planeBase, origin: offsetOrigin(planeBase, planeOffset) },
+      basePlane: planeBase,
+      offset: planeOffset,
+    });
+    setCreatingPlane(false);
+    setPlaneBase(null);
+    showNotice("Plano de trabalho criado.");
+  }, [planeBase, planeOffset, addFeature, showNotice]);
+
+  const handleCancelPlane = useCallback(() => {
+    setCreatingPlane(false);
+    setPlaneBase(null);
+  }, []);
+
+  // Reabre um esboço salvo na árvore: carrega os dados dele de volta pro
+  // sketch ao vivo e entra em modo esboço, lembrando qual entrada atualizar
+  // quando "Concluir Esboço" for clicado de novo.
+  const handleOpenSketch = useCallback(
+    (feature: Extract<Feature, { type: "sketch" }>) => {
+      useSketchStore.setState({
+        shapes: feature.shapes,
+        points: feature.points,
+        dimensions: feature.dimensions,
+        activePlane: feature.plane,
+      });
+      setEditingSketchId(feature.id);
+      setPickingPlane(false);
+      setSketching(true);
+      setPlaneFocusToken((t) => t + 1);
+      showNotice(`Editando "${feature.label}".`);
+    },
+    [showNotice]
+  );
+
+  const handleFinishSketch = useCallback(() => {
+    const sketchCount = features.filter((f) => f.type === "sketch").length;
+
+    if (editingSketchId) {
+      const existing = features.find((f) => f.id === editingSketchId);
+      updateFeature(editingSketchId, {
+        id: editingSketchId,
+        type: "sketch",
+        label: existing?.type === "sketch" ? existing.label : `Esboço ${sketchCount + 1}`,
+        plane: activePlane,
+        shapes,
+        points,
+        dimensions,
+      });
+    } else {
+      const id = createId();
+      addFeature({
+        id,
+        type: "sketch",
+        label: `Esboço ${sketchCount + 1}`,
+        plane: activePlane,
+        shapes,
+        points,
+        dimensions,
+      });
+      setEditingSketchId(id);
+    }
+
+    setSketching(false);
+  }, [features, editingSketchId, activePlane, shapes, points, dimensions, addFeature, updateFeature]);
+
+  const handleEditSketch = useCallback(() => {
+    setSketching(true);
+  }, []);
+
+  const handleAddExtrude = useCallback(() => {
+    if (!profile) return;
+    if (extrudeCut && !hasActiveSolid) {
+      setErrorMessage(
+        "Não há sólido ativo para cortar — desmarque “Corte” ou crie um sólido primeiro."
+      );
+      return;
+    }
+    const directionArrow = extrudeDirection === "flipped" ? " ←" : extrudeDirection === "symmetric" ? " ↔" : " →";
+    addFeature({
+      id: createId(),
+      type: "extrude",
+      label: `Extrudar ${extrudeDepth}mm${extrudeCut ? " (corte)" : ""}${directionArrow}`,
+      profile,
+      plane: activePlane,
+      depth: extrudeDepth,
+      cut: extrudeCut,
+      direction: extrudeDirection,
+    });
+    clearSketch();
+    setEditingSketchId(null);
+  }, [profile, extrudeCut, extrudeDepth, extrudeDirection, hasActiveSolid, activePlane, addFeature, clearSketch]);
+
+  const handleAddRevolve = useCallback(() => {
+    if (!profile || !centerLine) return;
+    addFeature({
+      id: createId(),
+      type: "revolve",
+      label: `Revolução ${revolveAngle}° ${revolveReversed ? "↺" : "↻"}`,
+      profile,
+      plane: activePlane,
+      axisOrigin: centerLine.origin,
+      axisDirection: centerLine.direction,
+      angle: revolveAngle,
+      reversed: revolveReversed,
+    });
+    clearSketch();
+    setEditingSketchId(null);
+  }, [profile, centerLine, revolveAngle, revolveReversed, activePlane, addFeature, clearSketch]);
+
+  const handleAddHole = useCallback(() => {
+    if (!lastCircle || !hasActiveSolid) return;
+    addFeature({
+      id: createId(),
+      type: "hole",
+      label: `Furo Ø${(lastCircle.r * 2).toFixed(1)}${
+        holeThrough ? " passante" : ` x${holeDepth}mm ${holeDirection === "flipped" ? "←" : "→"}`
+      }`,
+      center: { x: lastCircle.cx, y: lastCircle.cy },
+      plane: activePlane,
+      radius: lastCircle.r,
+      through: holeThrough,
+      depth: holeDepth,
+      direction: holeDirection,
+    });
+    clearSketch();
+    setEditingSketchId(null);
+  }, [lastCircle, hasActiveSolid, holeThrough, holeDepth, holeDirection, activePlane, addFeature, clearSketch]);
+
+  // Edição de feature já aplicada via prompts sequenciais — mesmo padrão já
+  // usado (e testado) pra editar cotas, em vez de um formulário/modal novo
+  // que eu não teria como verificar visualmente antes de entregar. Pra
+  // campos booleanos, o confirm() pergunta se quer TROCAR o valor atual
+  // (OK troca, Cancelar mantém), não "sim/não" direto — evita o risco de
+  // inverter sem querer.
+  const handleEditFeature = useCallback(
+    (feature: Feature) => {
+      if (feature.type === "sketch") return; // esboços usam onOpenSketch
+
+      if (feature.type === "extrude") {
+        const input = window.prompt("Nova profundidade (mm):", String(feature.depth));
+        if (input === null) return;
+        const depth = Number(input.replace(",", "."));
+        if (!Number.isFinite(depth) || depth <= 0) return;
+
+        const toggleCut = window.confirm(
+          `Corte está ${feature.cut ? "ativado" : "desativado"}. OK para ${
+            feature.cut ? "desativar" : "ativar"
+          }, Cancelar para manter.`
+        );
+        const cut = toggleCut ? !feature.cut : feature.cut;
+
+        // 3 estados — o confirm() aqui cicla pro próximo em vez de só
+        // ligar/desligar, já que não é uma escolha binária.
+        const current = feature.direction ?? "normal";
+        const directionLabel = (d: ExtrudeDirection) =>
+          d === "normal" ? "seguindo a normal do plano" : d === "flipped" ? "invertido" : "simétrico";
+        const next: ExtrudeDirection = current === "normal" ? "flipped" : current === "flipped" ? "symmetric" : "normal";
+        const cycleDirection = window.confirm(
+          `Sentido atual: ${directionLabel(current)}. OK para trocar para "${directionLabel(next)}", Cancelar para manter.`
+        );
+        const direction = cycleDirection ? next : current;
+        const arrow = direction === "flipped" ? " ←" : direction === "symmetric" ? " ↔" : " →";
+
+        updateFeature(feature.id, {
+          ...feature,
+          depth,
+          cut,
+          direction,
+          label: `Extrudar ${depth}mm${cut ? " (corte)" : ""}${arrow}`,
+        });
+        return;
+      }
+
+      if (feature.type === "revolve") {
+        const input = window.prompt("Novo ângulo (graus, 1-360):", String(feature.angle));
+        if (input === null) return;
+        const angle = Number(input.replace(",", "."));
+        if (!Number.isFinite(angle) || angle <= 0 || angle > 360) return;
+
+        const currentReversed = feature.reversed ?? false;
+        const toggleReversed = window.confirm(
+          `Sentido de rotação está ${currentReversed ? "invertido" : "padrão"}. OK para trocar, Cancelar para manter.`
+        );
+        const reversed = toggleReversed ? !currentReversed : currentReversed;
+
+        updateFeature(feature.id, {
+          ...feature,
+          angle,
+          reversed,
+          label: `Revolução ${angle}° ${reversed ? "↺" : "↻"}`,
+        });
+        return;
+      }
+
+      if (feature.type === "hole") {
+        const toggleThrough = window.confirm(
+          `Furo está ${
+            feature.through ? "passante" : "com profundidade fixa"
+          }. OK para trocar, Cancelar para manter.`
+        );
+        const through = toggleThrough ? !feature.through : feature.through;
+
+        let depth = feature.depth;
+        let direction = feature.direction ?? "flipped";
+        if (!through) {
+          const input = window.prompt("Nova profundidade do furo (mm):", String(feature.depth));
+          if (input === null) return;
+          const parsed = Number(input.replace(",", "."));
+          if (!Number.isFinite(parsed) || parsed <= 0) return;
+          depth = parsed;
+
+          const toggleDirection = window.confirm(
+            `Sentido do furo está ${direction === "flipped" ? "invertido" : "padrão"}. OK para trocar, Cancelar para manter.`
+          );
+          if (toggleDirection) direction = direction === "flipped" ? "normal" : "flipped";
+        }
+
+        updateFeature(feature.id, {
+          ...feature,
+          through,
+          depth,
+          direction,
+          label: `Furo Ø${(feature.radius * 2).toFixed(1)}${
+            through ? " passante" : ` x${depth}mm ${direction === "flipped" ? "←" : "→"}`
+          }`,
+        });
+        return;
+      }
+
+      if (feature.type === "plane") {
+        const input = window.prompt("Novo deslocamento (mm, pode ser negativo):", String(feature.offset));
+        if (input === null) return;
+        const offset = Number(input.replace(",", "."));
+        if (!Number.isFinite(offset)) return;
+
+        updateFeature(feature.id, {
+          ...feature,
+          offset,
+          plane: { ...feature.basePlane, origin: offsetOrigin(feature.basePlane, offset) },
+          label: `Plano (offset ${offset}mm)`,
+        });
+        return;
+      }
+
+      if (feature.type === "axis") return; // derivado direto da face — nada pra reeditar, só remover e recriar
+
+      if (feature.type === "fillet") {
+        const input = window.prompt("Novo raio de arredondamento (mm):", String(feature.radius));
+        if (input === null) return;
+        const radius = Number(input.replace(",", "."));
+        if (!Number.isFinite(radius) || radius <= 0) return;
+        const count = feature.edgePoints.length;
+        updateFeature(feature.id, {
+          ...feature,
+          radius,
+          label: `Arredondar R${radius}mm${count > 1 ? ` (${count} arestas)` : " (1 aresta)"}`,
+        });
+        return;
+      }
+
+      if (feature.type === "chamfer") {
+        const input = window.prompt("Nova distância do chanfro (mm):", String(feature.distance));
+        if (input === null) return;
+        const distance = Number(input.replace(",", "."));
+        if (!Number.isFinite(distance) || distance <= 0) return;
+        const count = feature.edgePoints.length;
+        updateFeature(feature.id, {
+          ...feature,
+          distance,
+          label: `Chanfrar ${distance}mm${count > 1 ? ` (${count} arestas)` : " (1 aresta)"}`,
+        });
+        return;
+      }
+
+      if (feature.type === "sheetMetal") {
+        const input = window.prompt("Nova espessura da chapa (mm):", String(feature.thickness));
+        if (input === null) return;
+        const thickness = Number(input.replace(",", "."));
+        if (!Number.isFinite(thickness) || thickness <= 0) return;
+        updateFeature(feature.id, { ...feature, thickness, label: `Chapa ${thickness}mm` });
+        return;
+      }
+
+      if (feature.type === "face") {
+        const current = feature.direction ?? "normal";
+        const directionLabel = (d: ExtrudeDirection) =>
+          d === "normal" ? "seguindo a normal do plano" : d === "flipped" ? "invertido" : "simétrico";
+        const next: ExtrudeDirection = current === "normal" ? "flipped" : current === "flipped" ? "symmetric" : "normal";
+        const cycleDirection = window.confirm(
+          `Sentido atual: ${directionLabel(current)}. OK para trocar para "${directionLabel(next)}", Cancelar para manter.`
+        );
+        const direction = cycleDirection ? next : current;
+        const arrow = direction === "flipped" ? " ←" : direction === "symmetric" ? " ↔" : " →";
+        updateFeature(feature.id, {
+          ...feature,
+          direction,
+          label: `Face${sheetMetalFeature ? ` ${sheetMetalFeature.thickness}mm` : ""}${arrow}`,
+        });
+        return;
+      }
+
+      if (feature.type === "flange") {
+        const lengthInput = window.prompt("Novo comprimento da aba (mm):", String(feature.length));
+        if (lengthInput === null) return;
+        const length = Number(lengthInput.replace(",", "."));
+        if (!Number.isFinite(length) || length <= 0) return;
+
+        const angleInput = window.prompt("Novo ângulo de dobra (graus):", String(feature.angle));
+        if (angleInput === null) return;
+        const angle = Number(angleInput.replace(",", "."));
+        if (!Number.isFinite(angle) || angle <= 0 || angle > 180) return;
+
+        updateFeature(feature.id, {
+          ...feature,
+          length,
+          angle,
+          label: `Flange ${length}mm ${angle}°`,
+        });
+        return;
+      }
+
+      const toggleSide = window.confirm(
+        `Mantendo o lado ${
+          feature.keepSide === "positive" ? "+" : "-"
+        }. OK para trocar de lado, Cancelar para manter.`
+      );
+      const keepSide: "positive" | "negative" = toggleSide
+        ? feature.keepSide === "positive"
+          ? "negative"
+          : "positive"
+        : feature.keepSide;
+
+      updateFeature(feature.id, {
+        ...feature,
+        keepSide,
+        label: `Cortar por plano (${keepSide === "positive" ? "lado +" : "lado -"})`,
+      });
+    },
+    [updateFeature]
+  );
+
+  const handleAddSplit = useCallback(() => {
+    if (!hasActiveSolid) return;
+    addFeature({
+      id: createId(),
+      type: "split",
+      label: `Cortar por plano (${splitKeepSide === "positive" ? "lado +" : "lado -"})`,
+      plane: activePlane,
+      keepSide: splitKeepSide,
+    });
+  }, [hasActiveSolid, activePlane, splitKeepSide, addFeature]);
+
+  const handleLogout = useCallback(async () => {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    router.push("/login");
+    router.refresh();
+  }, [router]);
+
+  const handleSelectFolder = useCallback(async () => {
+    if (!isFileSystemAccessSupported()) {
+      showNotice("Este navegador não suporta escolher pasta (funciona no Chrome/Edge) — salvar continua funcionando por download.");
+      return;
+    }
+    const handle = await pickProjectFolder();
+    if (handle) {
+      setProjectFolder(handle);
+      showNotice(`Pasta do projeto: "${handle.name}".`);
+    }
+  }, [showNotice]);
+
+  // "Salvar Como": sempre pergunta onde salvar (nome/pasta), mesmo que já
+  // exista um arquivo aberto — e o resultado passa a ser o novo arquivo
+  // "atual" pra próximos "Salvar". Sem File System Access, não tem como
+  // escolher pasta de verdade, então só pergunta o nome via prompt e cai no
+  // download de sempre.
+  const handleSaveProjectAs = useCallback(async () => {
+    const json = serializeProject(features);
+    const suggestedName = currentFileName ?? `projeto${NATIVE_FILE_EXTENSION}`;
+
+    if (isFileSystemAccessSupported()) {
+      const handle = await pickSaveFileHandle(suggestedName, [
+        { description: "Projeto Eksteel", accept: { "application/json": [NATIVE_FILE_EXTENSION] } },
+      ]);
+      if (!handle) return;
+      await writeToFileHandle(handle, json);
+      setCurrentFileHandle(handle);
+      setCurrentFileName(handle.name);
+      showNotice(`"${handle.name}" salvo.`);
+      return;
+    }
+
+    const filename = window.prompt("Salvar como (nome do arquivo):", suggestedName);
+    if (!filename) return;
+    const result = await saveOrDownload(projectFolder, json, filename);
+    setCurrentFileHandle(null);
+    setCurrentFileName(filename);
+    showNotice(result === "folder" ? "Projeto salvo na pasta selecionada." : "Projeto baixado.");
+  }, [features, currentFileName, projectFolder, showNotice]);
+
+  // "Salvar": grava direto no arquivo já aberto/salvo, sem perguntar nada —
+  // é o que permite ir salvando à vontade enquanto edita sem risco de
+  // perder trabalho. Só cai no fluxo de "Salvar Como" se ainda não existe
+  // nenhum arquivo atual (nada em que salvar "dentro").
+  const handleSaveProject = useCallback(async () => {
+    if (!currentFileHandle) {
+      await handleSaveProjectAs();
+      return;
+    }
+
+    try {
+      await writeToFileHandle(currentFileHandle, serializeProject(features));
+      showNotice(`"${currentFileHandle.name}" salvo.`);
+    } catch {
+      // Handle pode ter ficado inválido (arquivo movido/apagado fora do
+      // app) — cai pro fluxo de escolher onde salvar de novo, em vez de
+      // travar o salvamento.
+      setCurrentFileHandle(null);
+      await handleSaveProjectAs();
+    }
+  }, [features, currentFileHandle, handleSaveProjectAs, showNotice]);
+
+  // Ctrl+S salva no arquivo já aberto (ou pede onde salvar, na primeira
+  // vez); Ctrl+Shift+S é "Salvar Como" — convenção padrão (Word, VSCode
+  // etc). Ambos evitam cair no "salvar página" padrão do navegador.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const isMac = navigator.platform.toLowerCase().includes("mac");
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      if (!mod || e.key.toLowerCase() !== "s") return;
+      e.preventDefault();
+      if (e.shiftKey) {
+        handleSaveProjectAs();
+      } else {
+        handleSaveProject();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handleSaveProject, handleSaveProjectAs]);
+
+  const handleOpenProject = useCallback(async () => {
+    const picked = await pickFileToOpen([
+      { description: "Projeto Eksteel", accept: { "application/json": [NATIVE_FILE_EXTENSION] } },
+    ]);
+    if (!picked) return;
+
+    try {
+      const loadedFeatures = parseProject(await picked.file.text());
+      useFeatureStore.setState({ features: loadedFeatures });
+      clearSketch();
+      setEditingSketchId(null);
+      setSketching(false);
+      setPickingPlane(false);
+      setCurrentFileHandle(picked.handle);
+      setCurrentFileName(picked.file.name);
+      showNotice(`Projeto "${picked.file.name}" aberto.`);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Erro ao abrir o projeto.");
+    }
+  }, [clearSketch, showNotice]);
+
+  const handleExportStep = useCallback(async () => {
+    if (!solidRef.current) return;
+    const blob = solidRef.current.blobSTEP();
+    const result = await saveOrDownload(projectFolder, blob, "modelo.step");
+    showNotice(result === "folder" ? "STEP salvo na pasta selecionada." : "STEP baixado.");
+  }, [projectFolder, showNotice]);
+
+  const handleExportDxf = useCallback(async () => {
+    if (!hasFinishedSketch) return;
+    const blob = new Blob([buildDxf(shapes, points)], { type: "application/dxf" });
+    const result = await saveOrDownload(projectFolder, blob, "esboco.dxf");
+    showNotice(result === "folder" ? "DXF salvo na pasta selecionada." : "DXF baixado.");
+  }, [hasFinishedSketch, shapes, points, projectFolder, showNotice]);
+
+  return (
+    <div className="flex h-dvh flex-col bg-background text-foreground">
+      <header className="flex flex-wrap items-center gap-3 border-b border-chrome-border bg-chrome-bg px-4 py-3 text-chrome-text">
+        <div className="flex items-center gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element -- next/image
+              trava em runtime nesta página (conflito com o Canvas do
+              react-three-fiber) — img simples resolve, e o arquivo já é
+              pequeno o bastante pra não precisar da otimização do Next. */}
+          <img
+            src="/images/Eksteel-logo.png"
+            alt="Eksteel"
+            className="h-9 w-auto object-contain"
+          />
+          <div className="hidden h-7 w-px bg-chrome-border sm:block" />
+          <span
+            className="hidden text-sm font-semibold uppercase tracking-wide text-chrome-text-muted sm:inline"
+            style={{ fontFamily: "var(--font-oswald)" }}
+          >
+            Modelador 3D
+          </span>
+        </div>
+        {currentFileName && (
+          <span
+            className="max-w-[10rem] truncate text-sm font-medium text-chrome-text-muted"
+            title={
+              currentFileHandle
+                ? `Salvando direto em "${currentFileName}"`
+                : `${currentFileName} (baixa de novo a cada "Salvar" — navegador sem File System Access)`
+            }
+          >
+            {currentFileName}
+          </span>
+        )}
+        <span className="text-xs text-chrome-text-subtle">
+          {sketching
+            ? `Modo esboço — ${isBasePlane(activePlane) ? "plano XY" : "face selecionada"}`
+            : "Modo modelo"}
+        </span>
+        {status === "loading" && (
+          <span className="text-xs text-chrome-text-subtle">Gerando…</span>
+        )}
+
+        <div className="ml-auto flex flex-wrap items-center gap-1">
+          <button
+            type="button"
+            onClick={handleSelectFolder}
+            title={projectFolder ? `Pasta do projeto: "${projectFolder.name}" (clique pra trocar)` : "Selecionar pasta do projeto (Chrome/Edge)"}
+            className="max-w-[9rem] truncate rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            {projectFolder ? projectFolder.name : "Selecionar Pasta"}
+          </button>
+          <button
+            type="button"
+            onClick={handleOpenProject}
+            title="Abrir projeto (.eks3d)"
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            Abrir
+          </button>
+          <button
+            type="button"
+            onClick={handleSaveProject}
+            title={
+              currentFileHandle
+                ? `Salvar em "${currentFileHandle.name}" (Ctrl+S)`
+                : "Salvar projeto no formato nativo (.eks3d) (Ctrl+S)"
+            }
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            Salvar
+          </button>
+          <button
+            type="button"
+            onClick={handleSaveProjectAs}
+            title="Salvar como um novo arquivo (Ctrl+Shift+S)"
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            Salvar Como
+          </button>
+          <button
+            type="button"
+            onClick={handleExportStep}
+            disabled={!hasActiveSolid}
+            title={hasActiveSolid ? "Exportar o modelo como STEP" : "Crie um sólido antes de exportar"}
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            STEP
+          </button>
+          <button
+            type="button"
+            onClick={handleExportDxf}
+            disabled={!hasFinishedSketch}
+            title={hasFinishedSketch ? "Exportar o esboço atual como DXF" : "Desenhe um esboço antes de exportar"}
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            DXF
+          </button>
+          <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
+          <button
+            type="button"
+            onClick={undoModel}
+            disabled={!canUndo}
+            title="Desfazer (Ctrl+Z)"
+            className="rounded-lg p-1.5 text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            <IconUndo />
+          </button>
+          <button
+            type="button"
+            onClick={redoModel}
+            disabled={!canRedo}
+            title="Refazer (Ctrl+Y)"
+            className="rounded-lg p-1.5 text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            <IconRedo />
+          </button>
+          {userEmail && (
+            <div className="ml-1 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 py-1 pl-3 pr-1 backdrop-blur-sm">
+              <span className="max-w-[10rem] truncate text-xs font-semibold text-chrome-text-muted">
+                {userEmail}
+              </span>
+              <button
+                type="button"
+                onClick={handleLogout}
+                title="Sair da conta"
+                className="flex items-center gap-1.5 rounded-xl border border-chrome-border bg-chrome-surface-alt px-2.5 py-1.5 text-xs font-semibold text-chrome-text-muted transition hover:bg-chrome-border"
+              >
+                <IconLogout />
+                Sair
+              </button>
+            </div>
+          )}
+        </div>
+      </header>
+
+      <div className="flex items-center gap-x-4 gap-y-2 overflow-x-auto border-b border-primary-100 bg-primary-50 px-4 py-2 text-sm md:flex-wrap md:overflow-visible">
+        {pickingPlane ? (
+          <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+            <span className="shrink-0 text-primary-700">Escolha um plano:</span>
+            {STANDARD_PLANES.map(({ id, label, plane }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => handleUseStandardPlane(plane)}
+                className="shrink-0 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
+              >
+                {label}
+              </button>
+            ))}
+            {features
+              .filter((f): f is Extract<Feature, { type: "plane" }> => f.type === "plane")
+              .map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => handleUseStandardPlane(f.plane)}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 font-semibold text-amber-700 hover:bg-primary-100"
+                >
+                  {f.label}
+                </button>
+              ))}
+            <span className="shrink-0 text-xs text-primary-500">
+              ou clique num plano/face no visualizador 3D
+            </span>
+            <button
+              type="button"
+              onClick={() => setPickingPlane(false)}
+              className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+            >
+              Cancelar
+            </button>
+          </div>
+        ) : creatingPlane && !planeBase ? (
+          <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+            <span className="shrink-0 text-primary-700">Escolha a referência do novo plano:</span>
+            {STANDARD_PLANES.map(({ id, label, plane }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => handleStandardPlanePicked(plane)}
+                className="shrink-0 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
+              >
+                {label}
+              </button>
+            ))}
+            <span className="shrink-0 text-xs text-primary-500">ou clique num plano/face no visualizador 3D</span>
+            <button
+              type="button"
+              onClick={handleCancelPlane}
+              className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+            >
+              Cancelar
+            </button>
+          </div>
+        ) : creatingPlane && planeBase ? (
+          <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+            <span className="shrink-0 text-primary-700">
+              Arraste o plano amarelo no 3D ou digite o deslocamento:
+            </span>
+            <label className="flex shrink-0 items-center gap-1.5 text-primary-700">
+              <input
+                type="number"
+                step={1}
+                value={planeOffset}
+                onChange={(e) => setPlaneOffset(Number(e.target.value))}
+                className="w-20 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+              />
+              mm
+            </label>
+            <button
+              type="button"
+              onClick={handleConfirmPlane}
+              className="shrink-0 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground hover:bg-primary-hover"
+            >
+              Criar Plano
+            </button>
+            <button
+              type="button"
+              onClick={handleCancelPlane}
+              className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+            >
+              Cancelar
+            </button>
+          </div>
+        ) : pickingAxisFace ? (
+          <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+            <span className="shrink-0 text-primary-700">Escolha um eixo:</span>
+            {STANDARD_AXES.map((axis) => (
+              <button
+                key={axis.id}
+                type="button"
+                onClick={() => handleUseStandardAxis(axis)}
+                className="shrink-0 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
+              >
+                {axis.label}
+              </button>
+            ))}
+            <span className="shrink-0 text-xs text-primary-500">
+              ou clique numa face cilíndrica (parede de um furo) ou plana no 3D
+            </span>
+            <button
+              type="button"
+              onClick={() => setPickingAxisFace(false)}
+              className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+            >
+              Cancelar
+            </button>
+          </div>
+        ) : edgeToolMode ? (
+          <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+            <span className="shrink-0 text-primary-700">
+              {edgeToolMode === "fillet" ? "Arredondar" : "Chanfrar"} — clique nas arestas no 3D
+              ({selectedEdgePoints.length} escolhida{selectedEdgePoints.length === 1 ? "" : "s"}):
+            </span>
+            <label className="flex shrink-0 items-center gap-1.5 text-primary-700">
+              {edgeToolMode === "fillet" ? "Raio" : "Distância"}
+              <input
+                type="number"
+                min={0.1}
+                step={0.5}
+                value={edgeToolMode === "fillet" ? filletRadius3d : chamferDistance3d}
+                onChange={(e) =>
+                  edgeToolMode === "fillet"
+                    ? setFilletRadius3d(Number(e.target.value))
+                    : setChamferDistance3d(Number(e.target.value))
+                }
+                className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+              />
+              mm
+            </label>
+            <button
+              type="button"
+              onClick={handleConfirmEdgeTool}
+              disabled={selectedEdgePoints.length === 0}
+              className="shrink-0 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {edgeToolMode === "fillet" ? "Arredondar" : "Chanfrar"}
+            </button>
+            <button
+              type="button"
+              onClick={handleCancelEdgeTool}
+              className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+            >
+              Cancelar
+            </button>
+          </div>
+        ) : flangePicking ? (
+          <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+            {!flangeCandidate ? (
+              <>
+                <span className="shrink-0 text-primary-700">Flange — clique numa aresta reta da chapa no 3D</span>
+                <button
+                  type="button"
+                  onClick={handleCancelFlange}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </>
+            ) : (
+              <>
+                <label className="flex shrink-0 items-center gap-1.5 text-primary-700">
+                  Comprimento
+                  <input
+                    type="number"
+                    min={0.1}
+                    step={1}
+                    value={flangeLength}
+                    onChange={(e) => setFlangeLength(Number(e.target.value))}
+                    className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                  mm
+                </label>
+                <label className="flex shrink-0 items-center gap-1.5 text-primary-700">
+                  Ângulo
+                  <input
+                    type="number"
+                    min={1}
+                    max={180}
+                    step={1}
+                    value={flangeAngle}
+                    onChange={(e) => setFlangeAngle(Number(e.target.value))}
+                    className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                  °
+                </label>
+                <span
+                  className="text-xs text-primary-500"
+                  title="Raio interno = espessura da chapa, externo = 2x — calculado automático, não é escolhido por Flange"
+                >
+                  Raio: {sheetMetalFeature?.thickness}mm (auto)
+                </span>
+                <button
+                  type="button"
+                  onClick={handleConfirmFlange}
+                  className="shrink-0 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground hover:bg-primary-hover"
+                >
+                  Criar Flange
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancelFlange}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </>
+            )}
+          </div>
+        ) : sketching ? (
+          <>
+            <button
+              type="button"
+              onClick={handleFinishSketch}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-primary-800 px-3 py-1.5 font-semibold text-white transition hover:bg-primary-900"
+            >
+              <IconFinish />
+              Concluir Esboço
+            </button>
+            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+            <SketchToolPalette />
+          </>
+        ) : (
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={handleCreateSketch}
+              className="flex items-center gap-1.5 rounded-lg bg-primary-800 px-3 py-1.5 font-semibold text-white transition hover:bg-primary-900"
+            >
+              <IconSketch />
+              Criar Esboço
+            </button>
+            {hasFinishedSketch && (
+              <button
+                type="button"
+                onClick={handleEditSketch}
+                className="rounded-lg bg-white px-3 py-1.5 text-primary-700 hover:bg-primary-100"
+              >
+                Editar Esboço
+              </button>
+            )}
+          </div>
+        )}
+
+        {!sketching && !pickingPlane && !creatingPlane && !pickingAxisFace && !edgeToolMode && !flangePicking && (
+          <>
+            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+
+            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+              <label className="flex items-center gap-1.5 text-primary-700">
+                Profundidade
+                <input
+                  type="number"
+                  min={0.1}
+                  step={1}
+                  value={extrudeDepth}
+                  onChange={(e) => setExtrudeDepth(Number(e.target.value))}
+                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                />
+              </label>
+              <label className="flex items-center gap-1.5 text-primary-700">
+                <input
+                  type="checkbox"
+                  checked={extrudeCut}
+                  onChange={(e) => setExtrudeCut(e.target.checked)}
+                />
+                Corte
+              </label>
+              <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido da extrusão">
+                {(
+                  [
+                    { id: "normal" as const, arrow: "→", title: "Seguindo a normal do plano" },
+                    { id: "flipped" as const, arrow: "←", title: "Sentido invertido" },
+                    { id: "symmetric" as const, arrow: "↔", title: "Simétrico (metade pra cada lado)" },
+                  ]
+                ).map((d) => (
+                  <button
+                    key={d.id}
+                    type="button"
+                    onClick={() => setExtrudeDirection(d.id)}
+                    title={d.title}
+                    className={`rounded px-2 py-1 ${
+                      extrudeDirection === d.id ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
+                    }`}
+                  >
+                    {d.arrow}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={handleAddExtrude}
+                disabled={!profile}
+                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <IconExtrude />
+                Extrudar
+              </button>
+            </div>
+
+            {isSheetMetal && (
+              <>
+                <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+                <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+                  <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido da Face">
+                    {(
+                      [
+                        { id: "normal" as const, arrow: "→", title: "Seguindo a normal do plano" },
+                        { id: "flipped" as const, arrow: "←", title: "Sentido invertido" },
+                        { id: "symmetric" as const, arrow: "↔", title: "Simétrico (metade pra cada lado)" },
+                      ]
+                    ).map((d) => (
+                      <button
+                        key={d.id}
+                        type="button"
+                        onClick={() => setFaceDirection(d.id)}
+                        title={d.title}
+                        className={`rounded px-2 py-1 ${
+                          faceDirection === d.id ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
+                        }`}
+                      >
+                        {d.arrow}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleAddFace}
+                    disabled={!profile}
+                    title={`Extrude do perfil na espessura da chapa (${sheetMetalFeature?.thickness}mm)`}
+                    className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Face
+                  </button>
+                </div>
+              </>
+            )}
+
+            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+
+            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+              <span
+                className={`text-xs ${centerLine ? "text-primary-500" : "text-primary-400"}`}
+                title="Desenhe uma Linha de Centro no sketch pra definir o eixo — sem ela, Revolucionar fica desabilitado."
+              >
+                {centerLine ? "Eixo: linha de centro definida" : "Eixo: sem linha de centro"}
+              </span>
+              <label className="flex items-center gap-1.5 text-primary-700">
+                Ângulo
+                <input
+                  type="number"
+                  min={1}
+                  max={360}
+                  step={1}
+                  value={revolveAngle}
+                  onChange={(e) => setRevolveAngle(Number(e.target.value))}
+                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                />
+              </label>
+              <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido de rotação">
+                {(
+                  [
+                    { value: false, symbol: "↻", title: "Sentido padrão" },
+                    { value: true, symbol: "↺", title: "Sentido invertido" },
+                  ]
+                ).map((d) => (
+                  <button
+                    key={String(d.value)}
+                    type="button"
+                    onClick={() => setRevolveReversed(d.value)}
+                    title={d.title}
+                    className={`rounded px-2 py-1 ${
+                      revolveReversed === d.value ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
+                    }`}
+                  >
+                    {d.symbol}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={handleAddRevolve}
+                disabled={!profile || !centerLine}
+                title={
+                  !centerLine
+                    ? "Desenhe uma Linha de Centro no sketch antes de revolucionar"
+                    : undefined
+                }
+                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <IconRevolve />
+                Revolucionar
+              </button>
+            </div>
+
+            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+
+            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+              <label className="flex items-center gap-1.5 text-primary-700">
+                <input
+                  type="checkbox"
+                  checked={holeThrough}
+                  onChange={(e) => setHoleThrough(e.target.checked)}
+                />
+                Passante
+              </label>
+              <label className="flex items-center gap-1.5 text-primary-700">
+                Profundidade
+                <input
+                  type="number"
+                  min={0.1}
+                  step={1}
+                  value={holeDepth}
+                  disabled={holeThrough}
+                  onChange={(e) => setHoleDepth(Number(e.target.value))}
+                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground disabled:opacity-40"
+                />
+              </label>
+              <div
+                className="flex items-center gap-0.5 rounded-lg bg-white p-0.5 disabled:opacity-40"
+                title={holeThrough ? "Sentido não se aplica a furo passante" : "Sentido do furo"}
+              >
+                {(
+                  [
+                    { id: "normal" as const, arrow: "→", title: "Seguindo a normal do plano" },
+                    { id: "flipped" as const, arrow: "←", title: "Sentido invertido (padrão)" },
+                  ]
+                ).map((d) => (
+                  <button
+                    key={d.id}
+                    type="button"
+                    onClick={() => setHoleDirection(d.id)}
+                    disabled={holeThrough}
+                    title={d.title}
+                    className={`rounded px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40 ${
+                      holeDirection === d.id ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
+                    }`}
+                  >
+                    {d.arrow}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={handleAddHole}
+                disabled={!lastCircle || !hasActiveSolid}
+                title={
+                  !hasActiveSolid
+                    ? "Extrude ou revolucione um sólido antes de furar"
+                    : undefined
+                }
+                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <IconHole />
+                Furo
+              </button>
+            </div>
+
+            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+
+            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+              <label className="flex items-center gap-1.5 text-primary-700">
+                Lado a manter
+                <select
+                  value={splitKeepSide}
+                  onChange={(e) => setSplitKeepSide(e.target.value as "positive" | "negative")}
+                  className="rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                >
+                  <option value="positive">+ (a favor da normal)</option>
+                  <option value="negative">- (contra a normal)</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={handleAddSplit}
+                disabled={!hasActiveSolid}
+                title={!hasActiveSolid ? "Crie um sólido antes de cortar por plano" : undefined}
+                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <IconSplit />
+                Cortar por Plano
+              </button>
+              <label className="flex items-center gap-1.5 text-primary-700">
+                Raio
+                <input
+                  type="number"
+                  min={0.1}
+                  step={0.5}
+                  value={filletRadius3d}
+                  onChange={(e) => setFilletRadius3d(Number(e.target.value))}
+                  title="Raio do arredondamento — pode ajustar antes ou durante a escolha das arestas"
+                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={handleStartFillet}
+                disabled={!hasActiveSolid}
+                title={!hasActiveSolid ? "Crie um sólido antes de arredondar arestas" : "Arredonda uma ou mais arestas do sólido"}
+                className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <IconFillet />
+                Arredondar
+              </button>
+              <label className="flex items-center gap-1.5 text-primary-700">
+                Dist.
+                <input
+                  type="number"
+                  min={0.1}
+                  step={0.5}
+                  value={chamferDistance3d}
+                  onChange={(e) => setChamferDistance3d(Number(e.target.value))}
+                  title="Distância do chanfro — pode ajustar antes ou durante a escolha das arestas"
+                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={handleStartChamfer}
+                disabled={!hasActiveSolid}
+                title={!hasActiveSolid ? "Crie um sólido antes de chanfrar arestas" : "Chanfra uma ou mais arestas do sólido"}
+                className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <IconChamfer />
+                Chanfrar
+              </button>
+            </div>
+
+            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+
+            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+              <button
+                type="button"
+                onClick={handleCreatePlane}
+                className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
+              >
+                Criar Plano
+              </button>
+              <button
+                type="button"
+                onClick={handleCreateAxis}
+                title="Criar eixo X/Y/Z padrão, ou pelo centroide de uma face (cilíndrica: ao longo dela; plana: normal a ela)"
+                className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
+              >
+                Criar Eixo
+              </button>
+            </div>
+
+            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+
+            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+              {!isSheetMetal ? (
+                <>
+                  <label className="flex items-center gap-1.5 text-primary-700">
+                    Espessura
+                    <input
+                      type="number"
+                      min={0.1}
+                      step={0.1}
+                      value={newSheetThickness}
+                      onChange={(e) => setNewSheetThickness(Number(e.target.value))}
+                      className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                    />
+                    mm
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleToggleSheetMetal}
+                    title="Vira a peça inteira em chapa metálica — habilita Face, Flange e Planificar"
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
+                  >
+                    Virar Chapa
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="text-xs text-primary-500">Chapa: {sheetMetalFeature?.thickness}mm</span>
+                  <button
+                    type="button"
+                    onClick={handleStartFlange}
+                    disabled={!hasActiveSolid}
+                    title={!hasActiveSolid ? "Crie uma Face antes de criar uma flange" : "Cria uma dobra a partir de uma aresta reta da chapa"}
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Flange
+                  </button>
+                  {hasFlangeFeature && (
+                    <button
+                      type="button"
+                      onClick={() => setFlattenView((v) => !v)}
+                      title="Alterna entre a peça dobrada (3D) e o padrão planificado (pra corte/DXF)"
+                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-semibold transition ${
+                        flattenView ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
+                      }`}
+                    >
+                      {flattenView ? "Ver Dobrada" : "Planificar"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleToggleSheetMetal}
+                    title="Volta a peça a ser uma peça comum (a geometria já criada continua existindo)"
+                    className="rounded-lg bg-white px-3 py-1.5 text-xs text-primary-500 hover:bg-primary-100"
+                  >
+                    Voltar a ser Peça
+                  </button>
+                </>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {fsAccessSupported === false && (
+        <p className="bg-amber-100 px-4 py-2 text-sm text-amber-900">
+          Seu navegador não suporta gravar direto num arquivo (File System Access) — recurso só de
+          navegadores baseados em Chromium (Chrome, Edge, Opera...); o Firefox e o Safari não têm.
+          "Salvar" vai sempre pedir o nome e baixar um arquivo novo, mesmo com um projeto já aberto.
+          Pra salvar de verdade sem re-perguntar, use Chrome ou Edge.
+        </p>
+      )}
+      {noticeMessage && (
+        <p className="bg-primary-100 px-4 py-2 text-sm text-primary-800">{noticeMessage}</p>
+      )}
+      {sketching && !profile && !lastCircle && (
+        <p className="bg-primary-50 px-4 py-2 text-sm text-primary-700">
+          Desenhe um retângulo, círculo ou contorno fechado de linhas para
+          Extrudar. Para Revolucionar, desenhe também uma Linha de Centro
+          (define o eixo). Um círculo serve para Furo. Clique em "Concluir
+          Esboço" quando terminar.
+        </p>
+      )}
+      {errorMessage && (
+        <p className="bg-error/10 px-4 py-2 text-sm text-error">{errorMessage}</p>
+      )}
+
+      {/* Abaixo de md, os 2 painéis não cabem lado a lado — só um fica
+          visível por vez, trocado pelas abas abaixo. Em md+ os dois
+          continuam lado a lado como sempre. O 3D é o único viewport agora
+          (desenha/seleciona/mede direto nele), então só sobrou Histórico
+          como aba separada. */}
+      <div className="flex shrink-0 border-b border-primary-100 bg-white text-xs md:hidden">
+        {(
+          [
+            { id: "viewer" as const, label: "3D" },
+            { id: "history" as const, label: `Histórico${features.length > 0 ? ` (${features.length})` : ""}` },
+          ]
+        ).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setMobileTab(t.id)}
+            className={`flex-1 border-r border-primary-100 px-2 py-2 font-semibold last:border-r-0 ${
+              mobileTab === t.id
+                ? "bg-primary-800 text-white"
+                : "bg-white text-primary-600 hover:bg-primary-50"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:grid md:grid-cols-[220px_1fr] md:divide-x md:divide-primary-100">
+        <div className={`min-h-0 flex-1 md:order-1 md:!block ${mobileTab === "history" ? "" : "hidden"}`}>
+          <FeatureHistoryPanel
+            features={features}
+            onRemove={removeFeature}
+            onOpenSketch={handleOpenSketch}
+            onEditFeature={handleEditFeature}
+          />
+        </div>
+        <div className={`min-h-0 flex-1 md:order-2 md:!block ${mobileTab === "viewer" ? "" : "hidden"}`}>
+          <Viewer3D
+            mesh={mesh}
+            pickMode={
+              pickingPlane ||
+              pickingAxisFace ||
+              (creatingPlane && !planeBase) ||
+              !!edgeToolMode ||
+              (flangePicking && !flangeCandidate)
+            }
+            onPickPlane={handleFacePicked}
+            onPickStandardPlane={pickingAxisFace || edgeToolMode || flangePicking ? undefined : handleStandardPlanePicked}
+            showPlanePicker={!pickingAxisFace && !edgeToolMode && !flangePicking}
+            linearEdges={flangePicking && !flangeCandidate ? linearEdges : []}
+            onPickLinearEdge={handleFlangeLinePicked}
+            pickModeHint={
+              flangePicking
+                ? "Clique diretamente na aresta reta (linha) da chapa para nascer a flange dali"
+                : edgeToolMode
+                  ? `Clique em uma ou mais arestas do sólido para ${
+                      edgeToolMode === "fillet" ? "arredondar" : "chanfrar"
+                    } (${selectedEdgePoints.length} escolhida${selectedEdgePoints.length === 1 ? "" : "s"}) — clique de novo pra tirar`
+                  : pickingAxisFace
+                    ? "Escolha um eixo X/Y/Z na barra, ou clique numa face cilíndrica (parede de um furo) ou plana"
+                    : creatingPlane
+                      ? "Clique num dos 3 planos ou numa face para usar como referência"
+                      : "Clique num dos 3 planos ou numa face do sólido para esboçar nela"
+            }
+            onExportFaceDxf={handleExportFaceDxf}
+            edgeHighlights={
+              flangeCandidate
+                ? [
+                    [
+                      (flangeCandidate.start[0] + flangeCandidate.end[0]) / 2,
+                      (flangeCandidate.start[1] + flangeCandidate.end[1]) / 2,
+                      (flangeCandidate.start[2] + flangeCandidate.end[2]) / 2,
+                    ],
+                  ]
+                : selectedEdgePoints
+            }
+            sketchOverlay={
+              sketching
+                ? { plane: activePlane, referenceGeometry, interactive: true }
+                : hasFinishedSketch
+                  ? { plane: activePlane, referenceGeometry, interactive: false }
+                  : null
+            }
+            focusPlane={activePlane}
+            focusToken={planeFocusToken}
+            workPlanes={features.filter((f): f is Extract<Feature, { type: "plane" }> => f.type === "plane").map((f) => f.plane)}
+            workAxes={features
+              .filter((f): f is Extract<Feature, { type: "axis" }> => f.type === "axis")
+              .map((f) => ({ origin: f.origin, direction: f.direction }))}
+            planeOffsetDrag={
+              planeBase ? { basePlane: planeBase, offset: planeOffset, onOffsetChange: setPlaneOffset } : null
+            }
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FeatureHistoryPanel({
+  features,
+  onRemove,
+  onOpenSketch,
+  onEditFeature,
+}: {
+  features: Feature[];
+  onRemove: (id: string) => void;
+  onOpenSketch: (feature: Extract<Feature, { type: "sketch" }>) => void;
+  onEditFeature: (feature: Feature) => void;
+}) {
+  return (
+    <div className="flex h-full flex-col overflow-y-auto bg-primary-50 p-3">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-primary-500">
+        Histórico
+      </h2>
+      {features.length === 0 && (
+        <p className="text-xs text-primary-400">Nenhuma operação ainda.</p>
+      )}
+      <ul className="space-y-1.5">
+        {features.map((feature, index) => {
+          const badge = FEATURE_BADGE[feature.type];
+          return (
+            <li
+              key={feature.id}
+              className="flex items-center gap-2 rounded-lg bg-white px-2 py-1.5 text-xs text-primary-800 shadow-sm"
+            >
+              <span
+                className={`flex h-5 w-6 shrink-0 items-center justify-center rounded text-[10px] font-bold ${badge.className}`}
+              >
+                {badge.label}
+              </span>
+              <button
+                type="button"
+                onClick={() => (feature.type === "sketch" ? onOpenSketch(feature) : onEditFeature(feature))}
+                title={feature.type === "sketch" ? "Reabrir esboço para editar" : "Editar parâmetros"}
+                className="flex-1 truncate text-left hover:underline"
+              >
+                {index + 1}. {feature.label}
+              </button>
+              <button
+                type="button"
+                onClick={() => onRemove(feature.id)}
+                aria-label="Remover operação"
+                className="text-primary-400 hover:text-error"
+              >
+                ×
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}

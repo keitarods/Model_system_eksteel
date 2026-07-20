@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+:root {
+  /* Extraído de Eksteel_system/src/app/globals.css (idêntico). */
+  --background: #f0f7ff;
+  --foreground: #0d1b2a;
+
+  /* Extraído de Eksteel_system/src/app/(auth)/login/page.tsx — escala
+     "Blue Grey" do Material Design usada nos botões/bordas/superfícies
+     (#546E7A, #90A4AE, #ECEFF1, #37474F, #607D8B eram usados como classes
+     arbitrárias soltas). Ramp completa abaixo preenchida com os mesmos
+     valores padrão dessa escala — nenhum matiz novo foi inventado. */
+  --primary-50: #eceff1;
+  --primary-100: #cfd8dc;
+  --primary-200: #b0bec5;
+  --primary-300: #90a4ae;
+  --primary-400: #78909c;
+  --primary-500: #607d8b;
+  --primary-600: #546e7a;
+  --primary-700: #455a64;
+  --primary-800: #37474f;
+  --primary-900: #263238;
+
+  --primary: var(--primary-600);
+  --primary-hover: var(--primary-800);
+  --primary-foreground: #ffffff;
+
+  /* Gestão não define uma 2ª cor de marca — não inventamos matiz nova.
+     Secondary reaproveita um tom mais claro da mesma escala primary. */
+  --secondary: var(--primary-300);
+  --secondary-foreground: var(--primary-900);
+
+  /* Estados: mesmas famílias (emerald/amber/red) já usadas soltas nas
+     classes Tailwind do gestão, agora formalizadas como tokens nomeados. */
+  --success: var(--color-emerald-600);
+  --warning: var(--color-amber-600);
+  --error: var(--color-red-600);
+
+  /* "Chrome" escuro — extraído de Eksteel_system/src/app/(app)/{app,dashboard}
+     (o header/cartão de usuário do sistema de gestão, não a área de
+     trabalho em si). Usado só no header/topbar do modelador pra dar a
+     mesma cara das outras ferramentas Eksteel; a área de esboço/3D
+     continua clara (melhor contraste pra enxergar a geometria). */
+  --chrome-bg: #1e1e1e;
+  --chrome-surface: #212121;
+  --chrome-surface-alt: #2a2a2a;
+  --chrome-border: #333333;
+  --chrome-text: #eceff1;
+  --chrome-text-muted: #90a4ae;
+  --chrome-text-subtle: #78909c;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-primary-50: var(--primary-50);
+  --color-primary-100: var(--primary-100);
+  --color-primary-200: var(--primary-200);
+  --color-primary-300: var(--primary-300);
+  --color-primary-400: var(--primary-400);
+  --color-primary-500: var(--primary-500);
+  --color-primary-600: var(--primary-600);
+  --color-primary-700: var(--primary-700);
+  --color-primary-800: var(--primary-800);
+  --color-primary-900: var(--primary-900);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+
+  --color-chrome-bg: var(--chrome-bg);
+  --color-chrome-surface: var(--chrome-surface);
+  --color-chrome-surface-alt: var(--chrome-surface-alt);
+  --color-chrome-border: var(--chrome-border);
+  --color-chrome-text: var(--chrome-text);
+  --color-chrome-text-muted: var(--chrome-text-muted);
+  --color-chrome-text-subtle: var(--chrome-text-subtle);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-oswald);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0d1b2a;
+    --foreground: #f0f7ff;
+
+    --primary: var(--primary-300);
+    --primary-hover: var(--primary-100);
+    --primary-foreground: var(--primary-900);
+
+    --secondary: var(--primary-700);
+    --secondary-foreground: var(--primary-50);
+
+    --success: var(--color-emerald-400);
+    --warning: var(--color-amber-400);
+    --error: var(--color-red-400);
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
