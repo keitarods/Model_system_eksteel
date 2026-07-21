@@ -49,6 +49,9 @@ export type RevolveFeature = {
   // Inverte o sentido de rotação em torno do eixo. Opcional por
   // compatibilidade com projetos salvos antes desse campo existir.
   reversed?: boolean;
+  // true = corta o sólido ativo com o volume revolucionado, em vez de somar
+  // (igual o "cut" do Extrudar). Opcional por compatibilidade.
+  cut?: boolean;
 };
 
 export type HoleFeature = {
@@ -145,6 +148,11 @@ export type SheetMetalFeature = {
 // NUNCA é escolhida por operação — é sempre a espessura da chapa ativa
 // (lida da SheetMetalFeature no momento da reconstrução), pra toda a peça
 // manter espessura consistente como uma chapa de verdade.
+// "cut" (Inventor "Cut" no ambiente de chapa): mesma extrusão na espessura
+// da chapa ativa, mas SUBTRAI em vez de somar — recorta a chapa com o
+// perfil desenhado (furo/rasgo de qualquer formato, não só círculo como o
+// Furo). Opcional por compatibilidade; ausência = soma (comportamento
+// original da Face).
 export type FaceFeature = {
   id: string;
   type: "face";
@@ -152,6 +160,7 @@ export type FaceFeature = {
   profile: NonNullable<ProfileSource>;
   plane: SketchPlane;
   direction?: ExtrudeDirection;
+  cut?: boolean;
 };
 
 // Dobra (Inventor "Flange"): nasce de uma aresta reta já existente da

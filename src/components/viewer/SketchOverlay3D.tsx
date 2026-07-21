@@ -7,7 +7,15 @@ import * as THREE from "three";
 import { localToWorldPoint, worldToLocalPoint } from "@/lib/replicad/plane";
 import { planeBasisQuaternion } from "./planeBasis";
 import { useSketchStore } from "@/lib/sketch/store";
-import { resolveDimension, resolveShape, draftPreviewFor, sampleMinorArc, type RenderableShape } from "@/lib/sketch/render";
+import {
+  resolveDimension,
+  resolveShape,
+  draftPreviewFor,
+  sampleMinorArc,
+  perpendicularDistanceToLine,
+  slotOutline,
+  type RenderableShape,
+} from "@/lib/sketch/render";
 import type { SketchPlane, SketchPoint } from "@/lib/sketch/types";
 
 // Fase 2 da fusão 2D/3D: além de mostrar o esboço ao vivo projetado no
@@ -169,6 +177,12 @@ function DimensionLabel({
 }
 
 function renderableToThree(shape: RenderableShape, toWorld: (p: LocalPoint) => Vec3, color: string, dashed = false) {
+  if (shape.kind === "slot") {
+    const pts = slotOutline(shape.c1x, shape.c1y, shape.c2x, shape.c2y, shape.r).map(toWorld);
+    return <Line points={pts} color={color} lineWidth={1.5} dashed={dashed} dashSize={dashed ? 4 : undefined} gapSize={dashed ? 3 : undefined} />;
+  }
+
+
   if (shape.kind === "point") {
     return (
       <mesh position={toWorld({ x: shape.cx, y: shape.cy })}>
@@ -233,6 +247,8 @@ export function SketchOverlay3D({
   const draftPoint = useSketchStore((s) => s.draftPoint);
   const selectedShapeId = useSketchStore((s) => s.selectedShapeId);
   const pendingConstraint = useSketchStore((s) => s.pendingConstraint);
+  const pendingSlot = useSketchStore((s) => s.pendingSlot);
+  const dimensionPick1 = useSketchStore((s) => s.dimensionPick1);
   const snapIndicator = useSketchStore((s) => s.snapIndicator);
   const dragPreview = useSketchStore((s) => s.dragPreview);
   const dragRadiusPreview = useSketchStore((s) => s.dragRadiusPreview);
@@ -279,7 +295,8 @@ export function SketchOverlay3D({
         const resolved = resolveShape(shape, renderPoints);
         if (!resolved) return null;
         const isPendingFirst = interactive && pendingConstraint?.kind !== "joinPoints" && pendingConstraint?.firstId === shape.id;
-        const selected = interactive && (shape.id === selectedShapeId || isPendingFirst);
+        const isPendingEdge = interactive && dimensionPick1?.shapeId === shape.id;
+        const selected = interactive && (shape.id === selectedShapeId || isPendingFirst || isPendingEdge);
         return (
           <group key={shape.id}>{renderableToThree(resolved, toWorld, selected ? SELECTED_COLOR : GEOMETRY_COLOR)}</group>
         );
@@ -354,6 +371,60 @@ export function SketchOverlay3D({
       )}
 
       {interactive && draftShape && <group>{renderableToThree(draftShape, toWorld, DRAFT_COLOR, true)}</group>}
+
+      {interactive && pendingSlot?.kind === "centerToCenter" && renderPoints[pendingSlot.center1Id] && (
+        <group>
+          <mesh position={toWorld(renderPoints[pendingSlot.center1Id])}>
+            <sphereGeometry args={[2, 12, 12]} />
+            <meshBasicMaterial color={SELECTED_COLOR} wireframe />
+          </mesh>
+          {draftPoint && (
+            <Line
+              points={[toWorld(renderPoints[pendingSlot.center1Id]), toWorld(draftPoint)]}
+              color={DRAFT_COLOR}
+              lineWidth={1}
+              dashed
+              dashSize={3}
+              gapSize={2}
+            />
+          )}
+        </group>
+      )}
+
+      {interactive && pendingSlot?.kind === "centerPoint" && (
+        <group>
+          <mesh position={toWorld(pendingSlot.midpoint)}>
+            <sphereGeometry args={[2, 12, 12]} />
+            <meshBasicMaterial color={SELECTED_COLOR} wireframe />
+          </mesh>
+          {draftPoint && (
+            <Line
+              points={[toWorld(pendingSlot.midpoint), toWorld(draftPoint)]}
+              color={DRAFT_COLOR}
+              lineWidth={1}
+              dashed
+              dashSize={3}
+              gapSize={2}
+            />
+          )}
+        </group>
+      )}
+
+      {interactive &&
+        pendingSlot?.kind === "ready" &&
+        draftPoint &&
+        renderPoints[pendingSlot.center1Id] &&
+        renderPoints[pendingSlot.center2Id] &&
+        (() => {
+          const c1 = renderPoints[pendingSlot.center1Id];
+          const c2 = renderPoints[pendingSlot.center2Id];
+          const radius = perpendicularDistanceToLine(draftPoint, c1, c2);
+          return (
+            <group>
+              {renderableToThree({ kind: "slot", c1x: c1.x, c1y: c1.y, c2x: c2.x, c2y: c2.y, r: radius }, toWorld, DRAFT_COLOR, true)}
+            </group>
+          );
+        })()}
 
       {interactive && snapIndicator && (
         <mesh position={toWorld(snapIndicator)}>

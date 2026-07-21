@@ -20,6 +20,8 @@ export const SKETCH_TOOLS: { id: SketchTool; label: string; shortcut: string }[]
   { id: "tangent", label: "Tangente", shortcut: "T" },
   { id: "fillet2d", label: "Concordância", shortcut: "F" },
   { id: "chamfer2d", label: "Chanfro", shortcut: "B" },
+  { id: "slotCenterToCenter", label: "Rasgo (centro a centro)", shortcut: "G" },
+  { id: "slotCenterPoint", label: "Rasgo (ponto central)", shortcut: "K" },
 ];
 
 export const SHORTCUT_TO_TOOL: Record<string, SketchTool> = Object.fromEntries(
@@ -30,7 +32,7 @@ export const SHORTCUT_TO_TOOL: Record<string, SketchTool> = Object.fromEntries(
 // "achatada" SKETCH_TOOLS continua sendo a fonte de verdade dos atalhos.
 export const TOOL_GROUPS: SketchTool[][] = [
   ["select"],
-  ["line", "centerline", "rect", "circle"],
+  ["line", "centerline", "rect", "circle", "slotCenterToCenter", "slotCenterPoint"],
   ["measure", "dimension"],
   ["point", "joinPoints", "horizontal", "vertical", "perpendicular", "tangent"],
   ["fillet2d", "chamfer2d"],
@@ -58,3 +60,9 @@ export const CLICK_TOOLS = new Set<SketchTool>([
   "fillet2d",
   "chamfer2d",
 ]);
+
+// Rasgo: híbrido clique+clique+arrasto (2 pontos definem o eixo/espelho,
+// o 3º passo — arrasto — define o raio) — não se encaixa nem em
+// DRAG_TOOLS (só 1 arrasto) nem em CLICK_TOOLS (nenhum arrasto), por isso
+// tem um conjunto próprio, tratado à parte em handleRawDown/Move/Up.
+export const SLOT_TOOLS = new Set<SketchTool>(["slotCenterToCenter", "slotCenterPoint"]);

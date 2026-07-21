@@ -19,6 +19,8 @@ import {
   IconTangent,
   IconFillet,
   IconChamfer,
+  IconSlotCenterToCenter,
+  IconSlotCenterPoint,
 } from "@/components/icons/ToolIcons";
 import type { SketchTool } from "@/lib/sketch/types";
 
@@ -38,6 +40,8 @@ const ICONS: Record<SketchTool, ComponentType<{ className?: string }>> = {
   tangent: IconTangent,
   fillet2d: IconFillet,
   chamfer2d: IconChamfer,
+  slotCenterToCenter: IconSlotCenterToCenter,
+  slotCenterPoint: IconSlotCenterPoint,
 };
 
 // Ribbon horizontal de ferramentas — ao estilo Inventor/SolidWorks/Fusion
@@ -52,6 +56,7 @@ export function SketchToolPalette({ className = "" }: { className?: string }) {
   const setFilletRadius = useSketchStore((s) => s.setFilletRadius);
   const chamferDistance = useSketchStore((s) => s.chamferDistance);
   const setChamferDistance = useSketchStore((s) => s.setChamferDistance);
+  const pendingSlot = useSketchStore((s) => s.pendingSlot);
 
   return (
     <div className={`flex flex-nowrap items-center gap-1 overflow-x-auto md:flex-wrap ${className}`}>
@@ -80,6 +85,19 @@ export function SketchToolPalette({ className = "" }: { className?: string }) {
             className="w-16 rounded border border-primary-200 px-1 py-0.5 text-right"
           />
         </label>
+      )}
+      {(tool === "slotCenterToCenter" || tool === "slotCenterPoint") && (
+        <span className="shrink-0 rounded-lg bg-primary-50 px-2 py-1 text-xs text-primary-700">
+          {!pendingSlot
+            ? tool === "slotCenterToCenter"
+              ? "Clique no 1º centro do rasgo"
+              : "Clique no ponto médio do rasgo"
+            : pendingSlot.kind === "ready"
+              ? "Arraste para definir a largura"
+              : tool === "slotCenterToCenter"
+                ? "Clique no 2º centro"
+                : "Clique numa extremidade"}
+        </span>
       )}
       {TOOL_GROUPS.map((group, gi) => (
         <div key={gi} className="flex shrink-0 items-center gap-1">

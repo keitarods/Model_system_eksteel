@@ -238,3 +238,25 @@ export function IconLogout({ className }: IconProps) {
     </svg>
   );
 }
+
+// Rasgo oblongado (stadium) — mesmo glifo base pras duas variantes, só o
+// marcador de ponto muda: um em cada centro (centro a centro) vs. um só no
+// meio (ponto central, espelha pro outro lado).
+export function IconSlotCenterToCenter({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M7 5.5a4.5 4.5 0 1 0 0 9h6a4.5 4.5 0 1 0 0-9z" />
+      <circle cx="7" cy="10" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="13" cy="10" r="0.9" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function IconSlotCenterPoint({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M7 5.5a4.5 4.5 0 1 0 0 9h6a4.5 4.5 0 1 0 0-9z" />
+      <circle cx="10" cy="10" r="0.9" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}

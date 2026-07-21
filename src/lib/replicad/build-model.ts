@@ -220,7 +220,7 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
       chains.set(feature.id, []);
       const built = buildFaceSolid(feature, sheetThickness);
       if (!built) continue;
-      mergeInto(built, false);
+      mergeInto(built, !!feature.cut);
       continue;
     }
 
@@ -298,7 +298,7 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
         : buildRevolveSolid(feature);
 
     if (!built) continue;
-    mergeInto(built, feature.type === "extrude" && feature.cut);
+    mergeInto(built, !!feature.cut);
   }
 
   shadow?.delete();

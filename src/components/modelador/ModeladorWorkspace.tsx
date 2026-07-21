@@ -129,6 +129,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // o valor sugerido pro campo de "Virar Chapa" antes de existir uma.
   const [newSheetThickness, setNewSheetThickness] = useState(2);
   const [faceDirection, setFaceDirection] = useState<ExtrudeDirection>("normal");
+  // "Cut" da chapa (Inventor): mesma extrusão da Face, na espessura da
+  // chapa, mas subtraindo — recorta a chapa com o perfil desenhado.
+  const [faceCut, setFaceCut] = useState(false);
   // Flange: clique direto na LINHA de uma aresta reta da chapa (ao estilo
   // Inventor — ver LinearEdgePicker3D em Viewer3D.tsx), não mais na face —
   // flangeCandidate guarda a aresta exata enquanto os parâmetros (ângulo,
@@ -150,6 +153,68 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // O 3D agora é o único viewport (desenhar/selecionar funciona nele
   // direto), então não existe mais uma aba "Esboço" separada.
   const [mobileTab, setMobileTab] = useState<"viewer" | "history">("viewer");
+
+  // Largura da árvore de histórico em md+ (px), ajustável arrastando a
+  // divisória entre ela e o 3D — ao estilo do painel do modelo do Inventor.
+  // Só faz sentido em md+ (abaixo disso os 2 painéis nunca ficam lado a
+  // lado, um de cada vez via mobileTab) — por isso o style inline com essa
+  // largura só é aplicado quando isDesktop, senão atropelaria o layout
+  // empilhado (largura cheia) do mobile.
+  const [historyPanelWidth, setHistoryPanelWidth] = useState(220);
+  const [isDesktop, setIsDesktop] = useState(false);
+
+  useEffect(() => {
+    const mql = window.matchMedia("(min-width: 768px)");
+    const update = () => setIsDesktop(mql.matches);
+    update();
+    mql.addEventListener("change", update);
+    return () => mql.removeEventListener("change", update);
+  }, []);
+
+  const handleHistoryResizeStart = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = historyPanelWidth;
+
+      function handleMove(moveEvent: PointerEvent) {
+        const next = startWidth + (moveEvent.clientX - startX);
+        setHistoryPanelWidth(Math.min(480, Math.max(160, next)));
+      }
+      function handleUp() {
+        window.removeEventListener("pointermove", handleMove);
+        window.removeEventListener("pointerup", handleUp);
+      }
+      window.addEventListener("pointermove", handleMove);
+      window.addEventListener("pointerup", handleUp);
+    },
+    [historyPanelWidth]
+  );
+
+  // Altura da barra de ferramentas principal, ajustável arrastando a
+  // divisória logo abaixo dela — mesma ideia da largura da árvore de
+  // histórico. 96 = altura inicial (equivalente ao antigo max-h-24 fixo).
+  const [toolbarHeight, setToolbarHeight] = useState(96);
+
+  const handleToolbarResizeStart = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startHeight = toolbarHeight;
+
+      function handleMove(moveEvent: PointerEvent) {
+        const next = startHeight + (moveEvent.clientY - startY);
+        setToolbarHeight(Math.min(320, Math.max(40, next)));
+      }
+      function handleUp() {
+        window.removeEventListener("pointermove", handleMove);
+        window.removeEventListener("pointerup", handleUp);
+      }
+      window.addEventListener("pointermove", handleMove);
+      window.addEventListener("pointerup", handleUp);
+    },
+    [toolbarHeight]
+  );
 
   useSketchKeyboardShortcuts();
   // Qual SketchFeature da árvore o esboço ao vivo representa — null quando é
@@ -185,6 +250,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const [extrudeDirection, setExtrudeDirection] = useState<ExtrudeDirection>("normal");
   const [revolveAngle, setRevolveAngle] = useState(360);
   const [revolveReversed, setRevolveReversed] = useState(false);
+  const [revolveCut, setRevolveCut] = useState(false);
   const [holeThrough, setHoleThrough] = useState(true);
   const [holeDepth, setHoleDepth] = useState(10);
   // "flipped" reproduz o comportamento que o furo cego sempre teve (entra
@@ -192,6 +258,18 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // quem já usava a ferramenta antes desse controle existir.
   const [holeDirection, setHoleDirection] = useState<"normal" | "flipped">("flipped");
   const [splitKeepSide, setSplitKeepSide] = useState<"positive" | "negative">("positive");
+
+  // Qual ferramenta de criar feature está com o "diálogo" de parâmetros
+  // aberto (ao estilo Inventor: clicar no ícone abre uma telinha só com os
+  // campos daquela ferramenta, em vez de mostrar TODAS as ferramentas com
+  // todos os campos ao mesmo tempo, o que era o principal motivo da barra
+  // de ferramentas ocupar tanto espaço). null = grade compacta de botões
+  // (estado ocioso). Cada handleAdd* fecha o diálogo (volta pra null) só
+  // quando a feature é criada com sucesso — se cair num early return
+  // (validação), o diálogo continua aberto com a mensagem de erro visível.
+  const [featureToolMode, setFeatureToolMode] = useState<
+    "extrude" | "face" | "revolve" | "hole" | "split" | null
+  >(null);
 
   const [mesh, setMesh] = useState<ShapeMesh | null>(null);
   // Arestas do sólido ativo em coordenadas de mundo (flat, pares de pontos
@@ -595,21 +673,30 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   }, [sheetMetalFeature, newSheetThickness, addFeature, removeFeature, showNotice]);
 
   // "Face" (Inventor): igual Extrudar, mas a profundidade é sempre a
-  // espessura da chapa ativa, nunca escolhida aqui.
+  // espessura da chapa ativa, nunca escolhida aqui. Com "Corte" marcado,
+  // vira o "Cut" do Inventor: mesma extrusão, mas recorta em vez de somar.
   const handleAddFace = useCallback(() => {
     if (!profile || !sheetMetalFeature) return;
+    if (faceCut && !hasActiveSolid) {
+      setErrorMessage(
+        "Não há chapa ativa para recortar — desmarque “Corte” ou crie a Face base primeiro."
+      );
+      return;
+    }
     const arrow = faceDirection === "flipped" ? " ←" : faceDirection === "symmetric" ? " ↔" : " →";
     addFeature({
       id: createId(),
       type: "face",
-      label: `Face ${sheetMetalFeature.thickness}mm${arrow}`,
+      label: `Face ${sheetMetalFeature.thickness}mm${faceCut ? " (corte)" : ""}${arrow}`,
       profile,
       plane: activePlane,
       direction: faceDirection,
+      cut: faceCut,
     });
     clearSketch();
     setEditingSketchId(null);
-  }, [profile, sheetMetalFeature, faceDirection, activePlane, addFeature, clearSketch]);
+    setFeatureToolMode(null);
+  }, [profile, sheetMetalFeature, faceDirection, faceCut, hasActiveSolid, activePlane, addFeature, clearSketch]);
 
   const handleStartFlange = useCallback(() => {
     setFlangePicking(true);
@@ -814,24 +901,33 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     });
     clearSketch();
     setEditingSketchId(null);
+    setFeatureToolMode(null);
   }, [profile, extrudeCut, extrudeDepth, extrudeDirection, hasActiveSolid, activePlane, addFeature, clearSketch]);
 
   const handleAddRevolve = useCallback(() => {
     if (!profile || !centerLine) return;
+    if (revolveCut && !hasActiveSolid) {
+      setErrorMessage(
+        "Não há sólido ativo para cortar — desmarque “Corte” ou crie um sólido primeiro."
+      );
+      return;
+    }
     addFeature({
       id: createId(),
       type: "revolve",
-      label: `Revolução ${revolveAngle}° ${revolveReversed ? "↺" : "↻"}`,
+      label: `Revolução ${revolveAngle}° ${revolveReversed ? "↺" : "↻"}${revolveCut ? " (corte)" : ""}`,
       profile,
       plane: activePlane,
       axisOrigin: centerLine.origin,
       axisDirection: centerLine.direction,
       angle: revolveAngle,
       reversed: revolveReversed,
+      cut: revolveCut,
     });
     clearSketch();
     setEditingSketchId(null);
-  }, [profile, centerLine, revolveAngle, revolveReversed, activePlane, addFeature, clearSketch]);
+    setFeatureToolMode(null);
+  }, [profile, centerLine, revolveAngle, revolveReversed, revolveCut, hasActiveSolid, activePlane, addFeature, clearSketch]);
 
   const handleAddHole = useCallback(() => {
     if (!lastCircle || !hasActiveSolid) return;
@@ -850,6 +946,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     });
     clearSketch();
     setEditingSketchId(null);
+    setFeatureToolMode(null);
   }, [lastCircle, hasActiveSolid, holeThrough, holeDepth, holeDirection, activePlane, addFeature, clearSketch]);
 
   // Edição de feature já aplicada via prompts sequenciais — mesmo padrão já
@@ -909,11 +1006,19 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         );
         const reversed = toggleReversed ? !currentReversed : currentReversed;
 
+        const toggleCut = window.confirm(
+          `Corte está ${feature.cut ? "ativado" : "desativado"}. OK para ${
+            feature.cut ? "desativar" : "ativar"
+          }, Cancelar para manter.`
+        );
+        const cut = toggleCut ? !feature.cut : feature.cut;
+
         updateFeature(feature.id, {
           ...feature,
           angle,
           reversed,
-          label: `Revolução ${angle}° ${reversed ? "↺" : "↻"}`,
+          cut,
+          label: `Revolução ${angle}° ${reversed ? "↺" : "↻"}${cut ? " (corte)" : ""}`,
         });
         return;
       }
@@ -1017,10 +1122,19 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         );
         const direction = cycleDirection ? next : current;
         const arrow = direction === "flipped" ? " ←" : direction === "symmetric" ? " ↔" : " →";
+
+        const toggleCut = window.confirm(
+          `Corte está ${feature.cut ? "ativado" : "desativado"}. OK para ${
+            feature.cut ? "desativar" : "ativar"
+          }, Cancelar para manter.`
+        );
+        const cut = toggleCut ? !feature.cut : feature.cut;
+
         updateFeature(feature.id, {
           ...feature,
           direction,
-          label: `Face${sheetMetalFeature ? ` ${sheetMetalFeature.thickness}mm` : ""}${arrow}`,
+          cut,
+          label: `Face${sheetMetalFeature ? ` ${sheetMetalFeature.thickness}mm` : ""}${cut ? " (corte)" : ""}${arrow}`,
         });
         return;
       }
@@ -1074,6 +1188,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       plane: activePlane,
       keepSide: splitKeepSide,
     });
+    setFeatureToolMode(null);
   }, [hasActiveSolid, activePlane, splitKeepSide, addFeature]);
 
   const handleLogout = useCallback(async () => {
@@ -1202,7 +1317,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
   return (
     <div className="flex h-dvh flex-col bg-background text-foreground">
-      <header className="flex flex-wrap items-center gap-3 border-b border-chrome-border bg-chrome-bg px-4 py-3 text-chrome-text">
+      <header className="flex flex-wrap items-center gap-3 border-b border-chrome-border bg-chrome-bg px-4 py-2 text-chrome-text">
         <div className="flex items-center gap-3">
           {/* eslint-disable-next-line @next/next/no-img-element -- next/image
               trava em runtime nesta página (conflito com o Canvas do
@@ -1335,7 +1450,16 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         </div>
       </header>
 
-      <div className="flex items-center gap-x-4 gap-y-2 overflow-x-auto border-b border-primary-100 bg-primary-50 px-4 py-2 text-sm md:flex-wrap md:overflow-visible">
+      {/* Altura ajustável (arraste a divisória logo abaixo) — sem isso, o
+          modo "ocioso" (que empilha Extrudar+Face+Revolucionar+Furo+Split/
+          Fillet/Chanfro+Plano/Eixo+Chapa juntos, cada um com seus próprios
+          campos) podia quebrar em 5-7 linhas e empurrar a área 3D quase pra
+          fora da tela. O scroll-y entra em ação quando o conteúdo passa da
+          altura ajustada — os outros modos (escolher plano, esboçando,
+          arestas etc.) já são compactos e raramente chegam perto do limite. */}
+      <div
+        style={{ height: toolbarHeight }}
+        className="flex items-center gap-x-4 gap-y-1.5 overflow-x-auto overflow-y-auto border-b border-primary-100 bg-primary-50 px-4 py-1.5 text-sm md:flex-wrap md:overflow-x-visible">
         {pickingPlane ? (
           <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
             <span className="shrink-0 text-primary-700">Escolha um plano:</span>
@@ -1588,370 +1712,474 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           <>
             <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
 
-            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
-              <label className="flex items-center gap-1.5 text-primary-700">
-                Profundidade
-                <input
-                  type="number"
-                  min={0.1}
-                  step={1}
-                  value={extrudeDepth}
-                  onChange={(e) => setExtrudeDepth(Number(e.target.value))}
-                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
-                />
-              </label>
-              <label className="flex items-center gap-1.5 text-primary-700">
-                <input
-                  type="checkbox"
-                  checked={extrudeCut}
-                  onChange={(e) => setExtrudeCut(e.target.checked)}
-                />
-                Corte
-              </label>
-              <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido da extrusão">
-                {(
-                  [
-                    { id: "normal" as const, arrow: "→", title: "Seguindo a normal do plano" },
-                    { id: "flipped" as const, arrow: "←", title: "Sentido invertido" },
-                    { id: "symmetric" as const, arrow: "↔", title: "Simétrico (metade pra cada lado)" },
-                  ]
-                ).map((d) => (
-                  <button
-                    key={d.id}
-                    type="button"
-                    onClick={() => setExtrudeDirection(d.id)}
-                    title={d.title}
-                    className={`rounded px-2 py-1 ${
-                      extrudeDirection === d.id ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
-                    }`}
-                  >
-                    {d.arrow}
-                  </button>
-                ))}
+            {/* Ao estilo Inventor: clicar num ícone abre uma "telinha" só com
+                os campos daquela ferramenta (featureToolMode), em vez de
+                mostrar Extrudar+Face+Revolucionar+Furo+Cortar por Plano
+                todos ao mesmo tempo com todos os campos — isso sozinho já
+                era a maior fonte de altura da barra. Fillet/Chamfer/Plano/
+                Eixo/Chapa continuam na grade ociosa (já são compactos, e
+                Fillet/Chamfer já abrem sua própria telinha de escolha de
+                aresta ao clicar — ver edgeToolMode acima). */}
+            {featureToolMode === "extrude" ? (
+              <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+                <span className="shrink-0 font-semibold text-primary-800">Extrudar</span>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Profundidade
+                  <input
+                    type="number"
+                    min={0.1}
+                    step={1}
+                    value={extrudeDepth}
+                    onChange={(e) => setExtrudeDepth(Number(e.target.value))}
+                    className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  <input
+                    type="checkbox"
+                    checked={extrudeCut}
+                    onChange={(e) => setExtrudeCut(e.target.checked)}
+                  />
+                  Corte
+                </label>
+                <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido da extrusão">
+                  {(
+                    [
+                      { id: "normal" as const, arrow: "→", title: "Seguindo a normal do plano" },
+                      { id: "flipped" as const, arrow: "←", title: "Sentido invertido" },
+                      { id: "symmetric" as const, arrow: "↔", title: "Simétrico (metade pra cada lado)" },
+                    ]
+                  ).map((d) => (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => setExtrudeDirection(d.id)}
+                      title={d.title}
+                      className={`rounded px-2 py-1 ${
+                        extrudeDirection === d.id ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
+                      }`}
+                    >
+                      {d.arrow}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddExtrude}
+                  disabled={!profile}
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconExtrude />
+                  Extrudar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode(null)}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={handleAddExtrude}
-                disabled={!profile}
-                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <IconExtrude />
-                Extrudar
-              </button>
-            </div>
-
-            {isSheetMetal && (
-              <>
-                <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
-                <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
-                  <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido da Face">
-                    {(
-                      [
-                        { id: "normal" as const, arrow: "→", title: "Seguindo a normal do plano" },
-                        { id: "flipped" as const, arrow: "←", title: "Sentido invertido" },
-                        { id: "symmetric" as const, arrow: "↔", title: "Simétrico (metade pra cada lado)" },
-                      ]
-                    ).map((d) => (
-                      <button
-                        key={d.id}
-                        type="button"
-                        onClick={() => setFaceDirection(d.id)}
-                        title={d.title}
-                        className={`rounded px-2 py-1 ${
-                          faceDirection === d.id ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
-                        }`}
-                      >
-                        {d.arrow}
-                      </button>
-                    ))}
-                  </div>
+            ) : featureToolMode === "face" ? (
+              <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+                <span className="shrink-0 font-semibold text-primary-800">Face</span>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  <input
+                    type="checkbox"
+                    checked={faceCut}
+                    onChange={(e) => setFaceCut(e.target.checked)}
+                  />
+                  Corte
+                </label>
+                <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido da Face">
+                  {(
+                    [
+                      { id: "normal" as const, arrow: "→", title: "Seguindo a normal do plano" },
+                      { id: "flipped" as const, arrow: "←", title: "Sentido invertido" },
+                      { id: "symmetric" as const, arrow: "↔", title: "Simétrico (metade pra cada lado)" },
+                    ]
+                  ).map((d) => (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => setFaceDirection(d.id)}
+                      title={d.title}
+                      className={`rounded px-2 py-1 ${
+                        faceDirection === d.id ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
+                      }`}
+                    >
+                      {d.arrow}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddFace}
+                  disabled={!profile}
+                  title={
+                    faceCut
+                      ? `Recorta a chapa com o perfil, na espessura ativa (${sheetMetalFeature?.thickness}mm)`
+                      : `Extrude do perfil na espessura da chapa (${sheetMetalFeature?.thickness}mm)`
+                  }
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {faceCut ? "Cortar" : "Face"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode(null)}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : featureToolMode === "revolve" ? (
+              <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+                <span className="shrink-0 font-semibold text-primary-800">Revolucionar</span>
+                <span
+                  className={`text-xs ${centerLine ? "text-primary-500" : "text-primary-400"}`}
+                  title="Desenhe uma Linha de Centro no sketch pra definir o eixo — sem ela, Revolucionar fica desabilitado."
+                >
+                  {centerLine ? "Eixo: linha de centro definida" : "Eixo: sem linha de centro"}
+                </span>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Ângulo
+                  <input
+                    type="number"
+                    min={1}
+                    max={360}
+                    step={1}
+                    value={revolveAngle}
+                    onChange={(e) => setRevolveAngle(Number(e.target.value))}
+                    className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                </label>
+                <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido de rotação">
+                  {(
+                    [
+                      { value: false, symbol: "↻", title: "Sentido padrão" },
+                      { value: true, symbol: "↺", title: "Sentido invertido" },
+                    ]
+                  ).map((d) => (
+                    <button
+                      key={String(d.value)}
+                      type="button"
+                      onClick={() => setRevolveReversed(d.value)}
+                      title={d.title}
+                      className={`rounded px-2 py-1 ${
+                        revolveReversed === d.value ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
+                      }`}
+                    >
+                      {d.symbol}
+                    </button>
+                  ))}
+                </div>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  <input
+                    type="checkbox"
+                    checked={revolveCut}
+                    onChange={(e) => setRevolveCut(e.target.checked)}
+                  />
+                  Corte
+                </label>
+                <button
+                  type="button"
+                  onClick={handleAddRevolve}
+                  disabled={!profile || !centerLine}
+                  title={
+                    !centerLine
+                      ? "Desenhe uma Linha de Centro no sketch antes de revolucionar"
+                      : undefined
+                  }
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconRevolve />
+                  Revolucionar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode(null)}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : featureToolMode === "hole" ? (
+              <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+                <span className="shrink-0 font-semibold text-primary-800">Furo</span>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  <input
+                    type="checkbox"
+                    checked={holeThrough}
+                    onChange={(e) => setHoleThrough(e.target.checked)}
+                  />
+                  Passante
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Profundidade
+                  <input
+                    type="number"
+                    min={0.1}
+                    step={1}
+                    value={holeDepth}
+                    disabled={holeThrough}
+                    onChange={(e) => setHoleDepth(Number(e.target.value))}
+                    className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground disabled:opacity-40"
+                  />
+                </label>
+                <div
+                  className="flex items-center gap-0.5 rounded-lg bg-white p-0.5 disabled:opacity-40"
+                  title={holeThrough ? "Sentido não se aplica a furo passante" : "Sentido do furo"}
+                >
+                  {(
+                    [
+                      { id: "normal" as const, arrow: "→", title: "Seguindo a normal do plano" },
+                      { id: "flipped" as const, arrow: "←", title: "Sentido invertido (padrão)" },
+                    ]
+                  ).map((d) => (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => setHoleDirection(d.id)}
+                      disabled={holeThrough}
+                      title={d.title}
+                      className={`rounded px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40 ${
+                        holeDirection === d.id ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
+                      }`}
+                    >
+                      {d.arrow}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddHole}
+                  disabled={!lastCircle || !hasActiveSolid}
+                  title={
+                    !hasActiveSolid
+                      ? "Extrude ou revolucione um sólido antes de furar"
+                      : undefined
+                  }
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconHole />
+                  Furo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode(null)}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : featureToolMode === "split" ? (
+              <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+                <span className="shrink-0 font-semibold text-primary-800">Cortar por Plano</span>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Lado a manter
+                  <select
+                    value={splitKeepSide}
+                    onChange={(e) => setSplitKeepSide(e.target.value as "positive" | "negative")}
+                    className="rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  >
+                    <option value="positive">+ (a favor da normal)</option>
+                    <option value="negative">- (contra a normal)</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={handleAddSplit}
+                  disabled={!hasActiveSolid}
+                  title={!hasActiveSolid ? "Crie um sólido antes de cortar por plano" : undefined}
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconSplit />
+                  Cortar por Plano
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode(null)}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : (
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode("extrude")}
+                  disabled={!profile}
+                  className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconExtrude />
+                  Extrudar
+                </button>
+                {isSheetMetal && (
                   <button
                     type="button"
-                    onClick={handleAddFace}
+                    onClick={() => setFeatureToolMode("face")}
                     disabled={!profile}
-                    title={`Extrude do perfil na espessura da chapa (${sheetMetalFeature?.thickness}mm)`}
-                    className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                    title={`Extrude/recorta na espessura da chapa (${sheetMetalFeature?.thickness}mm)`}
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Face
                   </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode("revolve")}
+                  disabled={!profile || !centerLine}
+                  title={!centerLine ? "Desenhe uma Linha de Centro no sketch antes de revolucionar" : undefined}
+                  className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconRevolve />
+                  Revolucionar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode("hole")}
+                  disabled={!lastCircle || !hasActiveSolid}
+                  title={!hasActiveSolid ? "Extrude ou revolucione um sólido antes de furar" : undefined}
+                  className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconHole />
+                  Furo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode("split")}
+                  disabled={!hasActiveSolid}
+                  title={!hasActiveSolid ? "Crie um sólido antes de cortar por plano" : undefined}
+                  className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconSplit />
+                  Cortar por Plano
+                </button>
+              </div>
+            )}
+
+            {featureToolMode === null && (
+              <>
+                <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+
+                <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleStartFillet}
+                    disabled={!hasActiveSolid}
+                    title={!hasActiveSolid ? "Crie um sólido antes de arredondar arestas" : "Arredonda uma ou mais arestas do sólido"}
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <IconFillet />
+                    Arredondar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStartChamfer}
+                    disabled={!hasActiveSolid}
+                    title={!hasActiveSolid ? "Crie um sólido antes de chanfrar arestas" : "Chanfra uma ou mais arestas do sólido"}
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <IconChamfer />
+                    Chanfrar
+                  </button>
+                </div>
+
+                <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+
+                <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleCreatePlane}
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
+                  >
+                    Criar Plano
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCreateAxis}
+                    title="Criar eixo X/Y/Z padrão, ou pelo centroide de uma face (cilíndrica: ao longo dela; plana: normal a ela)"
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
+                  >
+                    Criar Eixo
+                  </button>
+                </div>
+
+                <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
+
+                <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
+                  {!isSheetMetal ? (
+                    <>
+                      <label className="flex items-center gap-1.5 text-primary-700">
+                        Espessura
+                        <input
+                          type="number"
+                          min={0.1}
+                          step={0.1}
+                          value={newSheetThickness}
+                          onChange={(e) => setNewSheetThickness(Number(e.target.value))}
+                          className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                        />
+                        mm
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleToggleSheetMetal}
+                        title="Vira a peça inteira em chapa metálica — habilita Face, Flange e Planificar"
+                        className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
+                      >
+                        Virar Chapa
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-xs text-primary-500">Chapa: {sheetMetalFeature?.thickness}mm</span>
+                      <button
+                        type="button"
+                        onClick={handleStartFlange}
+                        disabled={!hasActiveSolid}
+                        title={!hasActiveSolid ? "Crie uma Face antes de criar uma flange" : "Cria uma dobra a partir de uma aresta reta da chapa"}
+                        className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Flange
+                      </button>
+                      {hasFlangeFeature && (
+                        <button
+                          type="button"
+                          onClick={() => setFlattenView((v) => !v)}
+                          title="Alterna entre a peça dobrada (3D) e o padrão planificado (pra corte/DXF)"
+                          className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-semibold transition ${
+                            flattenView ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
+                          }`}
+                        >
+                          {flattenView ? "Ver Dobrada" : "Planificar"}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleToggleSheetMetal}
+                        title="Volta a peça a ser uma peça comum (a geometria já criada continua existindo)"
+                        className="rounded-lg bg-white px-3 py-1.5 text-xs text-primary-500 hover:bg-primary-100"
+                      >
+                        Voltar a ser Peça
+                      </button>
+                    </>
+                  )}
                 </div>
               </>
             )}
-
-            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
-
-            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
-              <span
-                className={`text-xs ${centerLine ? "text-primary-500" : "text-primary-400"}`}
-                title="Desenhe uma Linha de Centro no sketch pra definir o eixo — sem ela, Revolucionar fica desabilitado."
-              >
-                {centerLine ? "Eixo: linha de centro definida" : "Eixo: sem linha de centro"}
-              </span>
-              <label className="flex items-center gap-1.5 text-primary-700">
-                Ângulo
-                <input
-                  type="number"
-                  min={1}
-                  max={360}
-                  step={1}
-                  value={revolveAngle}
-                  onChange={(e) => setRevolveAngle(Number(e.target.value))}
-                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
-                />
-              </label>
-              <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido de rotação">
-                {(
-                  [
-                    { value: false, symbol: "↻", title: "Sentido padrão" },
-                    { value: true, symbol: "↺", title: "Sentido invertido" },
-                  ]
-                ).map((d) => (
-                  <button
-                    key={String(d.value)}
-                    type="button"
-                    onClick={() => setRevolveReversed(d.value)}
-                    title={d.title}
-                    className={`rounded px-2 py-1 ${
-                      revolveReversed === d.value ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
-                    }`}
-                  >
-                    {d.symbol}
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                onClick={handleAddRevolve}
-                disabled={!profile || !centerLine}
-                title={
-                  !centerLine
-                    ? "Desenhe uma Linha de Centro no sketch antes de revolucionar"
-                    : undefined
-                }
-                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <IconRevolve />
-                Revolucionar
-              </button>
-            </div>
-
-            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
-
-            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
-              <label className="flex items-center gap-1.5 text-primary-700">
-                <input
-                  type="checkbox"
-                  checked={holeThrough}
-                  onChange={(e) => setHoleThrough(e.target.checked)}
-                />
-                Passante
-              </label>
-              <label className="flex items-center gap-1.5 text-primary-700">
-                Profundidade
-                <input
-                  type="number"
-                  min={0.1}
-                  step={1}
-                  value={holeDepth}
-                  disabled={holeThrough}
-                  onChange={(e) => setHoleDepth(Number(e.target.value))}
-                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground disabled:opacity-40"
-                />
-              </label>
-              <div
-                className="flex items-center gap-0.5 rounded-lg bg-white p-0.5 disabled:opacity-40"
-                title={holeThrough ? "Sentido não se aplica a furo passante" : "Sentido do furo"}
-              >
-                {(
-                  [
-                    { id: "normal" as const, arrow: "→", title: "Seguindo a normal do plano" },
-                    { id: "flipped" as const, arrow: "←", title: "Sentido invertido (padrão)" },
-                  ]
-                ).map((d) => (
-                  <button
-                    key={d.id}
-                    type="button"
-                    onClick={() => setHoleDirection(d.id)}
-                    disabled={holeThrough}
-                    title={d.title}
-                    className={`rounded px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40 ${
-                      holeDirection === d.id ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
-                    }`}
-                  >
-                    {d.arrow}
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                onClick={handleAddHole}
-                disabled={!lastCircle || !hasActiveSolid}
-                title={
-                  !hasActiveSolid
-                    ? "Extrude ou revolucione um sólido antes de furar"
-                    : undefined
-                }
-                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <IconHole />
-                Furo
-              </button>
-            </div>
-
-            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
-
-            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
-              <label className="flex items-center gap-1.5 text-primary-700">
-                Lado a manter
-                <select
-                  value={splitKeepSide}
-                  onChange={(e) => setSplitKeepSide(e.target.value as "positive" | "negative")}
-                  className="rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
-                >
-                  <option value="positive">+ (a favor da normal)</option>
-                  <option value="negative">- (contra a normal)</option>
-                </select>
-              </label>
-              <button
-                type="button"
-                onClick={handleAddSplit}
-                disabled={!hasActiveSolid}
-                title={!hasActiveSolid ? "Crie um sólido antes de cortar por plano" : undefined}
-                className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <IconSplit />
-                Cortar por Plano
-              </button>
-              <label className="flex items-center gap-1.5 text-primary-700">
-                Raio
-                <input
-                  type="number"
-                  min={0.1}
-                  step={0.5}
-                  value={filletRadius3d}
-                  onChange={(e) => setFilletRadius3d(Number(e.target.value))}
-                  title="Raio do arredondamento — pode ajustar antes ou durante a escolha das arestas"
-                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={handleStartFillet}
-                disabled={!hasActiveSolid}
-                title={!hasActiveSolid ? "Crie um sólido antes de arredondar arestas" : "Arredonda uma ou mais arestas do sólido"}
-                className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <IconFillet />
-                Arredondar
-              </button>
-              <label className="flex items-center gap-1.5 text-primary-700">
-                Dist.
-                <input
-                  type="number"
-                  min={0.1}
-                  step={0.5}
-                  value={chamferDistance3d}
-                  onChange={(e) => setChamferDistance3d(Number(e.target.value))}
-                  title="Distância do chanfro — pode ajustar antes ou durante a escolha das arestas"
-                  className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={handleStartChamfer}
-                disabled={!hasActiveSolid}
-                title={!hasActiveSolid ? "Crie um sólido antes de chanfrar arestas" : "Chanfra uma ou mais arestas do sólido"}
-                className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <IconChamfer />
-                Chanfrar
-              </button>
-            </div>
-
-            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
-
-            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
-              <button
-                type="button"
-                onClick={handleCreatePlane}
-                className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
-              >
-                Criar Plano
-              </button>
-              <button
-                type="button"
-                onClick={handleCreateAxis}
-                title="Criar eixo X/Y/Z padrão, ou pelo centroide de uma face (cilíndrica: ao longo dela; plana: normal a ela)"
-                className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
-              >
-                Criar Eixo
-              </button>
-            </div>
-
-            <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
-
-            <div className="flex shrink-0 flex-nowrap items-center gap-2 md:flex-wrap">
-              {!isSheetMetal ? (
-                <>
-                  <label className="flex items-center gap-1.5 text-primary-700">
-                    Espessura
-                    <input
-                      type="number"
-                      min={0.1}
-                      step={0.1}
-                      value={newSheetThickness}
-                      onChange={(e) => setNewSheetThickness(Number(e.target.value))}
-                      className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
-                    />
-                    mm
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleToggleSheetMetal}
-                    title="Vira a peça inteira em chapa metálica — habilita Face, Flange e Planificar"
-                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100"
-                  >
-                    Virar Chapa
-                  </button>
-                </>
-              ) : (
-                <>
-                  <span className="text-xs text-primary-500">Chapa: {sheetMetalFeature?.thickness}mm</span>
-                  <button
-                    type="button"
-                    onClick={handleStartFlange}
-                    disabled={!hasActiveSolid}
-                    title={!hasActiveSolid ? "Crie uma Face antes de criar uma flange" : "Cria uma dobra a partir de uma aresta reta da chapa"}
-                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Flange
-                  </button>
-                  {hasFlangeFeature && (
-                    <button
-                      type="button"
-                      onClick={() => setFlattenView((v) => !v)}
-                      title="Alterna entre a peça dobrada (3D) e o padrão planificado (pra corte/DXF)"
-                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-semibold transition ${
-                        flattenView ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
-                      }`}
-                    >
-                      {flattenView ? "Ver Dobrada" : "Planificar"}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={handleToggleSheetMetal}
-                    title="Volta a peça a ser uma peça comum (a geometria já criada continua existindo)"
-                    className="rounded-lg bg-white px-3 py-1.5 text-xs text-primary-500 hover:bg-primary-100"
-                  >
-                    Voltar a ser Peça
-                  </button>
-                </>
-              )}
-            </div>
           </>
         )}
       </div>
+      {/* Divisória arrastável da barra de ferramentas — mesma ideia da
+          divisória da árvore de histórico, só que na vertical. */}
+      <div
+        onPointerDown={handleToolbarResizeStart}
+        title="Arraste para redimensionar a barra de ferramentas"
+        className="h-1.5 shrink-0 cursor-row-resize bg-primary-100 transition hover:bg-primary-300 active:bg-primary-400"
+      />
 
       {fsAccessSupported === false && (
         <p className="bg-amber-100 px-4 py-2 text-sm text-amber-900">
@@ -1963,14 +2191,6 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       )}
       {noticeMessage && (
         <p className="bg-primary-100 px-4 py-2 text-sm text-primary-800">{noticeMessage}</p>
-      )}
-      {sketching && !profile && !lastCircle && (
-        <p className="bg-primary-50 px-4 py-2 text-sm text-primary-700">
-          Desenhe um retângulo, círculo ou contorno fechado de linhas para
-          Extrudar. Para Revolucionar, desenhe também uma Linha de Centro
-          (define o eixo). Um círculo serve para Furo. Clique em "Concluir
-          Esboço" quando terminar.
-        </p>
       )}
       {errorMessage && (
         <p className="bg-error/10 px-4 py-2 text-sm text-error">{errorMessage}</p>
@@ -2003,8 +2223,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         ))}
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:grid md:grid-cols-[220px_1fr] md:divide-x md:divide-primary-100">
-        <div className={`min-h-0 flex-1 md:order-1 md:!block ${mobileTab === "history" ? "" : "hidden"}`}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+        <div
+          className={`min-h-0 flex-1 md:order-1 md:!block ${mobileTab === "history" ? "" : "hidden"}`}
+          style={isDesktop ? { width: historyPanelWidth, flex: "0 0 auto" } : undefined}
+        >
           <FeatureHistoryPanel
             features={features}
             onRemove={removeFeature}
@@ -2012,7 +2235,15 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             onEditFeature={handleEditFeature}
           />
         </div>
-        <div className={`min-h-0 flex-1 md:order-2 md:!block ${mobileTab === "viewer" ? "" : "hidden"}`}>
+        {/* Divisória arrastável (só md+, só faz sentido com os 2 painéis
+            lado a lado) — ao estilo Inventor, redimensiona a árvore de
+            histórico sem mexer no código, só arrastando. */}
+        <div
+          onPointerDown={handleHistoryResizeStart}
+          title="Arraste para redimensionar"
+          className="hidden w-1.5 shrink-0 cursor-col-resize bg-primary-100 transition hover:bg-primary-300 active:bg-primary-400 md:order-2 md:block"
+        />
+        <div className={`min-h-0 flex-1 md:order-3 md:!block ${mobileTab === "viewer" ? "" : "hidden"}`}>
           <Viewer3D
             mesh={mesh}
             pickMode={

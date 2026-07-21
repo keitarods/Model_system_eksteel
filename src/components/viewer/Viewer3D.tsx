@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
-import { Line, OrbitControls } from "@react-three/drei";
+import { GizmoHelper, GizmoViewcube, Line, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import type { ShapeMesh } from "replicad";
 import { SketchOverlay3D } from "./SketchOverlay3D";
@@ -114,8 +114,50 @@ function SolidMesh({
 
   useEffect(() => () => geometry.dispose(), [geometry]);
 
+  // Destaque da face sob o cursor durante o modo de escolha — só pra deixar
+  // claro qual face vai ser escolhida ANTES de clicar (útil agora que o
+  // marcador dos planos padrão não cobre mais a peça, ver PlanePicker3D).
+  // Malha separada, não cor por vértice: cor por vértice vaza pras faces
+  // vizinhas que compartilham vértice na aresta (bleed), já que réplicas de
+  // faces adjacentes reaproveitam os mesmos vértices — uma malha à parte,
+  // só com os triângulos da face sob o cursor (mesh.faceGroups), fica com
+  // contorno nítido e não exige recolorir o material principal.
+  const [hoveredFaceId, setHoveredFaceId] = useState<number | null>(null);
+
+  const highlightGeometry = useMemo(() => {
+    if (hoveredFaceId == null) return null;
+    const group = mesh.faceGroups.find((g) => g.faceId === hoveredFaceId);
+    if (!group) return null;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(mesh.vertices, 3));
+    geo.setIndex(mesh.triangles.slice(group.start, group.start + group.count));
+    return geo;
+  }, [mesh, hoveredFaceId]);
+
+  useEffect(() => () => highlightGeometry?.dispose(), [highlightGeometry]);
+
   function worldNormalOf(event: ThreeEvent<MouseEvent>) {
     return event.face!.normal.clone().transformDirection(event.object.matrixWorld).normalize();
+  }
+
+  // faceIndex do three.js é em unidade de TRIÂNGULO (0, 1, 2, ...); start/
+  // count de faceGroups são em unidade de ÍNDICE FLAT (mesh.triangles), 3
+  // por triângulo — por isso o *3 pra comparar no mesmo referencial.
+  function faceIdAt(event: ThreeEvent<PointerEvent>): number | null {
+    if (event.faceIndex == null) return null;
+    const flatIndex = event.faceIndex * 3;
+    const group = mesh.faceGroups.find((g) => flatIndex >= g.start && flatIndex < g.start + g.count);
+    return group?.faceId ?? null;
+  }
+
+  function handlePointerMove(event: ThreeEvent<PointerEvent>) {
+    if (!pickMode) return;
+    const id = faceIdAt(event);
+    setHoveredFaceId((current) => (current === id ? current : id));
+  }
+
+  function handlePointerOut() {
+    setHoveredFaceId(null);
   }
 
   function handleClick(event: ThreeEvent<MouseEvent>) {
@@ -142,21 +184,39 @@ function SolidMesh({
   }
 
   return (
-    <mesh
-      geometry={geometry}
-      castShadow
-      receiveShadow
-      onClick={pickMode ? handleClick : undefined}
-      onContextMenu={!pickMode && onContextMenu ? handleContextMenu : undefined}
-    >
-      <meshStandardMaterial
-        color={pickMode ? "#78909C" : "#546E7A"}
-        wireframe={wireframe}
-        side={THREE.DoubleSide}
-        metalness={0.05}
-        roughness={0.65}
-      />
-    </mesh>
+    <>
+      <mesh
+        geometry={geometry}
+        castShadow
+        receiveShadow
+        onClick={pickMode ? handleClick : undefined}
+        onContextMenu={!pickMode && onContextMenu ? handleContextMenu : undefined}
+        onPointerMove={pickMode ? handlePointerMove : undefined}
+        onPointerOut={pickMode ? handlePointerOut : undefined}
+      >
+        <meshStandardMaterial
+          color={pickMode ? "#78909C" : "#546E7A"}
+          wireframe={wireframe}
+          side={THREE.DoubleSide}
+          metalness={0.05}
+          roughness={0.65}
+        />
+      </mesh>
+      {pickMode && highlightGeometry && (
+        <mesh geometry={highlightGeometry}>
+          <meshBasicMaterial
+            color="#4fc3f7"
+            side={THREE.DoubleSide}
+            transparent
+            opacity={0.55}
+            depthTest={false}
+            polygonOffset
+            polygonOffsetFactor={-1}
+            polygonOffsetUnits={-1}
+          />
+        </mesh>
+      )}
+    </>
   );
 }
 
@@ -234,6 +294,116 @@ function CameraRig({ position }: { position: [number, number, number] }) {
   }, [position, camera, controls]);
 
   return null;
+}
+
+// GizmoHelper renderiza seus filhos (o ViewCube) dentro de um Hud — uma
+// passada de render à parte, com sua PRÓPRIA câmera ortográfica virtual.
+// useThree() ali dentro devolve essa câmera pequena do gizmo, nunca a
+// câmera de verdade da cena principal — por isso não dá pra simplesmente
+// chamar useThree() dentro do cubo pra implementar o arrastar-orbitar.
+// Este componente vive FORA do Hud (direto no Canvas principal) só pra
+// capturar a câmera/controles/tamanho de verdade numa ref simples, que o
+// cubo (dentro do Hud) lê livremente — refs atravessam a fronteira do
+// portal sem problema, ao contrário de useThree().
+type CameraApi = {
+  camera: THREE.Camera;
+  controls: { enabled?: boolean; update?: () => void } | null;
+  size: { width: number; height: number };
+};
+
+function CameraApiCapture({ apiRef }: { apiRef: React.MutableRefObject<CameraApi | null> }) {
+  const camera = useThree((state) => state.camera);
+  const controls = useThree((state) => state.controls) as CameraApi["controls"];
+  const size = useThree((state) => state.size);
+
+  useEffect(() => {
+    apiRef.current = { camera, controls, size };
+  }, [apiRef, camera, controls, size]);
+
+  return null;
+}
+
+// Gira a câmera em torno de target por deltaAzimuth/deltaPolar (radianos),
+// igual o arrastar do OrbitControls — mas reimplementado à mão porque o
+// ViewCube fica no Hud (câmera separada) e por isso não pode simplesmente
+// deixar o OrbitControls "de verdade" processar o arrasto. setFromUnitVectors
+// alinha camera.up com +Y antes da conta esférica e desalinha depois — é o
+// mesmo truque que o OrbitControls usa por baixo dos panos pra funcionar
+// com qualquer "up" (aqui é Z, não o Y padrão do three.js); sem isso a
+// órbita ficaria girando em torno do eixo errado.
+function orbitCameraAround(camera: THREE.Camera, target: THREE.Vector3, deltaAzimuth: number, deltaPolar: number) {
+  const quat = new THREE.Quaternion().setFromUnitVectors(camera.up, new THREE.Vector3(0, 1, 0));
+  const quatInverse = quat.clone().invert();
+
+  const offset = camera.position.clone().sub(target).applyQuaternion(quat);
+  const spherical = new THREE.Spherical().setFromVector3(offset);
+
+  spherical.theta -= deltaAzimuth;
+  spherical.phi = Math.max(0.001, Math.min(Math.PI - 0.001, spherical.phi - deltaPolar));
+
+  offset.setFromSpherical(spherical).applyQuaternion(quatInverse);
+  camera.position.copy(target).add(offset);
+  camera.lookAt(target);
+}
+
+// Sensibilidade do arrastar no ViewCube — radianos de órbita por "altura de
+// tela" arrastada, mesma ordem de grandeza do rotateSpeed padrão do
+// OrbitControls (2π por altura da tela).
+const CUBE_DRAG_SENSITIVITY = Math.PI;
+
+// Cobre o ViewCube inteiro (não tem geometria própria — um <group> sem
+// malha não é alvo de raycast, mas ainda recebe eventos que borbulham dos
+// filhos, e nem FaceCube nem EdgeCube do drei chamam stopPropagation() no
+// pointerDown, só no click) — ao pressionar e arrastar (em vez de só
+// clicar), desliga o OrbitControls principal (senão os dois competem pelo
+// mesmo gesto nativo do navegador) e orbita a câmera à mão; soltar
+// reativa o OrbitControls. Clicar sem arrastar continua funcionando normal
+// (o click do GizmoViewcube dispara por baixo, intacto).
+function ViewCubeOrbitCatcher({
+  apiRef,
+  orbitTarget,
+  children,
+}: {
+  apiRef: React.MutableRefObject<CameraApi | null>;
+  orbitTarget: [number, number, number];
+  children: React.ReactNode;
+}) {
+  function handlePointerDown(event: ThreeEvent<PointerEvent>) {
+    if (event.nativeEvent.button !== 0) return;
+    event.stopPropagation();
+    const api = apiRef.current;
+    if (!api) return;
+
+    if (api.controls) api.controls.enabled = false;
+    let lastX = event.nativeEvent.clientX;
+    let lastY = event.nativeEvent.clientY;
+
+    function handleMove(moveEvent: PointerEvent) {
+      const dx = moveEvent.clientX - lastX;
+      const dy = moveEvent.clientY - lastY;
+      lastX = moveEvent.clientX;
+      lastY = moveEvent.clientY;
+      const h = api!.size.height || 1;
+      orbitCameraAround(
+        api!.camera,
+        new THREE.Vector3(...orbitTarget),
+        (dx / h) * CUBE_DRAG_SENSITIVITY,
+        (dy / h) * CUBE_DRAG_SENSITIVITY
+      );
+      api!.controls?.update?.();
+    }
+
+    function handleUp() {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+      if (api!.controls) api!.controls.enabled = true;
+    }
+
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+  }
+
+  return <group onPointerDown={handlePointerDown}>{children}</group>;
 }
 
 // Ao estilo Inventor/SolidWorks: ao escolher/reabrir um plano de esboço, a
@@ -412,6 +582,7 @@ export function Viewer3D({
   const [wireframe, setWireframe] = useState(false);
   const [view, setView] = useState<ViewPreset>("isometrica");
   const [orbitTarget, setOrbitTarget] = useState<[number, number, number]>([0, 0, 0]);
+  const cameraApiRef = useRef<CameraApi | null>(null);
   const pendingConstraint = useSketchStore((s) => s.pendingConstraint);
   const tool = useSketchStore((s) => s.tool);
   const shapes = useSketchStore((s) => s.shapes);
@@ -420,6 +591,9 @@ export function Viewer3D({
   const deleteSelectedShape = useSketchStore((s) => s.deleteSelectedShape);
   const clearSketch = useSketchStore((s) => s.clear);
   const convertRectToLines = useSketchStore((s) => s.convertRectToLines);
+  const clipboard = useSketchStore((s) => s.clipboard);
+  const copySelectedShape = useSketchStore((s) => s.copySelectedShape);
+  const pasteShape = useSketchStore((s) => s.pasteShape);
   const hasValidSelection = shapes.some((s) => s.id === selectedShapeId);
   const selectedIsRect = shapes.some((s) => s.id === selectedShapeId && s.type === "rect");
   const [faceMenu, setFaceMenu] = useState<{
@@ -462,6 +636,24 @@ export function Viewer3D({
                 Converter em Linhas
               </button>
             )}
+            <button
+              type="button"
+              onClick={copySelectedShape}
+              disabled={!hasValidSelection}
+              title="Copiar geometria selecionada (Ctrl+C)"
+              className="rounded-lg bg-white px-3 py-1.5 text-primary-700 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Copiar
+            </button>
+            <button
+              type="button"
+              onClick={pasteShape}
+              disabled={!clipboard}
+              title="Colar (Ctrl+V)"
+              className="rounded-lg bg-white px-3 py-1.5 text-primary-700 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Colar
+            </button>
             <button
               type="button"
               onClick={deleteSelectedShape}
@@ -525,7 +717,9 @@ export function Viewer3D({
               interactive={sketchOverlay.interactive}
             />
           )}
-          {pickMode && showPlanePicker && onPickStandardPlane && <PlanePicker3D onPick={onPickStandardPlane} />}
+          {pickMode && showPlanePicker && onPickStandardPlane && (
+            <PlanePicker3D onPick={onPickStandardPlane} />
+          )}
           {workPlanes.map((plane, i) => (
             <WorkPlaneMarker key={i} plane={plane} />
           ))}
@@ -547,6 +741,33 @@ export function Viewer3D({
           )}
           {mesh && <gridHelper args={[400, 40]} rotation={[Math.PI / 2, 0, 0]} />}
           <axesHelper args={[60]} />
+          <CameraApiCapture apiRef={cameraApiRef} />
+          {/* ViewCube ao estilo Inventor/SolidWorks: clique numa face, aresta
+              ou canto do cubo pra ir direto pra aquela vista (a câmera anima
+              suavemente) — mesma ideia dos botões isométrica/frontal/
+              superior, só que com todas as 26 vistas (6 faces + 12 arestas +
+              8 cantos) num widget só, no canto do viewport. Ordem do array
+              `faces` é a mesma do agrupamento de material do BoxGeometry do
+              three.js (+X,-X,+Y,-Y,+Z,-Z); como o mundo aqui é Z-up (não
+              Y-up, o padrão do three.js), essa ordem NÃO é
+              Direita/Esquerda/Cima/Baixo/Frente/Trás — foi remapeada
+              conferindo contra os presets de vista já existentes (frontal
+              fica em -Y, superior em +Z). */}
+          <GizmoHelper
+            alignment="top-right"
+            margin={[70, 70]}
+            onTarget={() => new THREE.Vector3(...orbitTarget)}
+          >
+            <ViewCubeOrbitCatcher apiRef={cameraApiRef} orbitTarget={orbitTarget}>
+              <GizmoViewcube
+                faces={["DIREITA", "ESQUERDA", "TRÁS", "FRENTE", "CIMA", "BAIXO"]}
+                color="#eceff1"
+                hoverColor="#546E7A"
+                textColor="#263238"
+                strokeColor="#90a4ae"
+              />
+            </ViewCubeOrbitCatcher>
+          </GizmoHelper>
           <OrbitControls
             makeDefault
             target={orbitTarget}

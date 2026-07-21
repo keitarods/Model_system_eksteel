@@ -79,6 +79,7 @@ function findClosedLoop(
 export type ProfileSource =
   | { kind: "rect"; x1: number; y1: number; x2: number; y2: number }
   | { kind: "circle"; cx: number; cy: number; r: number }
+  | { kind: "slot"; c1: Point; c2: Point; r: number }
   | { kind: "loop"; points: Point[]; arcCenters?: (Point | null)[] }
   | null;
 
@@ -103,6 +104,13 @@ export function findProfileSource(
       const center = points[shape.center];
       if (!center) continue;
       return { kind: "circle", cx: center.x, cy: center.y, r: shape.radius };
+    }
+
+    if (shape.type === "slot") {
+      const c1 = points[shape.center1];
+      const c2 = points[shape.center2];
+      if (!c1 || !c2) continue;
+      return { kind: "slot", c1: { x: c1.x, y: c1.y }, c2: { x: c2.x, y: c2.y }, r: shape.radius };
     }
   }
 
@@ -189,6 +197,37 @@ export function profileToDrawing(profile: ProfileSource): Drawing | null {
     const { cx, cy, r } = profile;
     if (r < 1e-6) return null;
     return drawCircle(r).translate(cx, cy);
+  }
+
+  if (profile.kind === "slot") {
+    const { c1, c2, r } = profile;
+    if (r < 1e-6) return null;
+    const dx = c2.x - c1.x;
+    const dy = c2.y - c1.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) return null;
+    const ux = dx / len;
+    const uy = dy / len;
+    // Normal (perpendicular ao eixo center1→center2) dá as 2 retas
+    // tangentes; o próprio eixo (u) dá o ápice de cada tampa — os 2 pontos
+    // tangentes em cada centro são diametralmente opostos (180°), então
+    // arcInnerPoint (feito pra arcos < 180°, ver seu comentário) não serve
+    // aqui: o ápice tem que vir explicitamente do eixo, não do ponto médio
+    // da corda (que cairia em cima do próprio centro).
+    const nx = -uy;
+    const ny = ux;
+    const p1 = { x: c1.x + nx * r, y: c1.y + ny * r };
+    const p2 = { x: c2.x + nx * r, y: c2.y + ny * r };
+    const p3 = { x: c2.x - nx * r, y: c2.y - ny * r };
+    const p4 = { x: c1.x - nx * r, y: c1.y - ny * r };
+    const apex2 = { x: c2.x + ux * r, y: c2.y + uy * r };
+    const apex1 = { x: c1.x - ux * r, y: c1.y - uy * r };
+    return draw([p1.x, p1.y])
+      .lineTo([p2.x, p2.y])
+      .threePointsArcTo([p3.x, p3.y], [apex2.x, apex2.y])
+      .lineTo([p4.x, p4.y])
+      .threePointsArcTo([p1.x, p1.y], [apex1.x, apex1.y])
+      .close();
   }
 
   const { points: pts, arcCenters } = profile;

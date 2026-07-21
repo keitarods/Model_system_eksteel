@@ -16,11 +16,43 @@ function distanceToSegment(p: Point, a: Point, b: Point): number {
   return projectOntoSegment(p, a, b).distance;
 }
 
+// Distância de p até a curva do arco MENOR (<180°) entre from/to em torno de
+// center — dentro do "leque" angular do arco conta a distância até a
+// circunferência (igual círculo); fora dele, cai pra distância até a ponta
+// mais próxima (mesmo espírito de projectOntoSegment, mas em ângulo).
+function distanceToArc(p: Point, center: Point, r: number, from: Point, to: Point): number {
+  const a1 = Math.atan2(from.y - center.y, from.x - center.x);
+  const a2 = Math.atan2(to.y - center.y, to.x - center.x);
+  let delta = a2 - a1;
+  while (delta > Math.PI) delta -= 2 * Math.PI;
+  while (delta < -Math.PI) delta += 2 * Math.PI;
+
+  const ap = Math.atan2(p.y - center.y, p.x - center.x);
+  let t = ap - a1;
+  while (t > Math.PI) t -= 2 * Math.PI;
+  while (t < -Math.PI) t += 2 * Math.PI;
+
+  const within = delta >= 0 ? t >= 0 && t <= delta : t <= 0 && t >= delta;
+  if (within) {
+    return Math.abs(Math.hypot(p.x - center.x, p.y - center.y) - r);
+  }
+  return Math.min(Math.hypot(p.x - from.x, p.y - from.y), Math.hypot(p.x - to.x, p.y - to.y));
+}
+
+// "edge"/"side" desambiguam QUAL das 2 arestas paralelas foi clicada — um
+// retângulo tem 2 arestas de largura (uma em y=p1.y, outra em y=p2.y) e um
+// rasgo tem 2 tangentes (uma de cada lado do eixo center1→center2). Sem
+// isso, clicar as 2 arestas de um mesmo par pareceria "a mesma aresta" pro
+// fluxo de cota relacional (linha a linha) — precisa saber que são
+// fisicamente diferentes pra calcular a distância entre elas.
 export type EdgeHit =
   | { kind: "line"; shapeId: string }
-  | { kind: "rectWidth"; shapeId: string }
-  | { kind: "rectHeight"; shapeId: string }
-  | { kind: "circleRadius"; shapeId: string };
+  | { kind: "rectWidth"; shapeId: string; edge: "p1" | "p2" }
+  | { kind: "rectHeight"; shapeId: string; edge: "p1" | "p2" }
+  | { kind: "circleRadius"; shapeId: string }
+  | { kind: "arcRadius"; shapeId: string }
+  | { kind: "slotLength"; shapeId: string; side: 1 | -1 }
+  | { kind: "slotRadius"; shapeId: string };
 
 // Acha a aresta/círculo mais próxima do clique (dentro da tolerância) — é o
 // que permite clicar numa linha existente pra cotar o comprimento dela
@@ -62,23 +94,73 @@ export function findEdgeHit(
         c: p2,
         d: { x: p1.x, y: p2.y },
       };
-      const edges: [Point, Point, "rectWidth" | "rectHeight"][] = [
-        [corners.a, corners.b, "rectWidth"],
-        [corners.b, corners.c, "rectHeight"],
-        [corners.c, corners.d, "rectWidth"],
-        [corners.d, corners.a, "rectHeight"],
+      const edges: [Point, Point, "rectWidth" | "rectHeight", "p1" | "p2"][] = [
+        [corners.a, corners.b, "rectWidth", "p1"],
+        [corners.b, corners.c, "rectHeight", "p2"],
+        [corners.c, corners.d, "rectWidth", "p2"],
+        [corners.d, corners.a, "rectHeight", "p1"],
       ];
-      for (const [ea, eb, kind] of edges) {
+      for (const [ea, eb, kind, edge] of edges) {
         const d = distanceToSegment(raw, ea, eb);
         if (d < bestDist) {
           bestDist = d;
-          best = { kind, shapeId: shape.id };
+          best = { kind, shapeId: shape.id, edge };
         }
       }
       continue;
     }
 
-    if (shape.type === "point" || shape.type === "arc") continue; // sem cota associada por enquanto
+    // ponto solto não tem "aresta" pra clicar — cotar distância a partir
+    // dele continua possível arrastando (ver handleRawUp), só não pelo
+    // clique único aqui.
+    if (shape.type === "point") continue;
+
+    if (shape.type === "arc") {
+      const p1 = points[shape.p1];
+      const p2 = points[shape.p2];
+      const center = points[shape.center];
+      if (!p1 || !p2 || !center) continue;
+      const r = Math.hypot(p1.x - center.x, p1.y - center.y);
+      const d = distanceToArc(raw, center, r, p1, p2);
+      if (d < bestDist) {
+        bestDist = d;
+        best = { kind: "arcRadius", shapeId: shape.id };
+      }
+      continue;
+    }
+
+    if (shape.type === "slot") {
+      const c1 = points[shape.center1];
+      const c2 = points[shape.center2];
+      if (!c1 || !c2) continue;
+      const dx = c2.x - c1.x;
+      const dy = c2.y - c1.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len;
+      const ny = dx / len;
+      const r = shape.radius;
+      const t1a = { x: c1.x + nx * r, y: c1.y + ny * r };
+      const t1b = { x: c2.x + nx * r, y: c2.y + ny * r };
+      const t2a = { x: c1.x - nx * r, y: c1.y - ny * r };
+      const t2b = { x: c2.x - nx * r, y: c2.y - ny * r };
+
+      const dSide1 = distanceToSegment(raw, t1a, t1b);
+      const dSide2 = distanceToSegment(raw, t2a, t2b);
+      const dTangent = Math.min(dSide1, dSide2);
+      if (dTangent < bestDist) {
+        bestDist = dTangent;
+        best = { kind: "slotLength", shapeId: shape.id, side: dSide1 <= dSide2 ? 1 : -1 };
+      }
+
+      const dCap1 = Math.abs(Math.hypot(raw.x - c1.x, raw.y - c1.y) - r);
+      const dCap2 = Math.abs(Math.hypot(raw.x - c2.x, raw.y - c2.y) - r);
+      const dRadius = Math.min(dCap1, dCap2);
+      if (dRadius < bestDist) {
+        bestDist = dRadius;
+        best = { kind: "slotRadius", shapeId: shape.id };
+      }
+      continue;
+    }
 
     // circle: perto do centro OU da circunferência conta (o centro já era
     // clicável antes pra cotar raio; isso só soma a borda também)
@@ -226,7 +308,10 @@ export function findNearestPointOnShapes(
   let bestDist = tolerance;
 
   for (const shape of shapes) {
-    if (shape.type === "circle" || shape.type === "point" || shape.type === "arc") continue;
+    // Rasgo fica de fora por ora (mesmo espírito do círculo: "encostar" numa
+    // aresta reta faz sentido, num arco/rasgo não tão direto).
+    if (shape.type === "circle" || shape.type === "point" || shape.type === "arc" || shape.type === "slot")
+      continue;
 
     const segments: [Point, Point][] =
       shape.type === "line"

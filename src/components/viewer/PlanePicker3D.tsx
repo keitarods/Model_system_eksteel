@@ -12,8 +12,13 @@ const PLANE_COLORS: Record<string, string> = { xy: "#4fc3f7", xz: "#66bb6a", yz:
 
 // Os 3 planos padrão como quads clicáveis dentro do próprio viewport 3D —
 // ao estilo Inventor/SolidWorks: ao criar um esboço sem escolher uma face
-// específica, esses 3 planos de origem aparecem pra escolher visualmente
-// (além de ainda poder clicar numa face do sólido, se houver um).
+// específica (ou ao escolher a referência de um Plano de trabalho novo),
+// esses 3 planos de origem aparecem centrados na própria origem pra
+// escolher visualmente (além de ainda poder clicar numa face do sólido, se
+// houver um). Chegou a existir uma versão "compacta" (marcador pequeno,
+// deslocado pro canto, pra não cobrir a peça) — removida a pedido: o
+// deslocamento em si incomodava mais do que ajudava, em qualquer um dos
+// dois usos (escolher plano de esboço ou referência de Plano de trabalho).
 export function PlanePicker3D({ onPick }: { onPick: (plane: SketchPlane) => void }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 

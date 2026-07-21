@@ -1,5 +1,5 @@
 import type { SketchPoint, SketchShape } from "@/lib/sketch/types";
-import { sampleMinorArc } from "@/lib/sketch/render";
+import { sampleMinorArc, slotOutline } from "@/lib/sketch/render";
 
 // Escritor DXF ASCII mínimo (R12/AC1009) — cobre só as entidades que o
 // sketch produz (LINE, CIRCLE, POINT). Sem HEADER/TABLES completos (não
@@ -65,6 +65,21 @@ export function buildDxf(shapes: SketchShape[], points: Record<string, SketchPoi
       const arcPts = sampleMinorArc(c.x, c.y, r, a1.x, a1.y, a2.x, a2.y, 16);
       for (let i = 0; i < arcPts.length - 1; i++) {
         entities.push(dxfLine(arcPts[i].x, arcPts[i].y, arcPts[i + 1].x, arcPts[i + 1].y, LAYER_GEOMETRY));
+      }
+      continue;
+    }
+
+    if (shape.type === "slot") {
+      const c1 = points[shape.center1];
+      const c2 = points[shape.center2];
+      if (!c1 || !c2) continue;
+      // outline já fecha sozinho (o último ponto amostrado da 2ª tampa
+      // coincide com o 1º, ver slotOutline) — não precisa de wrap-around.
+      const outline = slotOutline(c1.x, c1.y, c2.x, c2.y, shape.radius);
+      for (let i = 0; i < outline.length - 1; i++) {
+        const a = outline[i];
+        const b = outline[i + 1];
+        entities.push(dxfLine(a.x, a.y, b.x, b.y, LAYER_GEOMETRY));
       }
       continue;
     }
