@@ -1,20 +1,24 @@
 import { create } from "zustand";
 import { useSketchStore } from "@/lib/sketch/store";
 import { useFeatureStore } from "@/lib/features/store";
+import { useDrawingStore } from "@/lib/drawing/store";
 import type { DimensionAnnotation, SketchPlane, SketchPoint, SketchShape } from "@/lib/sketch/types";
 import type { Feature } from "@/lib/features/types";
+import type { DrawingSheet } from "@/lib/drawing/types";
 
-// Desfazer/refazer global: observa as duas stores (sketch + features) juntas
-// e guarda snapshots — mais simples e mais seguro do que escrever a
-// operação inversa de cada ação (linha, cota, extrude, remover feature...).
-// Como todo update nas duas stores já cria objetos/arrays novos (nunca
-// muta em lugar), guardar as referências antigas no snapshot é seguro.
+// Desfazer/refazer global: observa as TRÊS stores (sketch + features +
+// folhas de desenho) juntas e guarda snapshots — mais simples e mais seguro
+// do que escrever a operação inversa de cada ação (linha, cota, extrude,
+// remover feature, mover vista na folha...). Como todo update nessas
+// stores já cria objetos/arrays novos (nunca muta em lugar), guardar as
+// referências antigas no snapshot é seguro.
 type Snapshot = {
   shapes: SketchShape[];
   points: Record<string, SketchPoint>;
   dimensions: DimensionAnnotation[];
   activePlane: SketchPlane;
   features: Feature[];
+  drawingSheets: DrawingSheet[];
 };
 
 const MAX_HISTORY = 100;
@@ -37,6 +41,7 @@ function captureSnapshot(): Snapshot {
     dimensions: sketch.dimensions,
     activePlane: sketch.activePlane,
     features: useFeatureStore.getState().features,
+    drawingSheets: useDrawingStore.getState().sheets,
   };
 }
 
@@ -48,6 +53,7 @@ function applySnapshot(snapshot: Snapshot) {
     activePlane: snapshot.activePlane,
   });
   useFeatureStore.setState({ features: snapshot.features });
+  useDrawingStore.setState({ sheets: snapshot.drawingSheets });
 }
 
 let restoring = false;
@@ -110,8 +116,25 @@ function onSketchStoreChange() {
   onStoreChange();
 }
 
+// Mesmo problema do sketch (comentário acima): activeSheetId é seleção de
+// UI (qual aba de folha está aberta), não edição — trocar de aba sozinho
+// não deveria empilhar um passo de desfazer.
+function persistentDrawingSlice() {
+  return { sheets: useDrawingStore.getState().sheets };
+}
+
+let lastPersistentDrawingSlice = persistentDrawingSlice();
+
+function onDrawingStoreChange() {
+  const current = persistentDrawingSlice();
+  if (current.sheets === lastPersistentDrawingSlice.sheets) return;
+  lastPersistentDrawingSlice = current;
+  onStoreChange();
+}
+
 useSketchStore.subscribe(onSketchStoreChange);
 useFeatureStore.subscribe(onStoreChange);
+useDrawingStore.subscribe(onDrawingStoreChange);
 
 export function undoModel() {
   const { past } = useUndoStore.getState();

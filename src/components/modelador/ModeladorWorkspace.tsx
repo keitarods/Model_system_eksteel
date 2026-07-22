@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 import { SketchToolPalette } from "@/components/sketch/SketchToolPalette";
 import { useSketchKeyboardShortcuts } from "@/lib/sketch/useSketchKeyboardShortcuts";
 import { Viewer3D } from "@/components/viewer/Viewer3D";
+import { DrawingSheetWorkspace } from "@/components/drawing/DrawingSheetWorkspace";
 import {
   IconChamfer,
   IconExtrude,
@@ -28,6 +29,7 @@ import { findCenterLine, findLastCircle, findProfileSource } from "@/lib/replica
 import { rebuildModel, findFlangeParentId } from "@/lib/replicad/build-model";
 import { sketchPlaneFromHit, worldToLocalPoint, offsetOrigin, STANDARD_PLANES, STANDARD_AXES } from "@/lib/replicad/plane";
 import { useFeatureStore } from "@/lib/features/store";
+import { useDrawingStore } from "@/lib/drawing/store";
 import type { Feature } from "@/lib/features/types";
 import type { ExtrudeDirection } from "@/lib/replicad/geometry";
 import { redoModel, undoModel, useUndoStore } from "@/lib/history/store";
@@ -83,6 +85,10 @@ const FEATURE_BADGE: Record<Feature["type"], { label: string; className: string 
 
 export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const router = useRouter();
+  // "desenho" troca a área principal inteira (toolbar + árvore + viewport
+  // 3D) pela folha de desenho 2D — mesmo projeto, só uma tela diferente,
+  // ao estilo de trocar de aba (não é uma rota/página separada).
+  const [mode, setMode] = useState<"modelar" | "desenho">("modelar");
   const shapes = useSketchStore((s) => s.shapes);
   const points = useSketchStore((s) => s.points);
   const dimensions = useSketchStore((s) => s.dimensions);
@@ -94,6 +100,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const addFeature = useFeatureStore((s) => s.addFeature);
   const updateFeature = useFeatureStore((s) => s.updateFeature);
   const removeFeature = useFeatureStore((s) => s.removeFeature);
+  const drawingSheets = useDrawingStore((s) => s.sheets);
 
   const canUndo = useUndoStore((s) => s.past.length > 0);
   const canRedo = useUndoStore((s) => s.future.length > 0);
@@ -1216,7 +1223,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // escolher pasta de verdade, então só pergunta o nome via prompt e cai no
   // download de sempre.
   const handleSaveProjectAs = useCallback(async () => {
-    const json = serializeProject(features);
+    const json = serializeProject(features, drawingSheets);
     const suggestedName = currentFileName ?? `projeto${NATIVE_FILE_EXTENSION}`;
 
     if (isFileSystemAccessSupported()) {
@@ -1237,7 +1244,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     setCurrentFileHandle(null);
     setCurrentFileName(filename);
     showNotice(result === "folder" ? "Projeto salvo na pasta selecionada." : "Projeto baixado.");
-  }, [features, currentFileName, projectFolder, showNotice]);
+  }, [features, drawingSheets, currentFileName, projectFolder, showNotice]);
 
   // "Salvar": grava direto no arquivo já aberto/salvo, sem perguntar nada —
   // é o que permite ir salvando à vontade enquanto edita sem risco de
@@ -1250,7 +1257,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     }
 
     try {
-      await writeToFileHandle(currentFileHandle, serializeProject(features));
+      await writeToFileHandle(currentFileHandle, serializeProject(features, drawingSheets));
       showNotice(`"${currentFileHandle.name}" salvo.`);
     } catch {
       // Handle pode ter ficado inválido (arquivo movido/apagado fora do
@@ -1259,7 +1266,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       setCurrentFileHandle(null);
       await handleSaveProjectAs();
     }
-  }, [features, currentFileHandle, handleSaveProjectAs, showNotice]);
+  }, [features, drawingSheets, currentFileHandle, handleSaveProjectAs, showNotice]);
 
   // Ctrl+S salva no arquivo já aberto (ou pede onde salvar, na primeira
   // vez); Ctrl+Shift+S é "Salvar Como" — convenção padrão (Word, VSCode
@@ -1287,8 +1294,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     if (!picked) return;
 
     try {
-      const loadedFeatures = parseProject(await picked.file.text());
-      useFeatureStore.setState({ features: loadedFeatures });
+      const loaded = parseProject(await picked.file.text());
+      useFeatureStore.setState({ features: loaded.features });
+      useDrawingStore.getState().loadSheets(loaded.drawingSheets);
       clearSketch();
       setEditingSketchId(null);
       setSketching(false);
@@ -1413,6 +1421,27 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             DXF
           </button>
           <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
+          <div className="flex items-center gap-0.5 rounded-lg bg-chrome-surface-alt p-0.5">
+            <button
+              type="button"
+              onClick={() => setMode("modelar")}
+              className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                mode === "modelar" ? "bg-primary text-primary-foreground" : "text-chrome-text-muted hover:bg-chrome-border"
+              }`}
+            >
+              Modelador
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("desenho")}
+              className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                mode === "desenho" ? "bg-primary text-primary-foreground" : "text-chrome-text-muted hover:bg-chrome-border"
+              }`}
+            >
+              Desenho
+            </button>
+          </div>
+          <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
           <button
             type="button"
             onClick={undoModel}
@@ -1450,6 +1479,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         </div>
       </header>
 
+      {mode === "desenho" ? (
+        <DrawingSheetWorkspace />
+      ) : (
+        <>
       {/* Altura ajustável (arraste a divisória logo abaixo) — sem isso, o
           modo "ocioso" (que empilha Extrudar+Face+Revolucionar+Furo+Split/
           Fillet/Chanfro+Plano/Eixo+Chapa juntos, cada um com seus próprios
@@ -2302,6 +2335,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           />
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

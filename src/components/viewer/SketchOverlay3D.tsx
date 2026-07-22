@@ -123,6 +123,17 @@ function InteractivePlane({ plane, referenceGeometry }: { plane: SketchPlane; re
       }}
       onPointerUp={(e) => {
         e.stopPropagation();
+        // Libera explicitamente (não confia só na liberação implícita do
+        // browser) — com a ferramenta Cota agora exigindo um 2º clique em
+        // seguida (dimensionPick1), e o rótulo da cota recém-criada
+        // aparecendo bem em cima de onde o ponteiro está, uma captura que
+        // ficasse presa no canvas roubaria o clique seguinte que deveria
+        // cair no botão de editar/remover (Html é DOM normal, fora do
+        // raycasting do R3F — só recebe o clique se o canvas não estiver
+        // segurando o ponteiro).
+        if (gl.domElement.hasPointerCapture(e.pointerId)) {
+          gl.domElement.releasePointerCapture(e.pointerId);
+        }
         handleRawUp(toRaw(e), referenceGeometry);
       }}
       onPointerLeave={() => clearHover()}
@@ -159,13 +170,29 @@ function DimensionLabel({
     // deixava a caixa pequena demais mesmo na distância normal de trabalho.
     <Html position={position} center distanceFactor={220} pointerEvents="auto">
       <span className="flex items-center gap-1.5 whitespace-nowrap rounded-full border border-primary-200 bg-white px-3 py-1.5 text-base font-bold text-primary-900 shadow-md">
-        <button type="button" onClick={onEdit} className={onEdit ? "cursor-pointer hover:underline" : ""}>
+        <button
+          type="button"
+          onClick={(e) => {
+            // eslint-disable-next-line no-console
+            console.log("[cota] clique no texto", { hasOnEdit: !!onEdit, text });
+            e.stopPropagation();
+            onEdit?.();
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          className={onEdit ? "cursor-pointer hover:underline" : ""}
+        >
           {text}
         </button>
         {onRemove && (
           <button
             type="button"
-            onClick={onRemove}
+            onClick={(e) => {
+              // eslint-disable-next-line no-console
+              console.log("[cota] clique no x", { text });
+              e.stopPropagation();
+              onRemove();
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
             className="cursor-pointer rounded-full px-1 text-primary-400 hover:bg-error/10 hover:text-error"
           >
             ×

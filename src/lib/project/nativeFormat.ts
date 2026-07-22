@@ -1,9 +1,13 @@
 import type { Feature } from "@/lib/features/types";
+import type { DrawingSheet } from "@/lib/drawing/types";
 
 // Formato nativo do Modelador Eksteel — JSON com a árvore de features
 // inteira (inclusive os sketches, com shapes/points/dimensions), pra poder
 // reabrir e continuar editando depois. Diferente de STEP/DXF (que exportam
-// só a geometria final, sem histórico paramétrico).
+// só a geometria final, sem histórico paramétrico). drawingSheets (folhas
+// de desenho 2D geradas da peça) mora no MESMO arquivo — ao contrário do
+// .idw separado do Inventor (vinculado ao .ipt por fora), aqui é tudo um
+// projeto só, mais simples de não perder o vínculo entre os dois.
 export const NATIVE_FILE_EXTENSION = ".eks3d";
 export const NATIVE_MIME_TYPE = "application/vnd.eksteel.modelador+json";
 const NATIVE_FORMAT_ID = "eksteel-modelador";
@@ -14,21 +18,30 @@ type NativeProjectFile = {
   version: number;
   savedAt: string;
   features: Feature[];
+  // Opcional — ausente em projetos salvos antes da ferramenta de Desenho
+  // existir. parseProject devolve [] nesse caso (ver abaixo).
+  drawingSheets?: DrawingSheet[];
 };
 
-export function serializeProject(features: Feature[]): string {
+export type ParsedProject = {
+  features: Feature[];
+  drawingSheets: DrawingSheet[];
+};
+
+export function serializeProject(features: Feature[], drawingSheets: DrawingSheet[] = []): string {
   const payload: NativeProjectFile = {
     format: NATIVE_FORMAT_ID,
     version: NATIVE_FORMAT_VERSION,
     savedAt: new Date().toISOString(),
     features,
+    drawingSheets,
   };
   return JSON.stringify(payload, null, 2);
 }
 
 // Lança um Error com mensagem amigável se o arquivo não for reconhecido —
 // quem chama decide como mostrar isso (hoje, um alert simples).
-export function parseProject(json: string): Feature[] {
+export function parseProject(json: string): ParsedProject {
   let data: unknown;
   try {
     data = JSON.parse(json);
@@ -45,5 +58,9 @@ export function parseProject(json: string): Feature[] {
     throw new Error(`Arquivo não reconhecido como projeto do Modelador Eksteel (esperado "${NATIVE_FILE_EXTENSION}").`);
   }
 
-  return (data as NativeProjectFile).features;
+  const file = data as NativeProjectFile;
+  return {
+    features: file.features,
+    drawingSheets: Array.isArray(file.drawingSheets) ? file.drawingSheets : [],
+  };
 }

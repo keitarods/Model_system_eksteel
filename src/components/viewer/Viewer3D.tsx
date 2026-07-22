@@ -12,6 +12,7 @@ import { planeBasisQuaternion } from "./planeBasis";
 import { planeYDir } from "@/lib/replicad/plane";
 import { useSketchStore } from "@/lib/sketch/store";
 import type { SketchPlane } from "@/lib/sketch/types";
+import { IconRotateCW, IconRotateCCW } from "@/components/icons/ToolIcons";
 
 // Retângulo bem transparente, sem interação — marca os planos de trabalho
 // já criados (features tipo "plane") pra ficarem visíveis no 3D o tempo
@@ -350,6 +351,66 @@ function orbitCameraAround(camera: THREE.Camera, target: THREE.Vector3, deltaAzi
 // tela" arrastada, mesma ordem de grandeza do rotateSpeed padrão do
 // OrbitControls (2π por altura da tela).
 const CUBE_DRAG_SENSITIVITY = Math.PI;
+
+// Gira a IMAGEM em si (roll 2D em torno do próprio eixo de visão), não
+// reorienta a câmera pra outra vista 3D — ao estilo dos 2 botões curvos do
+// ViewCube do Inventor. Roda "up" em torno da direção de visão (câmera →
+// alvo) por deltaAngle e reaplica lookAt: a posição da câmera e o que ela
+// mira não mudam, só o "lado pra cima" gira, girando o enquadramento
+// inteiro na tela.
+function rollViewStep(api: CameraApi | null, target: [number, number, number], deltaAngle: number) {
+  if (!api) return;
+  const targetVec = new THREE.Vector3(...target);
+  const forward = targetVec.clone().sub(api.camera.position).normalize();
+  if (forward.lengthSq() < 1e-9) return;
+  api.camera.up.applyAxisAngle(forward, deltaAngle);
+  api.camera.lookAt(targetVec);
+  api.controls?.update?.();
+}
+
+// 2 setas curvas de giro (sentido horário/anti-horário) coladas embaixo do
+// ViewCube, igual o Inventor — giro 2D de 90° por clique, não uma
+// reorientação 3D pra outra vista (essa já existe: clicar face/aresta/canto
+// do próprio cubo). Vive FORA do Canvas (HTML normal sobreposto, não WebGL)
+// porque o ViewCube mora num Hud com câmera virtual própria (ver comentário
+// de CameraApiCapture); um <div> ancorado nas mesmas coordenadas de
+// alignment/margin do GizmoHelper (top-right, 70/70) é bem mais simples que
+// desenhar isso dentro do Hud. cameraApiRef é lido direto (mutação de
+// objetos three.js de verdade, não estado React), mesma técnica já usada
+// pelo arrastar do cubo.
+function ViewCubeRotationArrows({
+  apiRef,
+  orbitTarget,
+}: {
+  apiRef: React.MutableRefObject<CameraApi | null>;
+  orbitTarget: [number, number, number];
+}) {
+  const arrowClass =
+    "pointer-events-auto absolute flex h-6 w-6 items-center justify-center rounded-full bg-white/90 text-primary-700 shadow hover:bg-primary-100 hover:text-primary-900";
+
+  return (
+    <div className="pointer-events-none absolute" style={{ top: 70, right: 70, width: 0, height: 0 }}>
+      <button
+        type="button"
+        title="Girar vista 90° (anti-horário)"
+        onClick={() => rollViewStep(apiRef.current, orbitTarget, Math.PI / 2)}
+        className={arrowClass}
+        style={{ left: -46, top: 34 }}
+      >
+        <IconRotateCCW />
+      </button>
+      <button
+        type="button"
+        title="Girar vista 90° (horário)"
+        onClick={() => rollViewStep(apiRef.current, orbitTarget, -Math.PI / 2)}
+        className={arrowClass}
+        style={{ left: 10, top: 34 }}
+      >
+        <IconRotateCW />
+      </button>
+    </div>
+  );
+}
 
 // Cobre o ViewCube inteiro (não tem geometria própria — um <group> sem
 // malha não é alvo de raycast, mas ainda recebe eventos que borbulham dos
@@ -779,6 +840,8 @@ export function Viewer3D({
             maxDistance={4000}
           />
         </Canvas>
+
+        <ViewCubeRotationArrows apiRef={cameraApiRef} orbitTarget={orbitTarget} />
 
         {!mesh && !pickMode && !sketchOverlay && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-primary-500">

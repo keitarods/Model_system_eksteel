@@ -260,3 +260,51 @@ export function IconSlotCenterPoint({ className }: IconProps) {
     </svg>
   );
 }
+
+// Setas de giro (roll) do ViewCube, ao estilo Inventor — arco de ~270° +
+// ponta de seta, uma pra cada sentido. É um giro 2D da própria imagem (roda
+// o "up" da câmera em torno do eixo de visão), não uma reorientação 3D pra
+// outra vista.
+export function IconRotateCW({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" width={14} height={14} className={className}>
+      <path
+        d="M15.8 10.2a5.8 5.8 0 1 1-1.9-4.3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+      <path
+        d="M14.4 3.2l0.6 3.4-3.4 0.4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+export function IconRotateCCW({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" width={14} height={14} className={className}>
+      <path
+        d="M4.2 10.2a5.8 5.8 0 1 0 1.9-4.3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+      <path
+        d="M5.6 3.2l-0.6 3.4 3.4 0.4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
