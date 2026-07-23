@@ -277,6 +277,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const [featureToolMode, setFeatureToolMode] = useState<
     "extrude" | "face" | "revolve" | "hole" | "split" | null
   >(null);
+  // Id da feature sendo REEDITADA (não criada) — quando setado, os mesmos
+  // painéis de Extrudar/Face/Revolucionar/Furo/Cortar por Plano/Arredondar/
+  // Chanfrar/Flange/Plano usados na criação reabrem preenchidos com os
+  // valores atuais da feature, e o botão de confirmar ATUALIZA ela no lugar
+  // (updateFeature, preservando profile/plane/edgePoints/etc. originais) em
+  // vez de criar uma nova (ver handleEditFeature). Substitui os prompts
+  // sequenciais que só cobriam campo por campo.
+  const [editingFeatureId, setEditingFeatureId] = useState<string | null>(null);
 
   const [mesh, setMesh] = useState<ShapeMesh | null>(null);
   // Arestas do sólido ativo em coordenadas de mundo (flat, pares de pontos
@@ -636,6 +644,40 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     const count = selectedEdgePoints.length;
     const suffix = count > 1 ? `s (${count} arestas)` : " (1 aresta)";
 
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === edgeToolMode) as
+        | Extract<Feature, { type: "fillet" | "chamfer" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setEdgeToolMode(null);
+        setSelectedEdgePoints([]);
+        return;
+      }
+      // Arestas continuam as mesmas de quando a feature foi criada — editar
+      // só troca o raio/distância, não reabre a escolha de arestas no 3D
+      // (selectedEdgePoints foi preenchido com edgePoints ao entrar em modo
+      // de edição, ver handleEditFeature).
+      if (edgeToolMode === "fillet") {
+        updateFeature(editingFeatureId, {
+          ...(original as Extract<Feature, { type: "fillet" }>),
+          radius: filletRadius3d,
+          label: `Arredondar R${filletRadius3d}mm${suffix}`,
+        });
+      } else {
+        updateFeature(editingFeatureId, {
+          ...(original as Extract<Feature, { type: "chamfer" }>),
+          distance: chamferDistance3d,
+          label: `Chanfrar ${chamferDistance3d}mm${suffix}`,
+        });
+      }
+      showNotice(edgeToolMode === "fillet" ? "Arredondamento atualizado." : "Chanfro atualizado.");
+      setEditingFeatureId(null);
+      setEdgeToolMode(null);
+      setSelectedEdgePoints([]);
+      return;
+    }
+
     if (edgeToolMode === "fillet") {
       addFeature({
         id: createId(),
@@ -657,7 +699,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     showNotice(edgeToolMode === "fillet" ? "Arredondamento criado." : "Chanfro criado.");
     setEdgeToolMode(null);
     setSelectedEdgePoints([]);
-  }, [edgeToolMode, selectedEdgePoints, filletRadius3d, chamferDistance3d, addFeature, showNotice]);
+  }, [edgeToolMode, selectedEdgePoints, filletRadius3d, chamferDistance3d, addFeature, showNotice, editingFeatureId, features, updateFeature]);
 
   // Ambiente de Chapa: "Virar Chapa" cria a SheetMetalFeature única da
   // árvore (espessura compartilhada por Face/Flange dela em diante);
@@ -683,6 +725,33 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // espessura da chapa ativa, nunca escolhida aqui. Com "Corte" marcado,
   // vira o "Cut" do Inventor: mesma extrusão, mas recorta em vez de somar.
   const handleAddFace = useCallback(() => {
+    const arrow = faceDirection === "flipped" ? " ←" : faceDirection === "symmetric" ? " ↔" : " →";
+
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "face") as
+        | Extract<Feature, { type: "face" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFeatureToolMode(null);
+        return;
+      }
+      if (faceCut && !hasActiveSolid) {
+        setErrorMessage("Não há chapa ativa para recortar — desmarque “Corte” ou crie a Face base primeiro.");
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        direction: faceDirection,
+        cut: faceCut,
+        label: `Face ${sheetMetalFeature?.thickness}mm${faceCut ? " (corte)" : ""}${arrow}`,
+      });
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      showNotice("Face atualizada.");
+      return;
+    }
+
     if (!profile || !sheetMetalFeature) return;
     if (faceCut && !hasActiveSolid) {
       setErrorMessage(
@@ -690,7 +759,6 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       );
       return;
     }
-    const arrow = faceDirection === "flipped" ? " ←" : faceDirection === "symmetric" ? " ↔" : " →";
     addFeature({
       id: createId(),
       type: "face",
@@ -703,7 +771,20 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     clearSketch();
     setEditingSketchId(null);
     setFeatureToolMode(null);
-  }, [profile, sheetMetalFeature, faceDirection, faceCut, hasActiveSolid, activePlane, addFeature, clearSketch]);
+  }, [
+    profile,
+    sheetMetalFeature,
+    faceDirection,
+    faceCut,
+    hasActiveSolid,
+    activePlane,
+    addFeature,
+    clearSketch,
+    editingFeatureId,
+    features,
+    updateFeature,
+    showNotice,
+  ]);
 
   const handleStartFlange = useCallback(() => {
     setFlangePicking(true);
@@ -730,6 +811,32 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
   const handleConfirmFlange = useCallback(() => {
     if (!flangeCandidate) return;
+
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "flange") as
+        | Extract<Feature, { type: "flange" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFlangePicking(false);
+        setFlangeCandidate(null);
+        return;
+      }
+      // parentId/edgeStart/edgeEnd continuam os mesmos — editar só troca
+      // comprimento/ângulo, sem reescolher a aresta de origem no 3D.
+      updateFeature(editingFeatureId, {
+        ...original,
+        length: flangeLength,
+        angle: flangeAngle,
+        label: `Flange ${flangeLength}mm ${flangeAngle}°`,
+      });
+      setEditingFeatureId(null);
+      setFlangePicking(false);
+      setFlangeCandidate(null);
+      showNotice("Flange atualizada.");
+      return;
+    }
+
     // O pai é a Face/Flange que REALMENTE originou a aresta clicada — nunca
     // "a última da árvore" (isso quebra assim que a peça ramifica: duas
     // Flanges irmãs direto da base, ou uma encadeada criada depois de uma
@@ -756,7 +863,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     setFlangePicking(false);
     setFlangeCandidate(null);
     showNotice("Flange criada.");
-  }, [features, flangeCandidate, flangeLength, flangeAngle, addFeature, showNotice]);
+  }, [features, flangeCandidate, flangeLength, flangeAngle, addFeature, showNotice, editingFeatureId, updateFeature]);
 
   // Roteia o clique numa face do 3D conforme o que estava pedindo o clique
   // — mesmo pickMode serve pra escolher plano de esboço, escolher a face de
@@ -814,6 +921,30 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
   const handleConfirmPlane = useCallback(() => {
     if (!planeBase) return;
+
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "plane") as
+        | Extract<Feature, { type: "plane" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setCreatingPlane(false);
+        setPlaneBase(null);
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        offset: planeOffset,
+        plane: { ...planeBase, origin: offsetOrigin(planeBase, planeOffset) },
+        label: `Plano (offset ${planeOffset.toFixed(1)}mm)`,
+      });
+      setEditingFeatureId(null);
+      setCreatingPlane(false);
+      setPlaneBase(null);
+      showNotice("Plano de trabalho atualizado.");
+      return;
+    }
+
     addFeature({
       id: createId(),
       type: "plane",
@@ -825,7 +956,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     setCreatingPlane(false);
     setPlaneBase(null);
     showNotice("Plano de trabalho criado.");
-  }, [planeBase, planeOffset, addFeature, showNotice]);
+  }, [planeBase, planeOffset, addFeature, showNotice, editingFeatureId, features, updateFeature]);
 
   const handleCancelPlane = useCallback(() => {
     setCreatingPlane(false);
@@ -888,6 +1019,34 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   }, []);
 
   const handleAddExtrude = useCallback(() => {
+    const directionArrow = extrudeDirection === "flipped" ? " ←" : extrudeDirection === "symmetric" ? " ↔" : " →";
+
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "extrude") as
+        | Extract<Feature, { type: "extrude" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFeatureToolMode(null);
+        return;
+      }
+      if (extrudeCut && !hasActiveSolid) {
+        setErrorMessage("Não há sólido ativo para cortar — desmarque “Corte” ou crie um sólido primeiro.");
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        depth: extrudeDepth,
+        cut: extrudeCut,
+        direction: extrudeDirection,
+        label: `Extrudar ${extrudeDepth}mm${extrudeCut ? " (corte)" : ""}${directionArrow}`,
+      });
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      showNotice("Extrudar atualizado.");
+      return;
+    }
+
     if (!profile) return;
     if (extrudeCut && !hasActiveSolid) {
       setErrorMessage(
@@ -895,7 +1054,6 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       );
       return;
     }
-    const directionArrow = extrudeDirection === "flipped" ? " ←" : extrudeDirection === "symmetric" ? " ↔" : " →";
     addFeature({
       id: createId(),
       type: "extrude",
@@ -909,9 +1067,48 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     clearSketch();
     setEditingSketchId(null);
     setFeatureToolMode(null);
-  }, [profile, extrudeCut, extrudeDepth, extrudeDirection, hasActiveSolid, activePlane, addFeature, clearSketch]);
+  }, [
+    profile,
+    extrudeCut,
+    extrudeDepth,
+    extrudeDirection,
+    hasActiveSolid,
+    activePlane,
+    addFeature,
+    clearSketch,
+    editingFeatureId,
+    features,
+    updateFeature,
+    showNotice,
+  ]);
 
   const handleAddRevolve = useCallback(() => {
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "revolve") as
+        | Extract<Feature, { type: "revolve" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFeatureToolMode(null);
+        return;
+      }
+      if (revolveCut && !hasActiveSolid) {
+        setErrorMessage("Não há sólido ativo para cortar — desmarque “Corte” ou crie um sólido primeiro.");
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        angle: revolveAngle,
+        reversed: revolveReversed,
+        cut: revolveCut,
+        label: `Revolução ${revolveAngle}° ${revolveReversed ? "↺" : "↻"}${revolveCut ? " (corte)" : ""}`,
+      });
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      showNotice("Revolução atualizada.");
+      return;
+    }
+
     if (!profile || !centerLine) return;
     if (revolveCut && !hasActiveSolid) {
       setErrorMessage(
@@ -934,9 +1131,47 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     clearSketch();
     setEditingSketchId(null);
     setFeatureToolMode(null);
-  }, [profile, centerLine, revolveAngle, revolveReversed, revolveCut, hasActiveSolid, activePlane, addFeature, clearSketch]);
+  }, [
+    profile,
+    centerLine,
+    revolveAngle,
+    revolveReversed,
+    revolveCut,
+    hasActiveSolid,
+    activePlane,
+    addFeature,
+    clearSketch,
+    editingFeatureId,
+    features,
+    updateFeature,
+    showNotice,
+  ]);
 
   const handleAddHole = useCallback(() => {
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "hole") as
+        | Extract<Feature, { type: "hole" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFeatureToolMode(null);
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        through: holeThrough,
+        depth: holeDepth,
+        direction: holeDirection,
+        label: `Furo Ø${(original.radius * 2).toFixed(1)}${
+          holeThrough ? " passante" : ` x${holeDepth}mm ${holeDirection === "flipped" ? "←" : "→"}`
+        }`,
+      });
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      showNotice("Furo atualizado.");
+      return;
+    }
+
     if (!lastCircle || !hasActiveSolid) return;
     addFeature({
       id: createId(),
@@ -954,163 +1189,106 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     clearSketch();
     setEditingSketchId(null);
     setFeatureToolMode(null);
-  }, [lastCircle, hasActiveSolid, holeThrough, holeDepth, holeDirection, activePlane, addFeature, clearSketch]);
+  }, [
+    lastCircle,
+    hasActiveSolid,
+    holeThrough,
+    holeDepth,
+    holeDirection,
+    activePlane,
+    addFeature,
+    clearSketch,
+    editingFeatureId,
+    features,
+    updateFeature,
+    showNotice,
+  ]);
 
-  // Edição de feature já aplicada via prompts sequenciais — mesmo padrão já
-  // usado (e testado) pra editar cotas, em vez de um formulário/modal novo
-  // que eu não teria como verificar visualmente antes de entregar. Pra
-  // campos booleanos, o confirm() pergunta se quer TROCAR o valor atual
-  // (OK troca, Cancelar mantém), não "sim/não" direto — evita o risco de
-  // inverter sem querer.
+  // Editar reabre o MESMO painel usado pra criar aquela feature (ver
+  // featureToolMode/edgeToolMode/flangePicking/creatingPlane), preenchido
+  // com os valores atuais — não só "a medida" via prompt como antes. Os
+  // campos estruturais que a feature já tem gravados (profile/plane/
+  // edgePoints/edgeStart-edgeEnd/parentId/basePlane) NÃO são reexpostos pro
+  // usuário reescolher aqui — só os campos que o painel de criação sempre
+  // deixou editáveis; ver handleAddExtrude/handleAddFace/handleAddRevolve/
+  // handleAddHole/handleAddSplit/handleConfirmEdgeTool/handleConfirmFlange/
+  // handleConfirmPlane pra como o confirmar de cada painel detecta
+  // editingFeatureId e ATUALIZA a feature original em vez de criar uma nova.
   const handleEditFeature = useCallback(
     (feature: Feature) => {
       if (feature.type === "sketch") return; // esboços usam onOpenSketch
+      if (feature.type === "axis") return; // derivado direto da face — nada pra reeditar, só remover e recriar
+
+      // Garante exclusividade entre os painéis antes de abrir o certo —
+      // sem isso, editar uma feature de um tipo enquanto o painel de OUTRO
+      // tipo já estava aberto (criando ou editando) deixaria estado
+      // fantasma que faz a árvore de ternários da barra mostrar o painel
+      // errado (ela decide qual mostrar pela ordem: plano > eixo > aresta >
+      // flange > featureToolMode).
+      setFeatureToolMode(null);
+      setEdgeToolMode(null);
+      setSelectedEdgePoints([]);
+      setFlangePicking(false);
+      setFlangeCandidate(null);
+      setCreatingPlane(false);
+      setPlaneBase(null);
+      setPickingPlane(false);
+      setPickingAxisFace(false);
 
       if (feature.type === "extrude") {
-        const input = window.prompt("Nova profundidade (mm):", String(feature.depth));
-        if (input === null) return;
-        const depth = Number(input.replace(",", "."));
-        if (!Number.isFinite(depth) || depth <= 0) return;
-
-        const toggleCut = window.confirm(
-          `Corte está ${feature.cut ? "ativado" : "desativado"}. OK para ${
-            feature.cut ? "desativar" : "ativar"
-          }, Cancelar para manter.`
-        );
-        const cut = toggleCut ? !feature.cut : feature.cut;
-
-        // 3 estados — o confirm() aqui cicla pro próximo em vez de só
-        // ligar/desligar, já que não é uma escolha binária.
-        const current = feature.direction ?? "normal";
-        const directionLabel = (d: ExtrudeDirection) =>
-          d === "normal" ? "seguindo a normal do plano" : d === "flipped" ? "invertido" : "simétrico";
-        const next: ExtrudeDirection = current === "normal" ? "flipped" : current === "flipped" ? "symmetric" : "normal";
-        const cycleDirection = window.confirm(
-          `Sentido atual: ${directionLabel(current)}. OK para trocar para "${directionLabel(next)}", Cancelar para manter.`
-        );
-        const direction = cycleDirection ? next : current;
-        const arrow = direction === "flipped" ? " ←" : direction === "symmetric" ? " ↔" : " →";
-
-        updateFeature(feature.id, {
-          ...feature,
-          depth,
-          cut,
-          direction,
-          label: `Extrudar ${depth}mm${cut ? " (corte)" : ""}${arrow}`,
-        });
+        setExtrudeDepth(feature.depth);
+        setExtrudeCut(feature.cut);
+        setExtrudeDirection(feature.direction ?? "normal");
+        setEditingFeatureId(feature.id);
+        setFeatureToolMode("extrude");
         return;
       }
 
       if (feature.type === "revolve") {
-        const input = window.prompt("Novo ângulo (graus, 1-360):", String(feature.angle));
-        if (input === null) return;
-        const angle = Number(input.replace(",", "."));
-        if (!Number.isFinite(angle) || angle <= 0 || angle > 360) return;
-
-        const currentReversed = feature.reversed ?? false;
-        const toggleReversed = window.confirm(
-          `Sentido de rotação está ${currentReversed ? "invertido" : "padrão"}. OK para trocar, Cancelar para manter.`
-        );
-        const reversed = toggleReversed ? !currentReversed : currentReversed;
-
-        const toggleCut = window.confirm(
-          `Corte está ${feature.cut ? "ativado" : "desativado"}. OK para ${
-            feature.cut ? "desativar" : "ativar"
-          }, Cancelar para manter.`
-        );
-        const cut = toggleCut ? !feature.cut : feature.cut;
-
-        updateFeature(feature.id, {
-          ...feature,
-          angle,
-          reversed,
-          cut,
-          label: `Revolução ${angle}° ${reversed ? "↺" : "↻"}${cut ? " (corte)" : ""}`,
-        });
+        setRevolveAngle(feature.angle);
+        setRevolveReversed(feature.reversed ?? false);
+        setRevolveCut(feature.cut ?? false);
+        setEditingFeatureId(feature.id);
+        setFeatureToolMode("revolve");
         return;
       }
 
       if (feature.type === "hole") {
-        const toggleThrough = window.confirm(
-          `Furo está ${
-            feature.through ? "passante" : "com profundidade fixa"
-          }. OK para trocar, Cancelar para manter.`
-        );
-        const through = toggleThrough ? !feature.through : feature.through;
-
-        let depth = feature.depth;
-        let direction = feature.direction ?? "flipped";
-        if (!through) {
-          const input = window.prompt("Nova profundidade do furo (mm):", String(feature.depth));
-          if (input === null) return;
-          const parsed = Number(input.replace(",", "."));
-          if (!Number.isFinite(parsed) || parsed <= 0) return;
-          depth = parsed;
-
-          const toggleDirection = window.confirm(
-            `Sentido do furo está ${direction === "flipped" ? "invertido" : "padrão"}. OK para trocar, Cancelar para manter.`
-          );
-          if (toggleDirection) direction = direction === "flipped" ? "normal" : "flipped";
-        }
-
-        updateFeature(feature.id, {
-          ...feature,
-          through,
-          depth,
-          direction,
-          label: `Furo Ø${(feature.radius * 2).toFixed(1)}${
-            through ? " passante" : ` x${depth}mm ${direction === "flipped" ? "←" : "→"}`
-          }`,
-        });
+        setHoleThrough(feature.through);
+        setHoleDepth(feature.depth);
+        setHoleDirection(feature.direction ?? "flipped");
+        setEditingFeatureId(feature.id);
+        setFeatureToolMode("hole");
         return;
       }
 
       if (feature.type === "plane") {
-        const input = window.prompt("Novo deslocamento (mm, pode ser negativo):", String(feature.offset));
-        if (input === null) return;
-        const offset = Number(input.replace(",", "."));
-        if (!Number.isFinite(offset)) return;
-
-        updateFeature(feature.id, {
-          ...feature,
-          offset,
-          plane: { ...feature.basePlane, origin: offsetOrigin(feature.basePlane, offset) },
-          label: `Plano (offset ${offset}mm)`,
-        });
+        setPlaneBase(feature.basePlane);
+        setPlaneOffset(feature.offset);
+        setEditingFeatureId(feature.id);
+        setCreatingPlane(true);
         return;
       }
 
-      if (feature.type === "axis") return; // derivado direto da face — nada pra reeditar, só remover e recriar
-
       if (feature.type === "fillet") {
-        const input = window.prompt("Novo raio de arredondamento (mm):", String(feature.radius));
-        if (input === null) return;
-        const radius = Number(input.replace(",", "."));
-        if (!Number.isFinite(radius) || radius <= 0) return;
-        const count = feature.edgePoints.length;
-        updateFeature(feature.id, {
-          ...feature,
-          radius,
-          label: `Arredondar R${radius}mm${count > 1 ? ` (${count} arestas)` : " (1 aresta)"}`,
-        });
+        setFilletRadius3d(feature.radius);
+        setSelectedEdgePoints(feature.edgePoints);
+        setEditingFeatureId(feature.id);
+        setEdgeToolMode("fillet");
         return;
       }
 
       if (feature.type === "chamfer") {
-        const input = window.prompt("Nova distância do chanfro (mm):", String(feature.distance));
-        if (input === null) return;
-        const distance = Number(input.replace(",", "."));
-        if (!Number.isFinite(distance) || distance <= 0) return;
-        const count = feature.edgePoints.length;
-        updateFeature(feature.id, {
-          ...feature,
-          distance,
-          label: `Chanfrar ${distance}mm${count > 1 ? ` (${count} arestas)` : " (1 aresta)"}`,
-        });
+        setChamferDistance3d(feature.distance);
+        setSelectedEdgePoints(feature.edgePoints);
+        setEditingFeatureId(feature.id);
+        setEdgeToolMode("chamfer");
         return;
       }
 
       if (feature.type === "sheetMetal") {
+        // Espessura é o único campo que "Virar Chapa" já sempre teve — não
+        // há outras opções escondidas aqui pra justificar um painel próprio.
         const input = window.prompt("Nova espessura da chapa (mm):", String(feature.thickness));
         if (input === null) return;
         const thickness = Number(input.replace(",", "."));
@@ -1120,73 +1298,59 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       }
 
       if (feature.type === "face") {
-        const current = feature.direction ?? "normal";
-        const directionLabel = (d: ExtrudeDirection) =>
-          d === "normal" ? "seguindo a normal do plano" : d === "flipped" ? "invertido" : "simétrico";
-        const next: ExtrudeDirection = current === "normal" ? "flipped" : current === "flipped" ? "symmetric" : "normal";
-        const cycleDirection = window.confirm(
-          `Sentido atual: ${directionLabel(current)}. OK para trocar para "${directionLabel(next)}", Cancelar para manter.`
-        );
-        const direction = cycleDirection ? next : current;
-        const arrow = direction === "flipped" ? " ←" : direction === "symmetric" ? " ↔" : " →";
-
-        const toggleCut = window.confirm(
-          `Corte está ${feature.cut ? "ativado" : "desativado"}. OK para ${
-            feature.cut ? "desativar" : "ativar"
-          }, Cancelar para manter.`
-        );
-        const cut = toggleCut ? !feature.cut : feature.cut;
-
-        updateFeature(feature.id, {
-          ...feature,
-          direction,
-          cut,
-          label: `Face${sheetMetalFeature ? ` ${sheetMetalFeature.thickness}mm` : ""}${cut ? " (corte)" : ""}${arrow}`,
-        });
+        setFaceDirection(feature.direction ?? "normal");
+        setFaceCut(feature.cut ?? false);
+        setEditingFeatureId(feature.id);
+        setFeatureToolMode("face");
         return;
       }
 
       if (feature.type === "flange") {
-        const lengthInput = window.prompt("Novo comprimento da aba (mm):", String(feature.length));
-        if (lengthInput === null) return;
-        const length = Number(lengthInput.replace(",", "."));
-        if (!Number.isFinite(length) || length <= 0) return;
-
-        const angleInput = window.prompt("Novo ângulo de dobra (graus):", String(feature.angle));
-        if (angleInput === null) return;
-        const angle = Number(angleInput.replace(",", "."));
-        if (!Number.isFinite(angle) || angle <= 0 || angle > 180) return;
-
-        updateFeature(feature.id, {
-          ...feature,
-          length,
-          angle,
-          label: `Flange ${length}mm ${angle}°`,
-        });
+        setFlangeLength(feature.length);
+        setFlangeAngle(feature.angle);
+        setFlangeCandidate({ start: feature.edgeStart, end: feature.edgeEnd });
+        setEditingFeatureId(feature.id);
+        setFlangePicking(true);
         return;
       }
 
-      const toggleSide = window.confirm(
-        `Mantendo o lado ${
-          feature.keepSide === "positive" ? "+" : "-"
-        }. OK para trocar de lado, Cancelar para manter.`
-      );
-      const keepSide: "positive" | "negative" = toggleSide
-        ? feature.keepSide === "positive"
-          ? "negative"
-          : "positive"
-        : feature.keepSide;
-
-      updateFeature(feature.id, {
-        ...feature,
-        keepSide,
-        label: `Cortar por plano (${keepSide === "positive" ? "lado +" : "lado -"})`,
-      });
+      // Só sobra "split" depois de eliminar os outros tipos do union.
+      setSplitKeepSide(feature.keepSide);
+      setEditingFeatureId(feature.id);
+      setFeatureToolMode("split");
     },
     [updateFeature]
   );
 
+  // Cancelar qualquer painel de edição volta pro estado ocioso igual
+  // cancelar uma criação nova — chamado nos botões "Cancelar" de cada
+  // painel junto com o reset de estado que já existia (setFeatureToolMode/
+  // setEdgeToolMode/setFlangePicking/setCreatingPlane com null/false).
+  const handleCancelEditingFeature = useCallback(() => {
+    setEditingFeatureId(null);
+  }, []);
+
   const handleAddSplit = useCallback(() => {
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "split") as
+        | Extract<Feature, { type: "split" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFeatureToolMode(null);
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        keepSide: splitKeepSide,
+        label: `Cortar por plano (${splitKeepSide === "positive" ? "lado +" : "lado -"})`,
+      });
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      showNotice("Corte por plano atualizado.");
+      return;
+    }
+
     if (!hasActiveSolid) return;
     addFeature({
       id: createId(),
@@ -1196,7 +1360,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       keepSide: splitKeepSide,
     });
     setFeatureToolMode(null);
-  }, [hasActiveSolid, activePlane, splitKeepSide, addFeature]);
+  }, [hasActiveSolid, activePlane, splitKeepSide, addFeature, editingFeatureId, features, updateFeature, showNotice]);
 
   const handleLogout = useCallback(async () => {
     const supabase = createClient();
@@ -1553,6 +1717,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           </div>
         ) : creatingPlane && planeBase ? (
           <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+            {editingFeatureId && <span className="shrink-0 font-semibold text-primary-800">Editando Plano</span>}
             <span className="shrink-0 text-primary-700">
               Arraste o plano amarelo no 3D ou digite o deslocamento:
             </span>
@@ -1571,11 +1736,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               onClick={handleConfirmPlane}
               className="shrink-0 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground hover:bg-primary-hover"
             >
-              Criar Plano
+              {editingFeatureId ? "Salvar Plano" : "Criar Plano"}
             </button>
             <button
               type="button"
-              onClick={handleCancelPlane}
+              onClick={() => {
+                handleCancelPlane();
+                handleCancelEditingFeature();
+              }}
               className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
             >
               Cancelar
@@ -1608,8 +1776,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         ) : edgeToolMode ? (
           <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
             <span className="shrink-0 text-primary-700">
-              {edgeToolMode === "fillet" ? "Arredondar" : "Chanfrar"} — clique nas arestas no 3D
-              ({selectedEdgePoints.length} escolhida{selectedEdgePoints.length === 1 ? "" : "s"}):
+              {editingFeatureId
+                ? `Editando ${edgeToolMode === "fillet" ? "arredondamento" : "chanfro"} (${selectedEdgePoints.length} aresta${selectedEdgePoints.length === 1 ? "" : "s"})`
+                : `${edgeToolMode === "fillet" ? "Arredondar" : "Chanfrar"} — clique nas arestas no 3D (${selectedEdgePoints.length} escolhida${selectedEdgePoints.length === 1 ? "" : "s"})`}
+              :
             </span>
             <label className="flex shrink-0 items-center gap-1.5 text-primary-700">
               {edgeToolMode === "fillet" ? "Raio" : "Distância"}
@@ -1633,11 +1803,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               disabled={selectedEdgePoints.length === 0}
               className="shrink-0 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {edgeToolMode === "fillet" ? "Arredondar" : "Chanfrar"}
+              {editingFeatureId ? "Salvar" : edgeToolMode === "fillet" ? "Arredondar" : "Chanfrar"}
             </button>
             <button
               type="button"
-              onClick={handleCancelEdgeTool}
+              onClick={() => {
+                handleCancelEdgeTool();
+                handleCancelEditingFeature();
+              }}
               className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
             >
               Cancelar
@@ -1658,6 +1831,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               </>
             ) : (
               <>
+                {editingFeatureId && <span className="shrink-0 font-semibold text-primary-800">Editando Flange</span>}
                 <label className="flex shrink-0 items-center gap-1.5 text-primary-700">
                   Comprimento
                   <input
@@ -1694,11 +1868,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                   onClick={handleConfirmFlange}
                   className="shrink-0 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground hover:bg-primary-hover"
                 >
-                  Criar Flange
+                  {editingFeatureId ? "Salvar Flange" : "Criar Flange"}
                 </button>
                 <button
                   type="button"
-                  onClick={handleCancelFlange}
+                  onClick={() => {
+                    handleCancelFlange();
+                    handleCancelEditingFeature();
+                  }}
                   className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
                 >
                   Cancelar
@@ -1755,7 +1932,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 aresta ao clicar — ver edgeToolMode acima). */}
             {featureToolMode === "extrude" ? (
               <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
-                <span className="shrink-0 font-semibold text-primary-800">Extrudar</span>
+                <span className="shrink-0 font-semibold text-primary-800">{editingFeatureId ? "Editando Extrudar" : "Extrudar"}</span>
                 <label className="flex items-center gap-1.5 text-primary-700">
                   Profundidade
                   <input
@@ -1799,15 +1976,18 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 <button
                   type="button"
                   onClick={handleAddExtrude}
-                  disabled={!profile}
+                  disabled={editingFeatureId ? false : !profile}
                   className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <IconExtrude />
-                  Extrudar
+                  {editingFeatureId ? "Salvar" : "Extrudar"}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setFeatureToolMode(null)}
+                  onClick={() => {
+                    setFeatureToolMode(null);
+                    handleCancelEditingFeature();
+                  }}
                   className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
                 >
                   Cancelar
@@ -1815,7 +1995,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               </div>
             ) : featureToolMode === "face" ? (
               <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
-                <span className="shrink-0 font-semibold text-primary-800">Face</span>
+                <span className="shrink-0 font-semibold text-primary-800">{editingFeatureId ? "Editando Face" : "Face"}</span>
                 <label className="flex items-center gap-1.5 text-primary-700">
                   <input
                     type="checkbox"
@@ -1848,7 +2028,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 <button
                   type="button"
                   onClick={handleAddFace}
-                  disabled={!profile}
+                  disabled={editingFeatureId ? false : !profile}
                   title={
                     faceCut
                       ? `Recorta a chapa com o perfil, na espessura ativa (${sheetMetalFeature?.thickness}mm)`
@@ -1856,11 +2036,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                   }
                   className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {faceCut ? "Cortar" : "Face"}
+                  {editingFeatureId ? "Salvar" : faceCut ? "Cortar" : "Face"}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setFeatureToolMode(null)}
+                  onClick={() => {
+                    setFeatureToolMode(null);
+                    handleCancelEditingFeature();
+                  }}
                   className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
                 >
                   Cancelar
@@ -1868,7 +2051,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               </div>
             ) : featureToolMode === "revolve" ? (
               <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
-                <span className="shrink-0 font-semibold text-primary-800">Revolucionar</span>
+                <span className="shrink-0 font-semibold text-primary-800">{editingFeatureId ? "Editando Revolucionar" : "Revolucionar"}</span>
                 <span
                   className={`text-xs ${centerLine ? "text-primary-500" : "text-primary-400"}`}
                   title="Desenhe uma Linha de Centro no sketch pra definir o eixo — sem ela, Revolucionar fica desabilitado."
@@ -1918,20 +2101,23 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 <button
                   type="button"
                   onClick={handleAddRevolve}
-                  disabled={!profile || !centerLine}
+                  disabled={editingFeatureId ? false : !profile || !centerLine}
                   title={
-                    !centerLine
+                    !editingFeatureId && !centerLine
                       ? "Desenhe uma Linha de Centro no sketch antes de revolucionar"
                       : undefined
                   }
                   className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <IconRevolve />
-                  Revolucionar
+                  {editingFeatureId ? "Salvar" : "Revolucionar"}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setFeatureToolMode(null)}
+                  onClick={() => {
+                    setFeatureToolMode(null);
+                    handleCancelEditingFeature();
+                  }}
                   className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
                 >
                   Cancelar
@@ -1939,7 +2125,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               </div>
             ) : featureToolMode === "hole" ? (
               <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
-                <span className="shrink-0 font-semibold text-primary-800">Furo</span>
+                <span className="shrink-0 font-semibold text-primary-800">{editingFeatureId ? "Editando Furo" : "Furo"}</span>
                 <label className="flex items-center gap-1.5 text-primary-700">
                   <input
                     type="checkbox"
@@ -1987,20 +2173,23 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 <button
                   type="button"
                   onClick={handleAddHole}
-                  disabled={!lastCircle || !hasActiveSolid}
+                  disabled={editingFeatureId ? false : !lastCircle || !hasActiveSolid}
                   title={
-                    !hasActiveSolid
+                    !editingFeatureId && !hasActiveSolid
                       ? "Extrude ou revolucione um sólido antes de furar"
                       : undefined
                   }
                   className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <IconHole />
-                  Furo
+                  {editingFeatureId ? "Salvar" : "Furo"}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setFeatureToolMode(null)}
+                  onClick={() => {
+                    setFeatureToolMode(null);
+                    handleCancelEditingFeature();
+                  }}
                   className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
                 >
                   Cancelar
@@ -2008,7 +2197,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               </div>
             ) : featureToolMode === "split" ? (
               <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
-                <span className="shrink-0 font-semibold text-primary-800">Cortar por Plano</span>
+                <span className="shrink-0 font-semibold text-primary-800">{editingFeatureId ? "Editando Cortar por Plano" : "Cortar por Plano"}</span>
                 <label className="flex items-center gap-1.5 text-primary-700">
                   Lado a manter
                   <select
@@ -2023,16 +2212,19 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 <button
                   type="button"
                   onClick={handleAddSplit}
-                  disabled={!hasActiveSolid}
-                  title={!hasActiveSolid ? "Crie um sólido antes de cortar por plano" : undefined}
+                  disabled={editingFeatureId ? false : !hasActiveSolid}
+                  title={!editingFeatureId && !hasActiveSolid ? "Crie um sólido antes de cortar por plano" : undefined}
                   className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <IconSplit />
-                  Cortar por Plano
+                  {editingFeatureId ? "Salvar" : "Cortar por Plano"}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setFeatureToolMode(null)}
+                  onClick={() => {
+                    setFeatureToolMode(null);
+                    handleCancelEditingFeature();
+                  }}
                   className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
                 >
                   Cancelar

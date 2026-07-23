@@ -1,6 +1,6 @@
-import { drawProjection, makeProjectedEdges, lookFromPlane, ProjectionCamera } from "replicad";
-import type { AnyShape, Drawing, ProjectionPlane } from "replicad";
-import type { DrawingView, ViewBoxRect, ViewOrientation } from "@/lib/drawing/types";
+import { drawProjection, makeProjectedEdges, lookFromPlane, ProjectionCamera, drawRectangle, Plane as ReplicadPlane } from "replicad";
+import type { AnyShape, Drawing, ProjectionPlane, Solid } from "replicad";
+import type { DrawingView, SectionInfo, ViewBoxRect, ViewOrientation } from "@/lib/drawing/types";
 import { createId } from "@/lib/sketch/render";
 
 // As 6 orientações padrão batem 1:1 com ProjectionPlane do replicad — "iso"
@@ -164,4 +164,107 @@ export function suggestScale(box: ViewBoxRect, maxWidth: number, maxHeight: numb
   const fitting = COMMON_SCALES.filter((s) => s.factor <= fitFactor);
   if (fitting.length === 0) return COMMON_SCALES[0].factor;
   return fitting[fitting.length - 1].factor;
+}
+
+type Vec3 = [number, number, number];
+
+function sub3(a: Vec3, b: Vec3): Vec3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+function cross3(a: Vec3, b: Vec3): Vec3 {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+function normalize3(v: Vec3): Vec3 {
+  const len = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+// Ponto no referencial LOCAL de uma vista (convenção SVG dos paths/lineEdges
+// — Y pra baixo) → ponto no MUNDO 3D, usando os eixos da câmera que gerou
+// aquela vista. cameraFor é pura em (shape, orientation) — não precisa
+// guardar a câmera em DrawingView, só recriar com o sólido atual.
+function viewLocalToWorld(camera: ProjectionCamera, local: { x: number; y: number }): Vec3 {
+  const p = camera.position;
+  const xa = camera.xAxis;
+  const ya = camera.yAxis;
+  const camY = -local.y; // desfaz o espelho SVG (ver extractLineEdges)
+  return [p.x + local.x * xa.x + camY * ya.x, p.y + local.x * xa.y + camY * ya.y, p.z + local.x * xa.z + camY * ya.z];
+}
+
+// Gera a vista de SEÇÃO DE CORTE — corte de VERDADE no sólido (booleano
+// real via replicad, não uma tarja hachurada desenhada por cima da vista
+// existente): a linha de corte desenhada sobre a vista base define um plano
+// vertical (contém a linha + o eixo de profundidade da câmera da vista
+// base); remove o material do lado de trás desse plano (na direção
+// contrária à normal do corte) e projeta o que sobra olhando de frente pro
+// plano — só "corte total" reto, sem seção deslocada/em degraus (ao estilo
+// mais simples do Inventor, não o recurso completo). A hachura em si é
+// desenhada por quem chama (ver DrawingSheetWorkspace) preenchendo
+// visiblePaths com um padrão — aqui só devolve a geometria já cortada e
+// projetada.
+export function buildSectionView(
+  shape: AnyShape,
+  info: Omit<SectionInfo, "letter"> & { letter?: string },
+  baseOrientation: ViewOrientation
+): DrawingView | null {
+  if (baseOrientation === "iso") return null;
+  const baseCamera = cameraFor(shape, baseOrientation);
+
+  const w1 = viewLocalToWorld(baseCamera, { x: info.cutLine.x1, y: info.cutLine.y1 });
+  const w2 = viewLocalToWorld(baseCamera, { x: info.cutLine.x2, y: info.cutLine.y2 });
+  const lineDir = normalize3(sub3(w2, w1));
+  const viewDir: Vec3 = [baseCamera.direction.x, baseCamera.direction.y, baseCamera.direction.z];
+  const cutNormal = normalize3(cross3(lineDir, viewDir));
+  if (Math.hypot(cutNormal[0], cutNormal[1], cutNormal[2]) < 1e-6) return null;
+
+  const bbox = shape.boundingBox;
+  const bigSize = Math.max(bbox.width, bbox.height, bbox.depth, 1) * 4;
+
+  const cuttingPlane = new ReplicadPlane(w1, lineDir, cutNormal);
+  const tool = drawRectangle(bigSize, bigSize).sketchOnPlane(cuttingPlane).extrude(-bigSize) as unknown as Solid;
+
+  let cutSolid: Solid;
+  try {
+    cutSolid = (shape as Solid).clone().cut(tool);
+  } finally {
+    tool.delete();
+  }
+
+  try {
+    // Câmera de fora do lado removido, olhando na direção da normal (+cutNormal)
+    // — a primeira superfície encontrada é exatamente a face recém-exposta
+    // pelo corte, com o eixo X alinhado à própria linha de corte desenhada
+    // (mantém a orientação "de pé" em vez de girar arbitrariamente).
+    const sectionCamera = new ProjectionCamera(
+      [w1[0] - cutNormal[0] * bigSize, w1[1] - cutNormal[1] * bigSize, w1[2] - cutNormal[2] * bigSize],
+      cutNormal,
+      lineDir
+    );
+
+    const { visible, hidden } = drawProjection(cutSolid, sectionCamera);
+    const visiblePaths = flattenPaths(visible.toSVGPaths());
+    const hiddenPaths = flattenPaths(hidden.toSVGPaths());
+    const vBox = drawingBox(visible);
+    const hBox = drawingBox(hidden);
+    const box = vBox && hBox ? unionViewBox(vBox, hBox) : vBox ?? hBox ?? EMPTY_BOX;
+    const lineEdges = extractLineEdges(cutSolid, sectionCamera);
+
+    return {
+      id: createId(),
+      orientation: baseOrientation,
+      flattened: false,
+      x: 0,
+      y: 0,
+      scale: 1,
+      scaleLabel: scaleToLabel(1),
+      label: `Seção ${info.letter ?? "A"}-${info.letter ?? "A"}`,
+      visiblePaths,
+      hiddenPaths,
+      box,
+      lineEdges,
+      sectionInfo: { baseViewId: info.baseViewId, letter: info.letter ?? "A", cutLine: info.cutLine },
+    };
+  } finally {
+    cutSolid.delete();
+  }
 }
