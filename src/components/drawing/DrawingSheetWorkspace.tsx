@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import { jsPDF } from "jspdf";
+import { svg2pdf } from "svg2pdf.js";
 import { useFeatureStore } from "@/lib/features/store";
 import { useDrawingStore, createSheetObject, type AnnotationPatch } from "@/lib/drawing/store";
 import { loadOpenCascade } from "@/lib/replicad/opencascade";
@@ -30,6 +32,28 @@ import {
   saveOrDownload,
   writeToFileHandle,
 } from "@/lib/project/folder";
+import {
+  IconAddView,
+  IconChamfer,
+  IconDimension,
+  IconExportPdf,
+  IconLoadDoc,
+  IconProjectedView,
+  IconSaveDoc,
+  IconSectionView,
+  IconTextTool,
+  IconThreadTool,
+  IconWeldTool,
+} from "@/components/icons/ToolIcons";
+
+// Botão de ferramenta só-ícone (sem rótulo de texto) — ao estilo Inventor:
+// glifo + tooltip (title) em vez de texto ao lado, bem mais compacto numa
+// barra que já acumula muitas ferramentas (vista/cota/anotação/modelo).
+function toolButtonClass(active: boolean): string {
+  return `shrink-0 rounded-lg p-2 transition ${
+    active ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
+  }`;
+}
 
 // Folha de desenho técnico 2D gerada a partir da peça 3D atual — mesmo
 // espírito do ambiente de Desenho do Inventor (vistas projetadas + cotas +
@@ -542,6 +566,29 @@ export function DrawingSheetWorkspace() {
     }
   }
 
+  // Exporta a folha como PDF vetorial (não rasteriza — svg2pdf.js lê o SVG
+  // já renderizado e converte forma a forma, então linhas/texto continuam
+  // nítidos e escaláveis no PDF, do mesmo jeito que um DXF/STEP exportado
+  // continua sendo geometria de verdade, não uma imagem). O SVG exportado é
+  // o mesmo elemento AO VIVO da folha (viewBox já em mm = tamanho real da
+  // página) — elementos só-de-hover (botão × de remover, "escala ↻") usam
+  // opacity 0 via classe CSS; se algum aparecer indevido no PDF (o parser
+  // não respeitando o estado padrão do hover), é a primeira coisa a
+  // verificar.
+  async function handleExportPdf() {
+    if (!activeSheet || !svgRef.current) return;
+    setErrorMessage(null);
+    try {
+      const orientation = sheetDims.width >= sheetDims.height ? "landscape" : "portrait";
+      const pdf = new jsPDF({ orientation, unit: "mm", format: [sheetDims.width, sheetDims.height] });
+      await svg2pdf(svgRef.current, pdf, { x: 0, y: 0, width: sheetDims.width, height: sheetDims.height });
+      const blob = pdf.output("blob");
+      await saveOrDownload(null, blob, `${activeSheet.name || "folha"}.pdf`);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Erro ao exportar a folha em PDF.");
+    }
+  }
+
   function handleViewPointerDown(e: React.PointerEvent<SVGRectElement>, view: DrawingView) {
     if (dimensionMode || annotationMode) return;
     if (projectionMode) {
@@ -758,7 +805,7 @@ export function DrawingSheetWorkspace() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="flex flex-wrap items-center gap-2 border-b border-primary-100 bg-primary-50 px-3 py-2 text-sm">
+      <div className="flex flex-wrap items-center gap-1 border-b border-primary-100 bg-primary-50 px-3 py-2 text-sm">
         <div className="flex items-center gap-1 overflow-x-auto">
           {sheets.map((s) => (
             <button
@@ -784,7 +831,7 @@ export function DrawingSheetWorkspace() {
 
         {activeSheet && (
           <>
-            <div className="mx-1 h-6 w-px shrink-0 bg-primary-200" />
+            <div className="mx-0.5 h-6 w-px shrink-0 bg-primary-200" />
             <button
               type="button"
               onClick={() => {
@@ -835,90 +882,101 @@ export function DrawingSheetWorkspace() {
               </select>
             </label>
 
-            <div className="mx-1 h-6 w-px shrink-0 bg-primary-200" />
+            <div className="mx-0.5 h-6 w-px shrink-0 bg-primary-200" />
             <button
               type="button"
               onClick={() => {
                 setViewInsertTarget(null);
                 setViewPickerOpen(true);
               }}
-              title='Escolha a orientação num seletor de vistas — igual botão direito → "Inserir Vista", só que sempre no centro da folha'
-              className="rounded-lg bg-white px-3 py-1.5 text-primary-700 hover:bg-primary-100"
+              title='Adicionar Vista — escolha a orientação num seletor de vistas (igual botão direito → "Inserir Vista", só que sempre no centro da folha)'
+              className={toolButtonClass(viewPickerOpen)}
             >
-              Adicionar Vista
+              <IconAddView />
             </button>
             <button
               type="button"
               onClick={() => setDimensionModeExclusive(!dimensionMode)}
-              className={`rounded-lg px-3 py-1.5 transition ${
-                dimensionMode ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
-              }`}
-              title="Clique numa aresta pra cotar o comprimento dela, ou em 2 arestas diferentes pra cotar a distância entre as duas"
+              className={toolButtonClass(dimensionMode)}
+              title="Cota — clique numa aresta pra cotar o comprimento dela, ou em 2 arestas diferentes pra cotar a distância entre as duas"
             >
-              Cota
+              <IconDimension />
             </button>
             <button
               type="button"
               onClick={() => setProjectionModeExclusive(!projectionMode)}
-              className={`rounded-lg px-3 py-1.5 transition ${
-                projectionMode ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
-              }`}
-              title="Clique numa vista já na folha e depois num ponto pra cima/baixo/esquerda/direita pra projetar uma vista alinhada a partir dela"
+              className={toolButtonClass(projectionMode)}
+              title="Vista Projetada — clique numa vista já na folha e depois num ponto pra cima/baixo/esquerda/direita pra projetar uma vista alinhada a partir dela"
             >
-              Vista Projetada
+              <IconProjectedView />
             </button>
             <button
               type="button"
               onClick={() => setSectionModeExclusive(!sectionMode)}
-              className={`rounded-lg px-3 py-1.5 transition ${
-                sectionMode ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
-              }`}
-              title="Clique numa vista, depois 2 pontos sobre ela pra desenhar a linha de corte — corta o sólido de verdade e gera a vista de seção"
+              className={toolButtonClass(sectionMode)}
+              title="Seção de Corte — clique numa vista, depois 2 pontos sobre ela pra desenhar a linha de corte (corta o sólido de verdade e gera a vista de seção)"
             >
-              Seção de Corte
+              <IconSectionView />
             </button>
 
-            <div className="mx-1 h-6 w-px shrink-0 bg-primary-200" />
-            {(Object.keys(ANNOTATION_META) as AnnotationKind[]).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                onClick={() => setAnnotationModeExclusive(annotationMode === kind ? null : kind)}
-                className={`rounded-lg px-3 py-1.5 transition ${
-                  annotationMode === kind ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
-                }`}
-                title={ANNOTATION_META[kind].promptLabel}
-              >
-                {ANNOTATION_META[kind].buttonLabel}
-              </button>
-            ))}
+            <div className="mx-0.5 h-6 w-px shrink-0 bg-primary-200" />
+            <button
+              type="button"
+              onClick={() => setAnnotationModeExclusive(annotationMode === "text" ? null : "text")}
+              className={toolButtonClass(annotationMode === "text")}
+              title={`Texto — ${ANNOTATION_META.text.promptLabel}`}
+            >
+              <IconTextTool />
+            </button>
+            <button
+              type="button"
+              onClick={() => setAnnotationModeExclusive(annotationMode === "chamfer" ? null : "chamfer")}
+              className={toolButtonClass(annotationMode === "chamfer")}
+              title={`Chanfro — ${ANNOTATION_META.chamfer.promptLabel}`}
+            >
+              <IconChamfer />
+            </button>
+            <button
+              type="button"
+              onClick={() => setAnnotationModeExclusive(annotationMode === "thread" ? null : "thread")}
+              className={toolButtonClass(annotationMode === "thread")}
+              title={`Medida de Rosca — ${ANNOTATION_META.thread.promptLabel}`}
+            >
+              <IconThreadTool />
+            </button>
             <button
               type="button"
               onClick={() => setAnnotationModeExclusive(annotationMode === "weld" ? null : "weld")}
-              className={`rounded-lg px-3 py-1.5 transition ${
-                annotationMode === "weld" ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
-              }`}
-              title="Clique no ponto da junta, depois no fim da linha de referência, pra colocar o símbolo de solda"
+              className={toolButtonClass(annotationMode === "weld")}
+              title="Simbologia de Solda — clique no ponto da junta, depois no fim da linha de referência"
             >
-              Solda
+              <IconWeldTool />
             </button>
 
-            <div className="mx-1 h-6 w-px shrink-0 bg-primary-200" />
+            <div className="mx-0.5 h-6 w-px shrink-0 bg-primary-200" />
             <button
               type="button"
               onClick={handleSaveTemplate}
-              title="Salvar tamanho + bloco de título (com logo/tolerâncias) como modelo reutilizável em outros projetos"
-              className="rounded-lg bg-white px-3 py-1.5 text-primary-700 hover:bg-primary-100"
+              title="Salvar Modelo de Folha — tamanho + bloco de título (com logo/tolerâncias) reutilizável em outros projetos"
+              className={toolButtonClass(false)}
             >
-              Salvar Modelo de Folha
+              <IconSaveDoc />
             </button>
             <button
               type="button"
               onClick={handleLoadTemplate}
-              title="Carregar um modelo de folha salvo antes (aplica na folha atual)"
-              className="rounded-lg bg-white px-3 py-1.5 text-primary-700 hover:bg-primary-100"
+              title="Carregar Modelo de Folha — aplica um modelo salvo antes na folha atual"
+              className={toolButtonClass(false)}
             >
-              Carregar Modelo de Folha
+              <IconLoadDoc />
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleExportPdf()}
+              title="Exportar PDF — folha inteira (vistas, cotas, anotações e bloco de título), vetorial"
+              className={toolButtonClass(false)}
+            >
+              <IconExportPdf />
             </button>
 
             <button

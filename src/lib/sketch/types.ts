@@ -107,22 +107,29 @@ export type EdgeRef =
 // independentes — largura e altura precisam mexer em eixos separados, não
 // dá pra usar "distance" genérico sem also distorcer a outra dimensão).
 // Todas são paramétricas — mudar o valor recalcula a geometria.
+// `offset` (opcional — ausente em cotas de projetos salvos antes disso
+// existir, tratado como um padrão pequeno pra fora na hora de desenhar, ver
+// DEFAULT_DIM_OFFSET em render.ts) é a distância da linha de cota até a
+// geometria medida, arrastável pelo usuário — igual a cota da folha de
+// desenho (DrawingDimension.offset em drawing/types.ts), mesma ideia
+// aplicada aqui: linha de extensão + seta, não mais desenhada em cima da
+// própria geometria.
 export type DimensionAnnotation =
-  | { id: string; kind: "distance"; p1: string; p2: string }
-  | { id: string; kind: "radius"; circleId: string }
-  | { id: string; kind: "width"; rectId: string }
-  | { id: string; kind: "height"; rectId: string }
+  | { id: string; kind: "distance"; p1: string; p2: string; offset?: number }
+  | { id: string; kind: "radius"; circleId: string; offset?: number }
+  | { id: string; kind: "width"; rectId: string; offset?: number }
+  | { id: string; kind: "height"; rectId: string; offset?: number }
   // Raio de um arco de concordância — kind separado (não reaproveita
   // "radius") porque ArcShape não guarda raio próprio, é sempre derivado de
   // center/p1 (ver resolveDimension), então editar precisa mover p1/p2 em
   // vez de só trocar um campo .radius como no círculo.
-  | { id: string; kind: "arcRadius"; arcId: string }
+  | { id: string; kind: "arcRadius"; arcId: string; offset?: number }
   // Raio (largura) de um rasgo — SlotShape guarda radius direto, igual
   // círculo, então updateSlotRadiusDimension é estruturalmente idêntico a
   // updateRadiusDimension. O comprimento do rasgo (eixo center1→center2)
   // não precisa de kind própria: é só uma "distance" comum entre os dois
   // centros, que já são pontos de verdade.
-  | { id: string; kind: "slotRadius"; slotId: string }
+  | { id: string; kind: "slotRadius"; slotId: string; offset?: number }
   // Distância entre 2 arestas retas selecionadas (uma de cada vez, ao estilo
   // Inventor) — ex.: as 2 tangentes de um rasgo (dá a largura) ou as 2
   // arestas de largura de um retângulo (dá a altura, e vice-versa). Sempre
@@ -131,7 +138,7 @@ export type DimensionAnnotation =
   // mantém `a` parada e move só `b` (ver updateEdgeDistanceDimension em
   // store.ts / translateEdgeRef), mesmo espírito de updateDistanceDimension
   // manter p1 parado.
-  | { id: string; kind: "edgeDistance"; a: EdgeRef; b: EdgeRef };
+  | { id: string; kind: "edgeDistance"; a: EdgeRef; b: EdgeRef; offset?: number };
 
 // Plano de trabalho do sketch ativo, em coordenadas de mundo. O padrão é o
 // plano XY; ao iniciar um esboço sobre uma face do sólido existente, origin/

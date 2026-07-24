@@ -14,6 +14,9 @@ import {
   sampleMinorArc,
   perpendicularDistanceToLine,
   slotOutline,
+  computeDimensionLineGeometry,
+  computeRadiusDimensionGeometry,
+  DEFAULT_DIM_OFFSET,
   type RenderableShape,
 } from "@/lib/sketch/render";
 import type { SketchPlane, SketchPoint } from "@/lib/sketch/types";
@@ -173,8 +176,6 @@ function DimensionLabel({
         <button
           type="button"
           onClick={(e) => {
-            // eslint-disable-next-line no-console
-            console.log("[cota] clique no texto", { hasOnEdit: !!onEdit, text });
             e.stopPropagation();
             onEdit?.();
           }}
@@ -187,8 +188,6 @@ function DimensionLabel({
           <button
             type="button"
             onClick={(e) => {
-              // eslint-disable-next-line no-console
-              console.log("[cota] clique no x", { text });
               e.stopPropagation();
               onRemove();
             }}
@@ -200,6 +199,113 @@ function DimensionLabel({
         )}
       </span>
     </Html>
+  );
+}
+
+// Triângulo preenchido (seta de cota) — Line do drei só desenha traço, não
+// dá pra preencher, então a seta é uma mesh com 3 vértices crus (os 3 pontos
+// já em coordenadas de MUNDO, resolvidos por quem chama via toWorld).
+function Arrowhead3D({
+  points,
+  toWorld,
+  color,
+}: {
+  points: [LocalPoint, LocalPoint, LocalPoint];
+  toWorld: (p: LocalPoint) => Vec3;
+  color: string;
+}) {
+  const positions = new Float32Array(9);
+  points.forEach((p, i) => {
+    const w = toWorld(p);
+    positions[i * 3] = w[0];
+    positions[i * 3 + 1] = w[1];
+    positions[i * 3 + 2] = w[2];
+  });
+  return (
+    <mesh>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+      </bufferGeometry>
+      <meshBasicMaterial color={color} side={THREE.DoubleSide} />
+    </mesh>
+  );
+}
+
+// Cota linear (distance/width/height/edgeDistance — todas resolvem pro
+// mesmo formato "2 pontos") com linha de extensão + seta em cada ponta,
+// ao estilo da cota da folha de desenho. Puramente apresentacional — o
+// arrasto do offset é decidido em handleRawDown/Move/Up (ver
+// findDimensionHit em store.ts), roteado pelo MESMO InteractivePlane que já
+// capta todo o resto da interação do esboço; não tem mesh de arrasto
+// próprio aqui (evita competir com o InteractivePlane por raycasting).
+function DimensionDistanceGroup({
+  plane,
+  a,
+  b,
+  offset,
+  label,
+  onEdit,
+  onRemove,
+}: {
+  plane: SketchPlane;
+  a: LocalPoint;
+  b: LocalPoint;
+  offset: number;
+  label: string;
+  onEdit?: () => void;
+  onRemove?: () => void;
+}) {
+  const geo = computeDimensionLineGeometry(a, b, offset);
+  if (!geo) return null;
+
+  const toWorld = (local: LocalPoint): Vec3 => localToWorldPoint(plane, local);
+
+  return (
+    <group>
+      <Line points={[toWorld(geo.extAStart), toWorld(geo.extAEnd)]} color={DIMENSION_COLOR} lineWidth={0.75} />
+      <Line points={[toWorld(geo.extBStart), toWorld(geo.extBEnd)]} color={DIMENSION_COLOR} lineWidth={0.75} />
+      <Line points={[toWorld(geo.dimA), toWorld(geo.dimB)]} color={DIMENSION_COLOR} lineWidth={1.5} />
+      <Arrowhead3D points={geo.arrowA} toWorld={toWorld} color={DIMENSION_COLOR} />
+      <Arrowhead3D points={geo.arrowB} toWorld={toWorld} color={DIMENSION_COLOR} />
+      <DimensionLabel position={toWorld(geo.mid)} text={label} onEdit={onEdit} onRemove={onRemove} />
+    </group>
+  );
+}
+
+// Cota de raio (radius/arcRadius/slotRadius) — linha de referência do centro
+// até a borda (mostra o raio em si) + uma extensão além da borda, com seta
+// encostando nela, ao estilo de cota de raio de desenho técnico. Offset
+// negativo puxa o rótulo pra dentro do círculo. Também puramente
+// apresentacional, mesma razão da DimensionDistanceGroup acima.
+function DimensionRadiusGroup({
+  plane,
+  cx,
+  cy,
+  r,
+  offset,
+  label,
+  onEdit,
+  onRemove,
+}: {
+  plane: SketchPlane;
+  cx: number;
+  cy: number;
+  r: number;
+  offset: number;
+  label: string;
+  onEdit?: () => void;
+  onRemove?: () => void;
+}) {
+  const geo = computeRadiusDimensionGeometry(cx, cy, r, offset);
+  const toWorld = (local: LocalPoint): Vec3 => localToWorldPoint(plane, local);
+
+  return (
+    <group>
+      <Line points={[toWorld({ x: cx, y: cy }), toWorld(geo.edge)]} color={DIMENSION_COLOR} lineWidth={1} />
+      <Line points={[toWorld(geo.edge), toWorld(geo.tip)]} color={DIMENSION_COLOR} lineWidth={1.5} />
+      <Arrowhead3D points={geo.arrow} toWorld={toWorld} color={DIMENSION_COLOR} />
+      <DimensionLabel position={toWorld(geo.tip)} text={label} onEdit={onEdit} onRemove={onRemove} />
+    </group>
   );
 }
 
@@ -281,6 +387,8 @@ export function SketchOverlay3D({
   const dragRadiusPreview = useSketchStore((s) => s.dragRadiusPreview);
   const removeDimension = useSketchStore((s) => s.removeDimension);
   const promptEditDimension = useSketchStore((s) => s.promptEditDimension);
+  const dimensionDrag = useSketchStore((s) => s.dimensionDrag);
+  const dimensionDragPreview = useSketchStore((s) => s.dimensionDragPreview);
   const measurement = useSketchStore((s) => s.measurement);
 
   const toWorld = (local: LocalPoint): Vec3 => localToWorldPoint(plane, local);
@@ -339,41 +447,42 @@ export function SketchOverlay3D({
       {dimensions.map((dim) => {
         const render = resolveDimension(dim, renderShapes, renderPoints);
         if (!render) return null;
+        // Enquanto ESSA cota está sendo arrastada (ver findDimensionHit/
+        // handleRawDown em store.ts), usa o offset de PREVIEW ao vivo em vez
+        // do salvo — só confirma no store no pointerup (handleRawUp).
+        const offset =
+          dimensionDrag?.dimensionId === dim.id && dimensionDragPreview !== null
+            ? dimensionDragPreview
+            : (dim.offset ?? DEFAULT_DIM_OFFSET);
 
         if (render.kind === "radius") {
-          const edge = { x: render.cx + render.r * Math.SQRT1_2, y: render.cy + render.r * Math.SQRT1_2 };
           return (
-            <group key={dim.id}>
-              <Line points={[toWorld({ x: render.cx, y: render.cy }), toWorld(edge)]} color={DIMENSION_COLOR} lineWidth={1} />
-              <DimensionLabel
-                position={toWorld(edge)}
-                text={`R${render.r.toFixed(1)}`}
-                onEdit={interactive ? () => promptEditDimension(dim, render.r) : undefined}
-                onRemove={interactive ? () => removeDimension(dim.id) : undefined}
-              />
-            </group>
+            <DimensionRadiusGroup
+              key={dim.id}
+              plane={plane}
+              cx={render.cx}
+              cy={render.cy}
+              r={render.r}
+              offset={offset}
+              label={`R${render.r.toFixed(1)}`}
+              onEdit={interactive ? () => promptEditDimension(dim, render.r) : undefined}
+              onRemove={interactive ? () => removeDimension(dim.id) : undefined}
+            />
           );
         }
 
         const length = Math.hypot(render.x2 - render.x1, render.y2 - render.y1);
-        const mid = { x: (render.x1 + render.x2) / 2, y: (render.y1 + render.y2) / 2 };
         return (
-          <group key={dim.id}>
-            <Line
-              points={[toWorld({ x: render.x1, y: render.y1 }), toWorld({ x: render.x2, y: render.y2 })]}
-              color={DIMENSION_COLOR}
-              lineWidth={1}
-              dashed
-              dashSize={2}
-              gapSize={1.2}
-            />
-            <DimensionLabel
-              position={toWorld(mid)}
-              text={length.toFixed(1)}
-              onEdit={interactive ? () => promptEditDimension(dim, length) : undefined}
-              onRemove={interactive ? () => removeDimension(dim.id) : undefined}
-            />
-          </group>
+          <DimensionDistanceGroup
+            key={dim.id}
+            plane={plane}
+            a={{ x: render.x1, y: render.y1 }}
+            b={{ x: render.x2, y: render.y2 }}
+            offset={offset}
+            label={length.toFixed(1)}
+            onEdit={interactive ? () => promptEditDimension(dim, length) : undefined}
+            onRemove={interactive ? () => removeDimension(dim.id) : undefined}
+          />
         );
       })}
 

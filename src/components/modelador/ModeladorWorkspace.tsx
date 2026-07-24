@@ -13,12 +13,16 @@ import {
   IconExtrude,
   IconFillet,
   IconFinish,
+  IconHelix,
   IconHole,
   IconLogout,
+  IconPatternCircular,
+  IconPatternRect,
   IconRedo,
   IconRevolve,
   IconSketch,
   IconSplit,
+  IconSweep,
   IconUndo,
 } from "@/components/icons/ToolIcons";
 import { useSketchStore } from "@/lib/sketch/store";
@@ -28,6 +32,7 @@ import { loadOpenCascade } from "@/lib/replicad/opencascade";
 import { findCenterLine, findLastCircle, findProfileSource } from "@/lib/replicad/geometry";
 import { rebuildModel, findFlangeParentId } from "@/lib/replicad/build-model";
 import { sketchPlaneFromHit, worldToLocalPoint, offsetOrigin, STANDARD_PLANES, STANDARD_AXES } from "@/lib/replicad/plane";
+import { isPatternable } from "@/lib/replicad/pattern";
 import { useFeatureStore } from "@/lib/features/store";
 import { useDrawingStore } from "@/lib/drawing/store";
 import type { Feature } from "@/lib/features/types";
@@ -61,11 +66,47 @@ function describeThrown(err: unknown): string {
   return `valor bruto lançado: ${String(err)}`;
 }
 
+// Tipos de <input> sem histórico de texto de verdade pra desfazer — número/
+// checkbox/radio/select não têm "digitação" nativa que Ctrl+Z do navegador
+// faria sentido preservar. Ignorar Ctrl+Z/Ctrl+Y só por causa do foco estar
+// num campo de RAIO/DISTÂNCIA/etc. (a barra de ferramentas do esboço está
+// cheia desses) fazia o atalho parecer quebrado durante o esboço — o foco
+// quase sempre está num desses campos logo depois de digitar um valor.
+const NON_TEXT_INPUT_TYPES = new Set(["number", "checkbox", "radio", "range", "color", "button", "submit", "reset", "file"]);
+
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement) return true;
+  if (target instanceof HTMLElement && target.isContentEditable) return true;
+  if (target instanceof HTMLInputElement) return !NON_TEXT_INPUT_TYPES.has(target.type);
+  return false;
+}
+
 function isBasePlane(plane: SketchPlane) {
   return (
     plane.origin.every((v, i) => Math.abs(v - BASE_SKETCH_PLANE.origin[i]) < 1e-6) &&
     plane.normal.every((v, i) => Math.abs(v - BASE_SKETCH_PLANE.normal[i]) < 1e-6)
   );
+}
+
+// Direções de mundo pro Padrão Retangular — v1 simplificada, sem escolher
+// uma aresta arbitrária como direção (ver pattern.ts).
+const AXIS_VECTORS: Record<"x" | "y" | "z", [number, number, number]> = {
+  x: [1, 0, 0],
+  y: [0, 1, 0],
+  z: [0, 0, 1],
+};
+
+function sameVec3(a: [number, number, number], b: [number, number, number]): boolean {
+  return Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6 && Math.abs(a[2] - b[2]) < 1e-6;
+}
+
+// Reconstrói qual botão X/Y/Z do Padrão Retangular gerou esse vetor, pra
+// reabrir o painel de edição já marcado — v1 só produz eixos padrão, então
+// não precisa de tolerância além de ponto flutuante.
+function vectorToAxisLabel(v: [number, number, number]): "x" | "y" | "z" {
+  if (sameVec3(v, AXIS_VECTORS.x)) return "x";
+  if (sameVec3(v, AXIS_VECTORS.y)) return "y";
+  return sameVec3(v, AXIS_VECTORS.z) ? "z" : "x";
 }
 
 const FEATURE_BADGE: Record<Feature["type"], { label: string; className: string }> = {
@@ -81,6 +122,9 @@ const FEATURE_BADGE: Record<Feature["type"], { label: string; className: string 
   sheetMetal: { label: "CP", className: "bg-sky-200 text-sky-900" },
   face: { label: "FC", className: "bg-sky-600 text-white" },
   flange: { label: "FL", className: "bg-sky-400 text-sky-900" },
+  sweep: { label: "VR", className: "bg-violet-300 text-violet-900" },
+  helix: { label: "ES", className: "bg-violet-500 text-white" },
+  pattern: { label: "PD", className: "bg-rose-200 text-rose-900" },
 };
 
 export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
@@ -275,8 +319,34 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // quando a feature é criada com sucesso — se cair num early return
   // (validação), o diálogo continua aberto com a mensagem de erro visível.
   const [featureToolMode, setFeatureToolMode] = useState<
-    "extrude" | "face" | "revolve" | "hole" | "split" | null
+    "extrude" | "face" | "revolve" | "hole" | "split" | "sweep" | "helix" | "patternRect" | "patternCircular" | null
   >(null);
+  // Varredura — caminho vem de outro sketch já salvo na árvore (não o
+  // ativo, que é sempre o PERFIL); null enquanto nenhum foi escolhido ainda.
+  const [sweepPathFeatureId, setSweepPathFeatureId] = useState<string | null>(null);
+  const [sweepCut, setSweepCut] = useState(false);
+  // Espiral/Mola — mesmo eixo (linha de centro) da Revolução; raio vem do
+  // perfil automaticamente (ver buildHelixSolid), não é campo aqui.
+  const [helixPitch, setHelixPitch] = useState(5);
+  const [helixTurns, setHelixTurns] = useState(5);
+  const [helixReversed, setHelixReversed] = useState(false);
+  const [helixCut, setHelixCut] = useState(false);
+  // Padrão — direções/eixo em X/Y/Z do MUNDO (v1 simplificada; não dá pra
+  // escolher uma aresta arbitrária como direção ainda). sourceFeatureId
+  // null enquanto nenhuma feature de origem foi escolhida.
+  const [patternSourceFeatureId, setPatternSourceFeatureId] = useState<string | null>(null);
+  const [patternDir1, setPatternDir1] = useState<"x" | "y" | "z">("x");
+  const [patternCount1, setPatternCount1] = useState(3);
+  const [patternSpacing1, setPatternSpacing1] = useState(20);
+  const [patternDir2Enabled, setPatternDir2Enabled] = useState(false);
+  const [patternDir2, setPatternDir2] = useState<"x" | "y" | "z">("y");
+  const [patternCount2, setPatternCount2] = useState(3);
+  const [patternSpacing2, setPatternSpacing2] = useState(20);
+  // Eixo da circular: um dos 3 eixos padrão de mundo, ou o id de uma
+  // AxisFeature já criada na árvore.
+  const [patternAxisChoice, setPatternAxisChoice] = useState<string>("z");
+  const [patternCount, setPatternCount] = useState(4);
+  const [patternAngle, setPatternAngle] = useState(360);
   // Id da feature sendo REEDITADA (não criada) — quando setado, os mesmos
   // painéis de Extrudar/Face/Revolucionar/Furo/Cortar por Plano/Arredondar/
   // Chanfrar/Flange/Plano usados na criação reabrem preenchidos com os
@@ -329,6 +399,18 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   );
   const isSheetMetal = !!sheetMetalFeature;
   const hasFlangeFeature = features.some((f) => f.type === "flange");
+  // Sketches já salvos na árvore — caminho da Varredura escolhe entre eles
+  // (nunca o sketch ATIVO, que é sempre o perfil).
+  const pathSketchOptions = features.filter((f): f is Extract<Feature, { type: "sketch" }> => f.type === "sketch");
+  // Só Extrudar/Face/Revolução/Furo são "padronizáveis" nessa v1 (ver
+  // isPatternable em pattern.ts).
+  const patternableFeatures = features.filter(isPatternable);
+  const patternAxisOptions: { id: string; label: string; origin: [number, number, number]; direction: [number, number, number] }[] = [
+    ...STANDARD_AXES,
+    ...features
+      .filter((f): f is Extract<Feature, { type: "axis" }> => f.type === "axis")
+      .map((f) => ({ id: f.id, label: f.label, origin: f.origin, direction: f.direction })),
+  ];
 
   const showNotice = useCallback((message: string) => {
     setNoticeMessage(message);
@@ -337,22 +419,21 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     }, 2500);
   }, []);
 
-  // Ctrl+Z desfaz, Ctrl+Y ou Ctrl+Shift+Z refaz (Cmd no Mac) — cobre as duas
-  // convenções mais comuns. Ignora quando o foco está num campo de texto.
+  // Ctrl+Z desfaz, Ctrl+Y ou Ctrl+Shift+Z refaz — aceita ctrlKey OU metaKey
+  // direto (em vez de escolher um dos dois via sniffing de navigator.platform,
+  // que é depreciado e pode reportar errado) pra não depender de detectar
+  // Mac certinho. Ignora quando o foco está num campo de TEXTO de verdade
+  // (preserva o undo nativo do navegador ali); campos numéricos/checkbox/
+  // select não bloqueiam (ver isTextEntryTarget). Registrado na fase de
+  // CAPTURA (3º argumento true), não a de borbulhamento — roda ANTES de
+  // qualquer handler de elemento descendente, então nenhum stopPropagation()
+  // por aí (existente ou futuro) consegue engolir o atalho antes dele
+  // chegar aqui.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      const isMac = navigator.platform.toLowerCase().includes("mac");
-      const mod = isMac ? e.metaKey : e.ctrlKey;
+      const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
-
-      const target = e.target;
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        (target instanceof HTMLElement && target.isContentEditable)
-      ) {
-        return;
-      }
+      if (isTextEntryTarget(e.target)) return;
 
       const key = e.key.toLowerCase();
       if (key === "z" && !e.shiftKey) {
@@ -364,8 +445,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       }
     }
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, []);
 
   // Garante que a aba mobile mostre o 3D (onde esboço/escolha de plano
@@ -1314,12 +1395,56 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         return;
       }
 
+      if (feature.type === "sweep") {
+        setSweepPathFeatureId(feature.pathFeatureId);
+        setSweepCut(feature.cut ?? false);
+        setEditingFeatureId(feature.id);
+        setFeatureToolMode("sweep");
+        return;
+      }
+
+      if (feature.type === "helix") {
+        setHelixPitch(feature.pitch);
+        setHelixTurns(feature.turns);
+        setHelixReversed(feature.reversed ?? false);
+        setHelixCut(feature.cut ?? false);
+        setEditingFeatureId(feature.id);
+        setFeatureToolMode("helix");
+        return;
+      }
+
+      if (feature.type === "pattern") {
+        setPatternSourceFeatureId(feature.sourceFeatureId);
+        if (feature.kind === "rectangular") {
+          setPatternDir1(vectorToAxisLabel(feature.dir1));
+          setPatternCount1(feature.count1);
+          setPatternSpacing1(feature.spacing1);
+          const hasDir2 = !!feature.dir2 && !!feature.count2;
+          setPatternDir2Enabled(hasDir2);
+          if (feature.dir2) setPatternDir2(vectorToAxisLabel(feature.dir2));
+          if (feature.count2) setPatternCount2(feature.count2);
+          if (feature.spacing2) setPatternSpacing2(feature.spacing2);
+          setEditingFeatureId(feature.id);
+          setFeatureToolMode("patternRect");
+        } else {
+          const match = patternAxisOptions.find(
+            (a) => sameVec3(a.origin, feature.axisOrigin) && sameVec3(a.direction, feature.axisDirection)
+          );
+          setPatternAxisChoice(match?.id ?? "z");
+          setPatternCount(feature.count);
+          setPatternAngle(feature.angle);
+          setEditingFeatureId(feature.id);
+          setFeatureToolMode("patternCircular");
+        }
+        return;
+      }
+
       // Só sobra "split" depois de eliminar os outros tipos do union.
       setSplitKeepSide(feature.keepSide);
       setEditingFeatureId(feature.id);
       setFeatureToolMode("split");
     },
-    [updateFeature]
+    [updateFeature, patternAxisOptions]
   );
 
   // Cancelar qualquer painel de edição volta pro estado ocioso igual
@@ -1361,6 +1486,240 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     });
     setFeatureToolMode(null);
   }, [hasActiveSolid, activePlane, splitKeepSide, addFeature, editingFeatureId, features, updateFeature, showNotice]);
+
+  const handleAddSweep = useCallback(() => {
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "sweep") as
+        | Extract<Feature, { type: "sweep" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFeatureToolMode(null);
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        pathFeatureId: sweepPathFeatureId ?? original.pathFeatureId,
+        cut: sweepCut,
+        label: `Varredura${sweepCut ? " (corte)" : ""}`,
+      });
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      showNotice("Varredura atualizada.");
+      return;
+    }
+
+    if (!profile || !sweepPathFeatureId) return;
+    if (sweepCut && !hasActiveSolid) {
+      setErrorMessage("Não há sólido ativo para cortar — desmarque “Corte” ou crie um sólido primeiro.");
+      return;
+    }
+    addFeature({
+      id: createId(),
+      type: "sweep",
+      label: `Varredura${sweepCut ? " (corte)" : ""}`,
+      profile,
+      plane: activePlane,
+      pathFeatureId: sweepPathFeatureId,
+      cut: sweepCut,
+    });
+    clearSketch();
+    setEditingSketchId(null);
+    setFeatureToolMode(null);
+  }, [
+    profile,
+    sweepPathFeatureId,
+    sweepCut,
+    hasActiveSolid,
+    activePlane,
+    addFeature,
+    clearSketch,
+    editingFeatureId,
+    features,
+    updateFeature,
+    showNotice,
+  ]);
+
+  const handleAddHelix = useCallback(() => {
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "helix") as
+        | Extract<Feature, { type: "helix" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFeatureToolMode(null);
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        pitch: helixPitch,
+        turns: helixTurns,
+        reversed: helixReversed,
+        cut: helixCut,
+        label: `Espiral p${helixPitch}mm x${helixTurns}v${helixCut ? " (corte)" : ""}`,
+      });
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      showNotice("Espiral atualizada.");
+      return;
+    }
+
+    if (!profile || !centerLine) return;
+    if (helixCut && !hasActiveSolid) {
+      setErrorMessage("Não há sólido ativo para cortar — desmarque “Corte” ou crie um sólido primeiro.");
+      return;
+    }
+    addFeature({
+      id: createId(),
+      type: "helix",
+      label: `Espiral p${helixPitch}mm x${helixTurns}v${helixCut ? " (corte)" : ""}`,
+      profile,
+      plane: activePlane,
+      axisOrigin: centerLine.origin,
+      axisDirection: centerLine.direction,
+      pitch: helixPitch,
+      turns: helixTurns,
+      reversed: helixReversed,
+      cut: helixCut,
+    });
+    clearSketch();
+    setEditingSketchId(null);
+    setFeatureToolMode(null);
+  }, [
+    profile,
+    centerLine,
+    helixPitch,
+    helixTurns,
+    helixReversed,
+    helixCut,
+    hasActiveSolid,
+    activePlane,
+    addFeature,
+    clearSketch,
+    editingFeatureId,
+    features,
+    updateFeature,
+    showNotice,
+  ]);
+
+  const handleAddPatternRect = useCallback(() => {
+    if (!patternSourceFeatureId) return;
+    const dir1 = AXIS_VECTORS[patternDir1];
+    const dir2 = patternDir2Enabled ? AXIS_VECTORS[patternDir2] : undefined;
+    const label = `Padrão retangular (${patternCount1}${patternDir2Enabled ? `x${patternCount2}` : ""})`;
+
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "pattern" && f.kind === "rectangular") as
+        | Extract<Feature, { type: "pattern"; kind: "rectangular" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFeatureToolMode(null);
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        sourceFeatureId: patternSourceFeatureId,
+        dir1,
+        count1: patternCount1,
+        spacing1: patternSpacing1,
+        dir2,
+        count2: patternDir2Enabled ? patternCount2 : undefined,
+        spacing2: patternDir2Enabled ? patternSpacing2 : undefined,
+        label,
+      });
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      showNotice("Padrão retangular atualizado.");
+      return;
+    }
+
+    addFeature({
+      id: createId(),
+      type: "pattern",
+      kind: "rectangular",
+      label,
+      sourceFeatureId: patternSourceFeatureId,
+      dir1,
+      count1: patternCount1,
+      spacing1: patternSpacing1,
+      dir2,
+      count2: patternDir2Enabled ? patternCount2 : undefined,
+      spacing2: patternDir2Enabled ? patternSpacing2 : undefined,
+    });
+    setFeatureToolMode(null);
+    showNotice("Padrão retangular criado.");
+  }, [
+    patternSourceFeatureId,
+    patternDir1,
+    patternCount1,
+    patternSpacing1,
+    patternDir2Enabled,
+    patternDir2,
+    patternCount2,
+    patternSpacing2,
+    addFeature,
+    editingFeatureId,
+    features,
+    updateFeature,
+    showNotice,
+  ]);
+
+  const handleAddPatternCircular = useCallback(() => {
+    if (!patternSourceFeatureId) return;
+    const axis = patternAxisOptions.find((a) => a.id === patternAxisChoice);
+    if (!axis) return;
+    const label = `Padrão circular (${patternCount})`;
+
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "pattern" && f.kind === "circular") as
+        | Extract<Feature, { type: "pattern"; kind: "circular" }>
+        | undefined;
+      if (!original) {
+        setEditingFeatureId(null);
+        setFeatureToolMode(null);
+        return;
+      }
+      updateFeature(editingFeatureId, {
+        ...original,
+        sourceFeatureId: patternSourceFeatureId,
+        axisOrigin: axis.origin,
+        axisDirection: axis.direction,
+        count: patternCount,
+        angle: patternAngle,
+        label,
+      });
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      showNotice("Padrão circular atualizado.");
+      return;
+    }
+
+    addFeature({
+      id: createId(),
+      type: "pattern",
+      kind: "circular",
+      label,
+      sourceFeatureId: patternSourceFeatureId,
+      axisOrigin: axis.origin,
+      axisDirection: axis.direction,
+      count: patternCount,
+      angle: patternAngle,
+    });
+    setFeatureToolMode(null);
+    showNotice("Padrão circular criado.");
+  }, [
+    patternSourceFeatureId,
+    patternAxisChoice,
+    patternAxisOptions,
+    patternCount,
+    patternAngle,
+    addFeature,
+    editingFeatureId,
+    features,
+    updateFeature,
+    showNotice,
+  ]);
 
   const handleLogout = useCallback(async () => {
     const supabase = createClient();
@@ -2230,6 +2589,317 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                   Cancelar
                 </button>
               </div>
+            ) : featureToolMode === "sweep" ? (
+              <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+                <span className="shrink-0 font-semibold text-primary-800">{editingFeatureId ? "Editando Varredura" : "Varredura"}</span>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Caminho
+                  <select
+                    value={sweepPathFeatureId ?? ""}
+                    onChange={(e) => setSweepPathFeatureId(e.target.value || null)}
+                    className="rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  >
+                    <option value="">Escolha um esboço salvo</option>
+                    {pathSketchOptions.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  <input type="checkbox" checked={sweepCut} onChange={(e) => setSweepCut(e.target.checked)} />
+                  Corte
+                </label>
+                <button
+                  type="button"
+                  onClick={handleAddSweep}
+                  disabled={editingFeatureId ? false : !profile || !sweepPathFeatureId}
+                  title={pathSketchOptions.length === 0 ? "Conclua outro esboço (o caminho) antes de usar Varredura" : undefined}
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconSweep />
+                  {editingFeatureId ? "Salvar" : "Varredura"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFeatureToolMode(null);
+                    handleCancelEditingFeature();
+                  }}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : featureToolMode === "helix" ? (
+              <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+                <span className="shrink-0 font-semibold text-primary-800">{editingFeatureId ? "Editando Espiral" : "Espiral"}</span>
+                <span
+                  className={`text-xs ${centerLine ? "text-primary-500" : "text-primary-400"}`}
+                  title="Desenhe uma Linha de Centro no sketch pra definir o eixo — sem ela, Espiral fica desabilitada."
+                >
+                  {centerLine ? "Eixo: linha de centro definida" : "Eixo: sem linha de centro"}
+                </span>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Passo
+                  <input
+                    type="number"
+                    min={0.1}
+                    step={0.5}
+                    value={helixPitch}
+                    onChange={(e) => setHelixPitch(Number(e.target.value))}
+                    className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                  mm
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Voltas
+                  <input
+                    type="number"
+                    min={0.25}
+                    step={0.25}
+                    value={helixTurns}
+                    onChange={(e) => setHelixTurns(Number(e.target.value))}
+                    className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                </label>
+                <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido da hélice">
+                  {(
+                    [
+                      { value: false, symbol: "↻", title: "Sentido padrão" },
+                      { value: true, symbol: "↺", title: "Sentido invertido" },
+                    ]
+                  ).map((d) => (
+                    <button
+                      key={String(d.value)}
+                      type="button"
+                      onClick={() => setHelixReversed(d.value)}
+                      title={d.title}
+                      className={`rounded px-2 py-1 ${
+                        helixReversed === d.value ? "bg-primary text-primary-foreground" : "text-primary-700 hover:bg-primary-100"
+                      }`}
+                    >
+                      {d.symbol}
+                    </button>
+                  ))}
+                </div>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  <input type="checkbox" checked={helixCut} onChange={(e) => setHelixCut(e.target.checked)} />
+                  Corte
+                </label>
+                <button
+                  type="button"
+                  onClick={handleAddHelix}
+                  disabled={editingFeatureId ? false : !profile || !centerLine}
+                  title={!editingFeatureId && !centerLine ? "Desenhe uma Linha de Centro no sketch antes de usar Espiral" : undefined}
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconHelix />
+                  {editingFeatureId ? "Salvar" : "Espiral"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFeatureToolMode(null);
+                    handleCancelEditingFeature();
+                  }}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : featureToolMode === "patternRect" ? (
+              <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+                <span className="shrink-0 font-semibold text-primary-800">
+                  {editingFeatureId ? "Editando Padrão Retangular" : "Padrão Retangular"}
+                </span>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Origem
+                  <select
+                    value={patternSourceFeatureId ?? ""}
+                    onChange={(e) => setPatternSourceFeatureId(e.target.value || null)}
+                    className="rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  >
+                    <option value="">Escolha uma feature</option>
+                    {patternableFeatures.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Direção 1
+                  <select
+                    value={patternDir1}
+                    onChange={(e) => setPatternDir1(e.target.value as "x" | "y" | "z")}
+                    className="rounded-lg border border-primary-200 bg-white px-1.5 py-1 text-foreground"
+                  >
+                    <option value="x">X</option>
+                    <option value="y">Y</option>
+                    <option value="z">Z</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Qtd.
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={patternCount1}
+                    onChange={(e) => setPatternCount1(Number(e.target.value))}
+                    className="w-14 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Espaço
+                  <input
+                    type="number"
+                    step={1}
+                    value={patternSpacing1}
+                    onChange={(e) => setPatternSpacing1(Number(e.target.value))}
+                    className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                  mm
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  <input type="checkbox" checked={patternDir2Enabled} onChange={(e) => setPatternDir2Enabled(e.target.checked)} />
+                  2ª direção
+                </label>
+                {patternDir2Enabled && (
+                  <>
+                    <select
+                      value={patternDir2}
+                      onChange={(e) => setPatternDir2(e.target.value as "x" | "y" | "z")}
+                      className="rounded-lg border border-primary-200 bg-white px-1.5 py-1 text-foreground"
+                    >
+                      <option value="x">X</option>
+                      <option value="y">Y</option>
+                      <option value="z">Z</option>
+                    </select>
+                    <label className="flex items-center gap-1.5 text-primary-700">
+                      Qtd.
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={patternCount2}
+                        onChange={(e) => setPatternCount2(Number(e.target.value))}
+                        className="w-14 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1.5 text-primary-700">
+                      Espaço
+                      <input
+                        type="number"
+                        step={1}
+                        value={patternSpacing2}
+                        onChange={(e) => setPatternSpacing2(Number(e.target.value))}
+                        className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                      />
+                      mm
+                    </label>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={handleAddPatternRect}
+                  disabled={!patternSourceFeatureId}
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconPatternRect />
+                  {editingFeatureId ? "Salvar" : "Padrão"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFeatureToolMode(null);
+                    handleCancelEditingFeature();
+                  }}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : featureToolMode === "patternCircular" ? (
+              <div className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto md:flex-wrap">
+                <span className="shrink-0 font-semibold text-primary-800">
+                  {editingFeatureId ? "Editando Padrão Circular" : "Padrão Circular"}
+                </span>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Origem
+                  <select
+                    value={patternSourceFeatureId ?? ""}
+                    onChange={(e) => setPatternSourceFeatureId(e.target.value || null)}
+                    className="rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  >
+                    <option value="">Escolha uma feature</option>
+                    {patternableFeatures.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Eixo
+                  <select
+                    value={patternAxisChoice}
+                    onChange={(e) => setPatternAxisChoice(e.target.value)}
+                    className="rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  >
+                    {patternAxisOptions.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Qtd.
+                  <input
+                    type="number"
+                    min={2}
+                    step={1}
+                    value={patternCount}
+                    onChange={(e) => setPatternCount(Number(e.target.value))}
+                    className="w-14 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                </label>
+                <label className="flex items-center gap-1.5 text-primary-700">
+                  Ângulo total
+                  <input
+                    type="number"
+                    min={1}
+                    max={360}
+                    step={1}
+                    value={patternAngle}
+                    onChange={(e) => setPatternAngle(Number(e.target.value))}
+                    className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+                  />
+                  °
+                </label>
+                <button
+                  type="button"
+                  onClick={handleAddPatternCircular}
+                  disabled={!patternSourceFeatureId}
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconPatternCircular />
+                  {editingFeatureId ? "Salvar" : "Padrão"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFeatureToolMode(null);
+                    handleCancelEditingFeature();
+                  }}
+                  className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+                >
+                  Cancelar
+                </button>
+              </div>
             ) : (
               <div className="flex shrink-0 flex-wrap items-center gap-2">
                 <button
@@ -2282,6 +2952,26 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                   <IconSplit />
                   Cortar por Plano
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode("sweep")}
+                  disabled={!profile}
+                  title={!profile ? "Feche um perfil no esboço antes de usar Varredura" : "Varre o perfil ao longo do caminho de outro esboço já salvo"}
+                  className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconSweep />
+                  Varredura
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFeatureToolMode("helix")}
+                  disabled={!profile || !centerLine}
+                  title={!centerLine ? "Desenhe uma Linha de Centro no sketch antes de usar Espiral" : "Varre o perfil ao longo de uma hélice (mola/rosca)"}
+                  className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <IconHelix />
+                  Espiral
+                </button>
               </div>
             )}
 
@@ -2309,6 +2999,34 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                   >
                     <IconChamfer />
                     Chanfrar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFeatureToolMode("patternRect")}
+                    disabled={patternableFeatures.length === 0}
+                    title={
+                      patternableFeatures.length === 0
+                        ? "Crie um Extrudar/Face/Revolução/Furo antes de padronizar"
+                        : "Repete uma feature existente numa grade (1 ou 2 direções, eixos X/Y/Z do mundo)"
+                    }
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <IconPatternRect />
+                    Padrão Retangular
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFeatureToolMode("patternCircular")}
+                    disabled={patternableFeatures.length === 0}
+                    title={
+                      patternableFeatures.length === 0
+                        ? "Crie um Extrudar/Face/Revolução/Furo antes de padronizar"
+                        : "Repete uma feature existente em torno de um eixo (X/Y/Z do mundo ou um Eixo criado)"
+                    }
+                    className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 font-semibold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <IconPatternCircular />
+                    Padrão Circular
                   </button>
                 </div>
 

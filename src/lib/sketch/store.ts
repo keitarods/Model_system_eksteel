@@ -11,7 +11,7 @@ import type {
   SketchTool,
 } from "./types";
 import { findNearbyPoint, resolveSnapWithEdges } from "./snap";
-import { findEdgeHit, findLineRegion, findRectRegion, type EdgeHit } from "./hitTest";
+import { findEdgeHit, findLineRegion, findRectRegion, projectOntoSegment, type EdgeHit } from "./hitTest";
 import {
   findCircleByCenter,
   findArcByCenter,
@@ -21,6 +21,10 @@ import {
   createId,
   distance,
   perpendicularDistanceToLine,
+  computeDimensionLineGeometry,
+  computeRadiusDimensionGeometry,
+  DEFAULT_DIM_OFFSET,
+  RADIUS_DIM_DIR,
 } from "./render";
 import { findCornerNear, computeFillet, computeChamfer } from "./filletChamfer";
 import { DRAG_TOOLS, CLICK_TOOLS, SLOT_TOOLS } from "./tools";
@@ -83,6 +87,51 @@ function remapShapePoints(shape: SketchShape, newId: string, idMap: Map<string, 
   }
 }
 
+// Cota clicada perto o bastante da sua PRÓPRIA linha de cota (já deslocada
+// pelo offset atual, não a geometria medida) — usado só pela ferramenta
+// Selecionar pra iniciar o arrasto do offset. Roda ANTES do resto da
+// cascata de seleção (ponto/retângulo/linha/círculo) pra uma cota não ficar
+// "atrás" da geometria que ela mede, já que a linha de cota normalmente
+// fica bem perto dela.
+type DimensionHit = { dimensionId: string; nx: number; ny: number; startOffset: number };
+
+function findDimensionHit(
+  raw: Point,
+  dimensions: DimensionAnnotation[],
+  shapes: SketchShape[],
+  points: Record<string, SketchPoint>,
+  tolerance: number
+): DimensionHit | null {
+  let best: DimensionHit | null = null;
+  let bestDist = tolerance;
+
+  for (const dim of dimensions) {
+    const render = resolveDimension(dim, shapes, points);
+    if (!render) continue;
+    const offset = dim.offset ?? DEFAULT_DIM_OFFSET;
+
+    if (render.kind === "radius") {
+      const geo = computeRadiusDimensionGeometry(render.cx, render.cy, render.r, offset);
+      const { distance: d } = projectOntoSegment(raw, geo.edge, geo.tip);
+      if (d < bestDist) {
+        bestDist = d;
+        best = { dimensionId: dim.id, nx: RADIUS_DIM_DIR.x, ny: RADIUS_DIM_DIR.y, startOffset: offset };
+      }
+      continue;
+    }
+
+    const geo = computeDimensionLineGeometry({ x: render.x1, y: render.y1 }, { x: render.x2, y: render.y2 }, offset);
+    if (!geo) continue;
+    const { distance: d } = projectOntoSegment(raw, geo.dimA, geo.dimB);
+    if (d < bestDist) {
+      bestDist = d;
+      best = { dimensionId: dim.id, nx: geo.nx, ny: geo.ny, startOffset: offset };
+    }
+  }
+
+  return best;
+}
+
 // Só arestas retas entram no fluxo de 2 cliques (cota relacional linha a
 // linha) — raio de círculo/arco/rasgo continua cotando na hora, num clique
 // só (ver handleRawUp). dimensionPick1 guarda sempre esse tipo restrito
@@ -92,6 +141,15 @@ type LineLikeEdgeHit = Extract<EdgeHit, { kind: "line" | "rectWidth" | "rectHeig
 
 function isLineLikeHit(hit: EdgeHit): hit is LineLikeEdgeHit {
   return hit.kind === "line" || hit.kind === "rectWidth" || hit.kind === "rectHeight" || hit.kind === "slotLength";
+}
+
+function rotatePoint2D(p: Point, center: Point, angleDeg: number): Point {
+  const rad = (angleDeg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dx = p.x - center.x;
+  const dy = p.y - center.y;
+  return { x: center.x + dx * cos - dy * sin, y: center.y + dx * sin + dy * cos };
 }
 
 // Duas capturas da MESMA aresta física (não só a mesma forma — um
@@ -245,6 +303,13 @@ type SketchState = {
   dragPreview: Record<string, Point>;
   dragRadiusPreview: { shapeId: string; radius: number } | null;
   selectedShapeId: string | null;
+  // Arrasto do OFFSET de uma cota (linha de cota puxada pra longe/perto da
+  // geometria medida) — independente de selectDrag (que é sobre pontos/
+  // formas), mas roteado pelos MESMOS handleRawDown/Move/Up, então não
+  // precisa de nenhum mesh 3D próprio pra captar o clique (ver
+  // findDimensionHit) — reaproveita o InteractivePlane que já existe.
+  dimensionDrag: { dimensionId: string; nx: number; ny: number; startOffset: number; startRaw: Point } | null;
+  dimensionDragPreview: number | null;
   pendingConstraint: PendingConstraint | null;
   pendingSlot: PendingSlot | null;
   clipboard: SketchClipboard | null;
@@ -289,6 +354,11 @@ type SketchState = {
   updateEdgeDistanceDimension: (id: string, newValue: number) => void;
   updateWidthDimension: (id: string, newWidth: number) => void;
   updateHeightDimension: (id: string, newHeight: number) => void;
+  // Distância da linha de cota até a geometria medida (arrastável, ver
+  // DimensionOffsetHandle em SketchOverlay3D.tsx) — não muda o VALOR
+  // medido, só onde a linha/seta/rótulo aparecem. Serve pra qualquer kind
+  // de cota (todas ganharam o campo offset).
+  updateDimensionOffset: (id: string, offset: number) => void;
   // Pede o novo valor via prompt() e despacha pra ação de update certa
   // conforme o tipo da cota — mesmo fluxo usado tanto pelo editor 2D quanto
   // pelo overlay 3D, pra não duplicar o roteamento em cada view.
@@ -329,6 +399,17 @@ type SketchState = {
   // Cria uma nova forma a partir do clipboard, deslocada um pouco da
   // posição original, e já seleciona ela. Sem efeito se nunca copiou nada.
   pasteShape: () => void;
+  // Padrão retangular/circular da forma selecionada — ação de UM disparo
+  // (igual copiar/colar): gera as cópias na hora e pronto, não é uma
+  // feature paramétrica reeditável depois (o esboço 2D não tem árvore de
+  // histórico própria, só a lista de shapes). dir1/dir2 já vêm normalizados
+  // (ver AXIS_VECTORS_2D no componente); count2/spacing2 ausentes = só 1
+  // direção.
+  patternShapeRectangular: (shapeId: string, dir1: Point, count1: number, spacing1: number, dir2?: Point, count2?: number, spacing2?: number) => void;
+  // angle = ângulo TOTAL varrido pelas `count` instâncias (360 = volta
+  // completa, espaçamento angle/count; menor = leque, espaçamento
+  // angle/(count-1)).
+  patternShapeCircular: (shapeId: string, center: Point, count: number, angle: number) => void;
 };
 
 // Desfazer/refazer agora é global (ver src/lib/history/store.ts), que
@@ -537,6 +618,8 @@ export const useSketchStore = create<SketchState>((set, get) => {
     dragPreview: {},
     dragRadiusPreview: null,
     selectedShapeId: null,
+    dimensionDrag: null,
+    dimensionDragPreview: null,
     pendingConstraint: null,
     pendingSlot: null,
     clipboard: null,
@@ -777,6 +860,11 @@ export const useSketchStore = create<SketchState>((set, get) => {
         };
       }),
 
+    updateDimensionOffset: (id, offset) =>
+      set((s) => ({
+        dimensions: s.dimensions.map((d) => (d.id === id ? { ...d, offset } : d)),
+      })),
+
     promptEditDimension: (dimension, currentValue) => {
       const label =
         dimension.kind === "radius" || dimension.kind === "arcRadius" || dimension.kind === "slotRadius"
@@ -990,10 +1078,12 @@ export const useSketchStore = create<SketchState>((set, get) => {
         selectDrag: null,
         dragPreview: {},
         dragRadiusPreview: null,
+        dimensionDrag: null,
+        dimensionDragPreview: null,
       }),
 
     handleRawDown: (raw, referenceGeometry = []) => {
-      const { tool, shapes, points } = get();
+      const { tool, shapes, points, dimensions } = get();
 
       if (CLICK_TOOLS.has(tool)) {
         handleConstraintClick(tool, raw, referenceGeometry);
@@ -1006,9 +1096,62 @@ export const useSketchStore = create<SketchState>((set, get) => {
       }
 
       if (tool === "select") {
+        // Cota clicada perto da própria linha (já deslocada pelo offset)
+        // arma o arrasto do offset — checado ANTES do resto (ponto/
+        // retângulo/linha/círculo), já que a linha de cota normalmente fica
+        // por cima ou bem perto da geometria que ela mede.
+        const dimHit = findDimensionHit(raw, dimensions, shapes, points, EDGE_SELECT_TOLERANCE);
+        if (dimHit) {
+          set({ dimensionDrag: { ...dimHit, startRaw: raw }, downRaw: raw });
+          return;
+        }
+
+        // Círculo pequeno (raio menor que a tolerância de ponto) tem a
+        // borda INTEIRA dentro do halo de 8mm do centro — o teste de
+        // "perto de um ponto" abaixo vencia sempre, então clicar na borda
+        // só arrastava o centro (movia a forma inteira), nunca reduzia o
+        // raio. Decide ANTES, por proximidade RELATIVA (mais perto da
+        // borda que do centro), não por tolerância absoluta — assim
+        // funciona pra círculo de qualquer tamanho: só um clique
+        // genuinamente mais perto do centro vira "mover", o resto da área
+        // dentro da tolerância da borda vira "redimensionar".
+        let bestCircleEdge: { shape: CircleShape; center: Point; dist: number } | null = null;
+        for (const shape of shapes) {
+          if (shape.type !== "circle") continue;
+          const center = points[shape.center];
+          if (!center) continue;
+          const dCenter = distance(raw, center);
+          const dEdge = Math.abs(dCenter - shape.radius);
+          if (dEdge < dCenter && dEdge <= EDGE_SELECT_TOLERANCE && (!bestCircleEdge || dEdge < bestCircleEdge.dist)) {
+            bestCircleEdge = { shape, center: { x: center.x, y: center.y }, dist: dEdge };
+          }
+        }
+        if (bestCircleEdge) {
+          set({
+            selectedShapeId: bestCircleEdge.shape.id,
+            selectDrag: { mode: "circleRadius", shapeId: bestCircleEdge.shape.id, center: bestCircleEdge.center },
+            downRaw: raw,
+          });
+          return;
+        }
+
         const nearbyPoint = findNearbyPoint(raw, Object.values(points), SELECT_POINT_TOLERANCE);
         if (nearbyPoint) {
-          set({ selectDrag: { mode: "point", pointId: nearbyPoint.id }, downRaw: raw });
+          // Esse ponto vencia QUALQUER forma antes de chegar no teste
+          // específico de círculo/linha/retângulo mais abaixo — pra um
+          // círculo, cujo único ponto é o próprio centro, isso significava
+          // nunca marcar selectedShapeId ao clicar nele (só arrastava o
+          // ponto cru), quebrando Copiar/Excluir/Padrão nele. Resolve o
+          // "dono" do ponto agora: se só 1 forma o referencia (círculo,
+          // ponto solto, ou uma linha cuja ponta ninguém mais compartilha),
+          // seleciona ela também; ponto compartilhado por 2+ formas (junção
+          // entre linhas) fica ambíguo, desseleciona.
+          const owners = shapes.filter((sh) => pointIdsOfShape(sh).includes(nearbyPoint.id));
+          set({
+            selectDrag: { mode: "point", pointId: nearbyPoint.id },
+            downRaw: raw,
+            selectedShapeId: owners.length === 1 ? owners[0].id : null,
+          });
           return;
         }
 
@@ -1077,27 +1220,9 @@ export const useSketchStore = create<SketchState>((set, get) => {
           return;
         }
 
-        // Sobrou só círculo: perto do centro já caiu no caminho de "point"
-        // acima (move o círculo); perto da borda redimensiona o raio.
-        const circleHit = findEdgeHit(
-          raw,
-          shapes.filter((s) => s.type === "circle"),
-          points,
-          EDGE_SELECT_TOLERANCE
-        );
-        const circle = circleHit
-          ? (shapes.find((s) => s.id === circleHit.shapeId) as CircleShape | undefined)
-          : undefined;
-        if (circle) {
-          const center = points[circle.center];
-          set({
-            selectedShapeId: circle.id,
-            selectDrag: { mode: "circleRadius", shapeId: circle.id, center: { x: center.x, y: center.y } },
-            downRaw: raw,
-          });
-        } else {
-          set({ selectedShapeId: null });
-        }
+        // Nada bateu (nem borda de círculo, nem ponto, nem retângulo, nem
+        // linha) — clique em espaço vazio, desseleciona.
+        set({ selectedShapeId: null });
         return;
       }
 
@@ -1112,7 +1237,13 @@ export const useSketchStore = create<SketchState>((set, get) => {
     },
 
     handleRawMove: (raw, referenceGeometry = []) => {
-      const { selectDrag, downRaw, tool, shapes, points } = get();
+      const { selectDrag, downRaw, tool, shapes, points, dimensionDrag } = get();
+
+      if (dimensionDrag) {
+        const delta = (raw.x - dimensionDrag.startRaw.x) * dimensionDrag.nx + (raw.y - dimensionDrag.startRaw.y) * dimensionDrag.ny;
+        set({ dimensionDragPreview: dimensionDrag.startOffset + delta });
+        return;
+      }
 
       if (selectDrag) {
         if (selectDrag.mode === "point") {
@@ -1176,8 +1307,26 @@ export const useSketchStore = create<SketchState>((set, get) => {
     },
 
     handleRawUp: (rawEnd, referenceGeometry = []) => {
-      const { selectDrag, dragPreview, dragRadiusPreview, downRaw, tool, shapes, edgeHitCandidate, pendingSlot } =
-        get();
+      const {
+        selectDrag,
+        dragPreview,
+        dragRadiusPreview,
+        downRaw,
+        tool,
+        shapes,
+        edgeHitCandidate,
+        pendingSlot,
+        dimensionDrag,
+        dimensionDragPreview,
+      } = get();
+
+      if (dimensionDrag) {
+        if (dimensionDragPreview !== null) {
+          get().updateDimensionOffset(dimensionDrag.dimensionId, dimensionDragPreview);
+        }
+        set({ dimensionDrag: null, dimensionDragPreview: null, downRaw: null });
+        return;
+      }
 
       if (SLOT_TOOLS.has(tool)) {
         // Só o 3º passo (arrasto do raio, pendingSlot já em "ready") solta
@@ -1363,6 +1512,72 @@ export const useSketchStore = create<SketchState>((set, get) => {
         shapes: [...s.shapes, newShape],
         selectedShapeId: newShape.id,
         clipboard: { ...clipboard, pasteCount: clipboard.pasteCount + 1 },
+      }));
+    },
+
+    patternShapeRectangular: (shapeId, dir1, count1, spacing1, dir2, count2, spacing2) => {
+      const { shapes, points } = get();
+      const shape = shapes.find((s) => s.id === shapeId);
+      if (!shape) return;
+      const sourcePointIds = pointIdsOfShape(shape);
+      const sourcePoints = sourcePointIds.map((id) => points[id]).filter((p): p is SketchPoint => p !== undefined);
+      if (sourcePoints.length === 0) return;
+
+      const n1 = Math.max(1, Math.round(count1));
+      const n2 = dir2 && count2 ? Math.max(1, Math.round(count2)) : 1;
+      const newPoints: Record<string, SketchPoint> = {};
+      const newShapes: SketchShape[] = [];
+
+      for (let i = 0; i < n1; i++) {
+        for (let j = 0; j < n2; j++) {
+          if (i === 0 && j === 0) continue; // original já existe
+          const dx = dir1.x * spacing1 * i + (dir2 ? dir2.x * (spacing2 ?? 0) * j : 0);
+          const dy = dir1.y * spacing1 * i + (dir2 ? dir2.y * (spacing2 ?? 0) * j : 0);
+          const idMap = new Map<string, string>();
+          for (const p of sourcePoints) {
+            const newId = createId();
+            idMap.set(p.id, newId);
+            newPoints[newId] = { id: newId, x: p.x + dx, y: p.y + dy };
+          }
+          newShapes.push(remapShapePoints(shape, createId(), idMap));
+        }
+      }
+
+      set((s) => ({
+        points: { ...s.points, ...newPoints },
+        shapes: [...s.shapes, ...newShapes],
+      }));
+    },
+
+    patternShapeCircular: (shapeId, center, count, angle) => {
+      const { shapes, points } = get();
+      const shape = shapes.find((s) => s.id === shapeId);
+      if (!shape) return;
+      const sourcePointIds = pointIdsOfShape(shape);
+      const sourcePoints = sourcePointIds.map((id) => points[id]).filter((p): p is SketchPoint => p !== undefined);
+      if (sourcePoints.length === 0) return;
+
+      const n = Math.max(1, Math.round(count));
+      if (n <= 1) return;
+      const fullTurn = Math.abs(angle - 360) < 1e-6;
+      const step = fullTurn ? angle / n : angle / (n - 1);
+
+      const newPoints: Record<string, SketchPoint> = {};
+      const newShapes: SketchShape[] = [];
+      for (let i = 1; i < n; i++) {
+        const idMap = new Map<string, string>();
+        for (const p of sourcePoints) {
+          const newId = createId();
+          idMap.set(p.id, newId);
+          const rotated = rotatePoint2D({ x: p.x, y: p.y }, center, step * i);
+          newPoints[newId] = { id: newId, x: rotated.x, y: rotated.y };
+        }
+        newShapes.push(remapShapePoints(shape, createId(), idMap));
+      }
+
+      set((s) => ({
+        points: { ...s.points, ...newPoints },
+        shapes: [...s.shapes, ...newShapes],
       }));
     },
   };

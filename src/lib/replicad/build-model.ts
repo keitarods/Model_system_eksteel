@@ -1,10 +1,11 @@
-import { drawCircle, drawRoundedRectangle } from "replicad";
-import type { Solid } from "replicad";
-import type { Feature } from "@/lib/features/types";
+import { drawCircle, drawRoundedRectangle, genericSweep, makeHelix } from "replicad";
+import type { Sketch, Solid } from "replicad";
+import type { Feature, SketchFeature } from "@/lib/features/types";
 import type { SketchPlane } from "@/lib/sketch/types";
-import { extrudeProfile, profileToDrawing } from "./geometry";
+import { extrudeProfile, pathToDrawing, profileReferencePoint, pointToLineDistance2D, profileToDrawing } from "./geometry";
 import { findEdgesByPoints, listLinearEdges } from "./edgeTools";
 import { buildFlangeSolid, type FlattenLink } from "./sheetMetal";
+import { applyPatternOffset, computePatternOffsets, isPatternable } from "./pattern";
 import {
   localToWorldDirection,
   localToWorldPoint,
@@ -129,6 +130,56 @@ function buildChamferSolid(
   const matched = findEdgesByPoints(activeSolid, feature.edgePoints);
   if (matched.length === 0) return null;
   return activeSolid.chamfer(feature.distance, (f) => f.inList(matched)) as unknown as Solid;
+}
+
+// Varredura: perfil do plano da PRÓPRIA feature (não do sketch ativo — já
+// congelado nela igual Extrudar/Revolução), caminho vindo de outro
+// SketchFeature já salvo na árvore (pathFeatureId). forceProfileSpineOthogonality
+// reposiciona/reorienta o perfil no início do caminho automaticamente — não
+// exige que o usuário tenha desenhado os 2 sketches perfeitamente alinhados.
+function buildSweepSolid(feature: Extract<Feature, { type: "sweep" }>, features: Feature[]): Solid | null {
+  const pathFeature = features.find(
+    (f): f is SketchFeature => f.id === feature.pathFeatureId && f.type === "sketch"
+  );
+  if (!pathFeature) return null;
+
+  const profileDrawing = profileToDrawing(feature.profile);
+  const pathDrawing = pathToDrawing(pathFeature.shapes, pathFeature.points);
+  if (!profileDrawing || !pathDrawing) return null;
+
+  // sketchOnPlane devolve SketchInterface|Sketches no tipo (cobre desenhos
+  // com múltiplos contornos) — profileToDrawing/pathToDrawing nunca geram
+  // isso (sempre 1 contorno só), então na prática é sempre um Sketch de
+  // verdade, com .wire.
+  const profileSketch = profileDrawing.sketchOnPlane(toReplicadPlane(feature.plane)) as Sketch;
+  const pathSketch = pathDrawing.sketchOnPlane(toReplicadPlane(pathFeature.plane)) as Sketch;
+
+  return genericSweep(profileSketch.wire, pathSketch.wire, {
+    forceProfileSpineOthogonality: true,
+  }) as unknown as Solid;
+}
+
+// Espiral/Mola: mesmo eixo (linha de centro) da Revolução, mas em vez de
+// girar o perfil no lugar, varre ele ao longo de uma hélice computada
+// (makeHelix) — raio da hélice = distância do perfil até o eixo (nunca
+// escolhido à parte, igual Revolução não pede raio).
+function buildHelixSolid(feature: Extract<Feature, { type: "helix" }>): Solid | null {
+  const drawing = profileToDrawing(feature.profile);
+  if (!drawing) return null;
+
+  const refPoint = profileReferencePoint(feature.profile);
+  if (!refPoint) return null;
+  const radius = pointToLineDistance2D(refPoint, feature.axisOrigin, feature.axisDirection);
+  if (radius < 1e-6) return null; // perfil em cima do eixo — sem raio, sem hélice
+
+  const sketch = drawing.sketchOnPlane(toReplicadPlane(feature.plane)) as Sketch;
+  const worldOrigin = localToWorldPoint(feature.plane, feature.axisOrigin);
+  const worldDirection = localToWorldDirection(feature.plane, feature.axisDirection);
+  const axis = feature.reversed ? negate(worldDirection) : worldDirection;
+  const height = Math.max(feature.pitch * feature.turns, 0.01);
+
+  const helixWire = makeHelix(feature.pitch, height, radius, worldOrigin, axis);
+  return genericSweep(sketch.wire, helixWire, { forceProfileSpineOthogonality: true }) as unknown as Solid;
 }
 
 // Reaplica a lista de features do zero e devolve o sólido final (ou null se
@@ -288,6 +339,40 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
           shadow.delete();
           shadow = shadowResult;
         }
+      }
+      continue;
+    }
+
+    if (feature.type === "sweep") {
+      const built = buildSweepSolid(feature, features);
+      if (!built) continue;
+      mergeInto(built, !!feature.cut);
+      continue;
+    }
+
+    if (feature.type === "helix") {
+      const built = buildHelixSolid(feature);
+      if (!built) continue;
+      mergeInto(built, !!feature.cut);
+      continue;
+    }
+
+    if (feature.type === "pattern") {
+      if (!active) continue; // nada pra padronizar ainda
+      const source = features.find((f) => f.id === feature.sourceFeatureId);
+      if (!source || !isPatternable(source)) continue;
+      for (const offset of computePatternOffsets(feature)) {
+        const copy = applyPatternOffset(source, offset);
+        const built =
+          copy.type === "hole"
+            ? active && buildHoleTool(copy, active)
+            : copy.type === "face"
+              ? buildFaceSolid(copy, sheetThickness)
+              : copy.type === "extrude"
+                ? buildExtrudeSolid(copy)
+                : buildRevolveSolid(copy);
+        if (!built) continue;
+        mergeInto(built, copy.type === "hole" ? true : !!copy.cut);
       }
       continue;
     }

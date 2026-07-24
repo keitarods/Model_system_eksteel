@@ -194,6 +194,81 @@ export type FlangeFeature = {
   angle: number;
 };
 
+// Varredura (Inventor "Sweep"): perfil do sketch ATIVO (igual Extrudar),
+// varrido ao longo do CAMINHO de outro sketch já salvo na árvore
+// (pathFeatureId) — dois sketches separados, igual Inventor exige (perfil
+// deve ficar posicionado no início do caminho, de preferência perpendicular
+// a ele; forceProfileSpineOthogonality no build reposiciona automaticamente
+// se não estiver exato, ver technicalDrawing... build-model.ts). Caminho
+// pode ser aberto (não precisa fechar, ao contrário de um perfil).
+export type SweepFeature = {
+  id: string;
+  type: "sweep";
+  label: string;
+  profile: NonNullable<ProfileSource>;
+  plane: SketchPlane;
+  pathFeatureId: string;
+  cut?: boolean;
+};
+
+// Espiral/Mola (Inventor "Coil"): perfil do sketch ativo varrido ao longo de
+// uma hélice computada (não desenhada à mão) — eixo é a linha de centro do
+// sketch (mesma convenção do Revolucionar), raio é calculado automático a
+// partir da distância do perfil até o eixo (não é um campo escolhido à
+// parte, igual Revolucionar não pede raio).
+export type HelixFeature = {
+  id: string;
+  type: "helix";
+  label: string;
+  profile: NonNullable<ProfileSource>;
+  plane: SketchPlane;
+  axisOrigin: Point;
+  axisDirection: Point;
+  pitch: number;
+  turns: number;
+  reversed?: boolean;
+  cut?: boolean;
+};
+
+// Padrão retangular/circular (Inventor "Rectangular/Circular Pattern"):
+// repete a geometria de UMA feature já existente (sourceFeatureId) — só
+// Extrudar/Face/Revolução/Furo são "padronizáveis" nessa v1 (todas têm um
+// `plane` que, transladado/rotacionado rigidamente, já reposiciona o resto
+// dos campos locais corretamente sem precisar reconstruir cada um à mão —
+// ver build-model.ts). Direções/eixo em coordenadas de MUNDO (não do plano
+// da feature original). O padrão sempre inclui a instância ORIGINAL (já
+// construída pela própria feature de origem) + (count-1) cópias.
+export type PatternFeature =
+  | {
+      id: string;
+      type: "pattern";
+      label: string;
+      sourceFeatureId: string;
+      kind: "rectangular";
+      dir1: [number, number, number];
+      count1: number;
+      spacing1: number;
+      // Direção 2 é opcional — count2/spacing2 ausentes ou count2<=1 = só 1
+      // direção (padrão em linha, não em grade).
+      dir2?: [number, number, number];
+      count2?: number;
+      spacing2?: number;
+    }
+  | {
+      id: string;
+      type: "pattern";
+      label: string;
+      sourceFeatureId: string;
+      kind: "circular";
+      axisOrigin: [number, number, number];
+      axisDirection: [number, number, number];
+      count: number;
+      // Ângulo TOTAL varrido pelas `count` instâncias (360 = volta
+      // completa, espaçamento = angle/count; menor que 360 = leque parcial,
+      // espaçamento = angle/(count-1)).
+      angle: number;
+    };
+
 export type Feature =
   | SketchFeature
   | ExtrudeFeature
@@ -206,4 +281,7 @@ export type Feature =
   | ChamferFeature
   | SheetMetalFeature
   | FaceFeature
-  | FlangeFeature;
+  | FlangeFeature
+  | SweepFeature
+  | HelixFeature
+  | PatternFeature;

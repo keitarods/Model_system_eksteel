@@ -175,6 +175,110 @@ export function resolveDimension(
   return { kind: "distance", x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
 }
 
+// Cota com seta e linha de extensão, deslocável — mesma matemática já usada
+// na folha de desenho (DimensionSvg em DrawingSheetWorkspace.tsx), portada
+// pra cá pra dar o mesmo tratamento visual às cotas do esboço. Constantes em
+// mm no espaço LOCAL do sketch (não em pixels de tela) — um pouco maiores
+// que as da folha porque o esboço costuma ser visto de mais perto/com zoom
+// livre em 3D, não numa folha impressa em escala fixa.
+export const DIM_GAP_MM = 1.5;
+export const DIM_OVERSHOOT_MM = 2.5;
+export const ARROW_LENGTH_MM = 3;
+export const ARROW_HALF_WIDTH_MM = 1.1;
+// Cota sem offset salvo (projeto antigo, ou recém-criada) usa essa distância
+// padrão em vez de 0 — uma cota "em cima" da própria geometria (offset 0)
+// não é o padrão de desenho técnico que a folha já segue, e a seta ficaria
+// degenerada (comprimento zero) pra cota de raio nesse caso.
+export const DEFAULT_DIM_OFFSET = 4;
+
+export function arrowheadTriangle(tip: Point, dirX: number, dirY: number): [Point, Point, Point] {
+  const baseX = tip.x - dirX * ARROW_LENGTH_MM;
+  const baseY = tip.y - dirY * ARROW_LENGTH_MM;
+  const px = -dirY;
+  const py = dirX;
+  return [
+    tip,
+    { x: baseX + px * ARROW_HALF_WIDTH_MM, y: baseY + py * ARROW_HALF_WIDTH_MM },
+    { x: baseX - px * ARROW_HALF_WIDTH_MM, y: baseY - py * ARROW_HALF_WIDTH_MM },
+  ];
+}
+
+export type DimensionLineGeometry = {
+  dimA: Point;
+  dimB: Point;
+  mid: Point;
+  extAStart: Point;
+  extAEnd: Point;
+  extBStart: Point;
+  extBEnd: Point;
+  arrowA: [Point, Point, Point];
+  arrowB: [Point, Point, Point];
+  length: number;
+  // Direção canônica perpendicular ao segmento a→b — quem chama usa isso
+  // pra converter um delta de arrasto (em coordenadas locais) numa mudança
+  // de offset (ver DimensionOffsetHandle em SketchOverlay3D.tsx).
+  nx: number;
+  ny: number;
+};
+
+// Geometria completa de uma cota linear (distância entre `a` e `b`), já
+// deslocada por `offset` — linhas de extensão saindo da própria geometria
+// até a linha de cota, e uma seta em cada ponta apontando uma pra outra.
+export function computeDimensionLineGeometry(a: Point, b: Point, offset: number): DimensionLineGeometry | null {
+  const length = distance(a, b);
+  if (length < 1e-6) return null;
+
+  const ux = (b.x - a.x) / length;
+  const uy = (b.y - a.y) / length;
+  const nx = -uy;
+  const ny = ux;
+  const gap = offset >= 0 ? DIM_GAP_MM : -DIM_GAP_MM;
+  const overshoot = offset >= 0 ? DIM_OVERSHOOT_MM : -DIM_OVERSHOOT_MM;
+
+  const dimA = { x: a.x + nx * offset, y: a.y + ny * offset };
+  const dimB = { x: b.x + nx * offset, y: b.y + ny * offset };
+  const mid = { x: (dimA.x + dimB.x) / 2, y: (dimA.y + dimB.y) / 2 };
+
+  const extAStart = { x: a.x + nx * gap, y: a.y + ny * gap };
+  const extAEnd = { x: a.x + nx * (offset + overshoot), y: a.y + ny * (offset + overshoot) };
+  const extBStart = { x: b.x + nx * gap, y: b.y + ny * gap };
+  const extBEnd = { x: b.x + nx * (offset + overshoot), y: b.y + ny * (offset + overshoot) };
+
+  return {
+    dimA,
+    dimB,
+    mid,
+    extAStart,
+    extAEnd,
+    extBStart,
+    extBEnd,
+    arrowA: arrowheadTriangle(dimA, -ux, -uy),
+    arrowB: arrowheadTriangle(dimB, ux, uy),
+    length,
+    nx,
+    ny,
+  };
+}
+
+// Direção fixa (45°) da cota de raio/diâmetro — a mesma que o rótulo já
+// usava antes dessa cota ganhar seta/offset (edge = cx+r·√2/2, cy+r·√2/2).
+export const RADIUS_DIM_DIR: Point = { x: Math.SQRT1_2, y: Math.SQRT1_2 };
+
+export type RadiusDimensionGeometry = {
+  edge: Point; // ponto na borda do círculo/arco/rasgo — onde a seta encosta
+  tip: Point; // ponta externa (borda + offset) — onde o rótulo fica
+  arrow: [Point, Point, Point];
+};
+
+// Linha reta do centro até a borda (raio em si) + uma extensão deslocável
+// além da borda com seta encostando nela, ao estilo de cota de raio de
+// desenho técnico — offset negativo puxa o rótulo pra dentro do círculo.
+export function computeRadiusDimensionGeometry(cx: number, cy: number, r: number, offset: number): RadiusDimensionGeometry {
+  const edge = { x: cx + RADIUS_DIM_DIR.x * r, y: cy + RADIUS_DIM_DIR.y * r };
+  const tip = { x: cx + RADIUS_DIM_DIR.x * (r + offset), y: cy + RADIUS_DIM_DIR.y * (r + offset) };
+  return { edge, tip, arrow: arrowheadTriangle(edge, -RADIUS_DIM_DIR.x, -RADIUS_DIM_DIR.y) };
+}
+
 // Forma "resolvida" pronta pra desenhar — usada tanto pros shapes de
 // verdade (depois de ler o pool de pontos) quanto pro preview do arrasto
 // (que nunca vira ponto/shape de fato se for cancelado). Descrição pura de

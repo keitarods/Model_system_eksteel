@@ -166,6 +166,120 @@ export function findCenterLine(
   return null;
 }
 
+// Caminho de Varredura: cadeia de linhas/arcos conectados que NÃO precisa
+// fechar (ao contrário do perfil) — anda a partir de uma ponta livre (grau
+// 1, ou seja, um vértice usado por só 1 aresta) se existir, senão de
+// qualquer aresta (cadeia fechada também serve como caminho, só não é o
+// caso comum). Linhas de centro não entram (mesma regra do perfil).
+function findPathChain(
+  shapes: SketchShape[],
+  points: Record<string, SketchPoint>
+): { points: Point[]; arcCenters: (Point | null)[] } | null {
+  const edges = shapes.filter(
+    (s): s is LineShape | ArcShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc"
+  );
+  if (edges.length === 0) return null;
+
+  const degree = new Map<string, number>();
+  for (const e of edges) {
+    degree.set(e.p1, (degree.get(e.p1) ?? 0) + 1);
+    degree.set(e.p2, (degree.get(e.p2) ?? 0) + 1);
+  }
+  const freeEnd = [...degree.entries()].find(([, d]) => d === 1)?.[0];
+
+  const remaining = edges.slice();
+  let startId: string;
+  let first: LineShape | ArcShape;
+  if (freeEnd !== undefined) {
+    const idx = remaining.findIndex((e) => e.p1 === freeEnd || e.p2 === freeEnd);
+    [first] = remaining.splice(idx, 1);
+    startId = freeEnd;
+  } else {
+    first = remaining.shift()!;
+    startId = first.p1;
+  }
+
+  let currentId = first.p1 === startId ? first.p2 : first.p1;
+  const orderedEdges: (LineShape | ArcShape)[] = [first];
+  while (remaining.length > 0) {
+    const idx = remaining.findIndex((e) => e.p1 === currentId || e.p2 === currentId);
+    if (idx === -1) break; // pedaços soltos além da cadeia principal são ignorados
+    const [edge] = remaining.splice(idx, 1);
+    currentId = edge.p1 === currentId ? edge.p2 : edge.p1;
+    orderedEdges.push(edge);
+  }
+
+  const vertexIds: string[] = [startId];
+  const arcCenterIds: (string | null)[] = [];
+  let walkId = startId;
+  for (const edge of orderedEdges) {
+    const nextId = edge.p1 === walkId ? edge.p2 : edge.p1;
+    arcCenterIds.push(edge.type === "arc" ? edge.center : null);
+    vertexIds.push(nextId);
+    walkId = nextId;
+  }
+
+  const resolvedPoints = vertexIds.map((id) => points[id]);
+  if (resolvedPoints.some((p) => !p)) return null;
+  const resolvedArcCenters = arcCenterIds.map((id) => (id ? points[id] : null));
+  if (arcCenterIds.some((id, i) => id && !resolvedArcCenters[i])) return null;
+
+  return {
+    points: resolvedPoints.map((p) => ({ x: p.x, y: p.y })),
+    arcCenters: resolvedArcCenters.map((p) => (p ? { x: p.x, y: p.y } : null)),
+  };
+}
+
+// Desenha o caminho de Varredura como um Drawing ABERTO (.done(), não
+// .close()) — mesma construção ponto-a-ponto de profileToDrawing pro caso
+// "loop", só sem fechar de volta pro início.
+export function pathToDrawing(shapes: SketchShape[], points: Record<string, SketchPoint>): Drawing | null {
+  const chain = findPathChain(shapes, points);
+  if (!chain || chain.points.length < 2) return null;
+
+  const { points: pts, arcCenters } = chain;
+  const [firstPoint, ...rest] = pts;
+  let pen = draw([firstPoint.x, firstPoint.y]);
+  let current = firstPoint;
+
+  rest.forEach((point, i) => {
+    const center = arcCenters[i];
+    if (center) {
+      const radius = Math.hypot(current.x - center.x, current.y - center.y);
+      const inner = arcInnerPoint(center, current, point, radius);
+      pen = pen.threePointsArcTo([point.x, point.y], [inner.x, inner.y]);
+    } else {
+      pen = pen.lineTo([point.x, point.y]);
+    }
+    current = point;
+  });
+
+  return pen.done();
+}
+
+// Ponto de referência do perfil (centroide aproximado) — usado só pela
+// Espiral pra achar a distância até o eixo (o "raio" da hélice, nunca
+// escolhido à parte, igual Revolução não pede raio).
+export function profileReferencePoint(profile: ProfileSource): Point | null {
+  if (!profile) return null;
+  if (profile.kind === "rect") return { x: (profile.x1 + profile.x2) / 2, y: (profile.y1 + profile.y2) / 2 };
+  if (profile.kind === "circle") return { x: profile.cx, y: profile.cy };
+  if (profile.kind === "slot") return { x: (profile.c1.x + profile.c2.x) / 2, y: (profile.c1.y + profile.c2.y) / 2 };
+  const n = profile.points.length;
+  const sx = profile.points.reduce((a, p) => a + p.x, 0) / n;
+  const sy = profile.points.reduce((a, p) => a + p.y, 0) / n;
+  return { x: sx, y: sy };
+}
+
+// Distância perpendicular de um ponto até uma reta (2D, local ao plano do
+// sketch) — origin+direction definem a reta, direction assumida unitária
+// (mesma convenção de findCenterLine, que já normaliza).
+export function pointToLineDistance2D(p: Point, origin: Point, direction: Point): number {
+  const dx = p.x - origin.x;
+  const dy = p.y - origin.y;
+  return Math.abs(dx * direction.y - dy * direction.x);
+}
+
 // Ponto sobre o arco (menor, <180°) de p1 pra p2, a `radius` de `center` —
 // o "ponto interno" que threePointsArcTo pede pra desenhar um arco sem
 // ambiguidade de sentido (equivalente ao ponto médio do fillet, mas
