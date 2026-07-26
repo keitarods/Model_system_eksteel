@@ -11,6 +11,7 @@ import { SHORTCUT_TO_TOOL } from "./tools";
 // dentro de um painel específico que poderia deixar de existir.
 export function useSketchKeyboardShortcuts() {
   const setTool = useSketchStore((s) => s.setTool);
+  const tool = useSketchStore((s) => s.tool);
   const selectedShapeId = useSketchStore((s) => s.selectedShapeId);
   const deleteSelectedShape = useSketchStore((s) => s.deleteSelectedShape);
   const copySelectedShape = useSketchStore((s) => s.copySelectedShape);
@@ -49,6 +50,22 @@ export function useSketchKeyboardShortcuts() {
         return;
       }
 
+      // Esc ao estilo Inventor: com uma ferramenta de desenho/cota/etc
+      // ativa (mesmo no meio de um passo, tipo o 2º clique pendente do
+      // Rasgo ou da Cota relacional), cancela o que estava em andamento e
+      // volta pra Selecionar — setTool já limpa pendingConstraint/
+      // pendingSlot/downRaw/draftPoint sozinho. Já em Selecionar, Esc só
+      // desmarca a forma selecionada (se houver).
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (tool !== "select") {
+          setTool("select");
+        } else if (selectedShapeId) {
+          useSketchStore.setState({ selectedShapeId: null });
+        }
+        return;
+      }
+
       const nextTool = SHORTCUT_TO_TOOL[e.key.toLowerCase()];
       if (nextTool) {
         e.preventDefault();
@@ -58,5 +75,5 @@ export function useSketchKeyboardShortcuts() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [setTool, selectedShapeId, deleteSelectedShape, copySelectedShape, pasteShape]);
+  }, [setTool, tool, selectedShapeId, deleteSelectedShape, copySelectedShape, pasteShape]);
 }

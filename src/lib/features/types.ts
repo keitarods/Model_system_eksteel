@@ -7,6 +7,14 @@ import type {
 } from "@/lib/sketch/types";
 import type { ExtrudeDirection, ProfileSource } from "@/lib/replicad/geometry";
 
+// 1 perfil (comportamento de sempre) ou vários (seleção múltipla — Ctrl+
+// clique com a ferramenta Selecionar antes de Extrudar/Cortar/Face/
+// Revolução, ver toggleProfileSelection em sketch/store.ts e
+// findProfileSources/profilesToDrawing em replicad/geometry.ts). Vários
+// perfis são UNIDOS entre si antes da operação, não tratados como
+// furo/ilha.
+type ProfileSources = NonNullable<ProfileSource> | NonNullable<ProfileSource>[];
+
 // Esboço salvo na árvore de histórico (ao estilo Inventor) — é só registro/
 // reabertura; Extrudar/Revolucionar/Furo continuam lendo o sketch "ao vivo"
 // (useSketchStore), não este snapshot. Reabrir um SketchFeature carrega os
@@ -25,7 +33,7 @@ export type ExtrudeFeature = {
   id: string;
   type: "extrude";
   label: string;
-  profile: NonNullable<ProfileSource>;
+  profile: ProfileSources;
   plane: SketchPlane;
   depth: number;
   cut: boolean;
@@ -38,7 +46,7 @@ export type RevolveFeature = {
   id: string;
   type: "revolve";
   label: string;
-  profile: NonNullable<ProfileSource>;
+  profile: ProfileSources;
   plane: SketchPlane;
   // Eixo de revolução = a linha de centro do sketch (ao estilo Inventor),
   // não um eixo X/Y fixo. Coordenadas locais do plano, iguais ao profile —
@@ -157,7 +165,7 @@ export type FaceFeature = {
   id: string;
   type: "face";
   label: string;
-  profile: NonNullable<ProfileSource>;
+  profile: ProfileSources;
   plane: SketchPlane;
   direction?: ExtrudeDirection;
   cut?: boolean;

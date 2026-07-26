@@ -52,7 +52,14 @@ export type EdgeHit =
   | { kind: "circleRadius"; shapeId: string }
   | { kind: "arcRadius"; shapeId: string }
   | { kind: "slotLength"; shapeId: string; side: 1 | -1 }
-  | { kind: "slotRadius"; shapeId: string };
+  | { kind: "slotRadius"; shapeId: string }
+  // Clique mais perto do CENTRO do círculo que da borda — desambiguado pelo
+  // mesmo critério de distância relativa usado em handleRawDown/
+  // bestCircleEdge (store.ts) pra redimensionar vs mover. Deixa cotar
+  // distância do centro até OUTRA coisa (linha, outro ponto) — ver
+  // dimensionPick1/PickableEdgeHit em store.ts — em vez de sempre cair na
+  // cota de raio instantânea.
+  | { kind: "point"; shapeId: string; pointId: string };
 
 // Acha a aresta/círculo mais próxima do clique (dentro da tolerância) — é o
 // que permite clicar numa linha existente pra cotar o comprimento dela
@@ -162,8 +169,12 @@ export function findEdgeHit(
       continue;
     }
 
-    // circle: perto do centro OU da circunferência conta (o centro já era
-    // clicável antes pra cotar raio; isso só soma a borda também)
+    // circle: perto do centro OU da circunferência conta — desambiguado por
+    // distância RELATIVA (qual dos dois está mais perto), mesmo critério do
+    // redimensionar/mover em handleRawDown (store.ts): mais perto da borda
+    // continua cotando o raio na hora (kind "circleRadius", como sempre
+    // foi); mais perto do centro vira um hit de PONTO, pra poder cotar a
+    // distância dele até outra coisa (ver dimensionPick1 em store.ts).
     const center = points[shape.center];
     if (!center) continue;
     const dCenter = Math.hypot(raw.x - center.x, raw.y - center.y);
@@ -171,7 +182,10 @@ export function findEdgeHit(
     const d = Math.min(dCenter, dEdge);
     if (d < bestDist) {
       bestDist = d;
-      best = { kind: "circleRadius", shapeId: shape.id };
+      best =
+        dEdge <= dCenter
+          ? { kind: "circleRadius", shapeId: shape.id }
+          : { kind: "point", shapeId: shape.id, pointId: shape.center };
     }
   }
 
@@ -292,6 +306,33 @@ export function findLineRegion(
   return null;
 }
 
+// Decompõe uma forma "parecida com linha reta" (linha solta, ou o
+// retângulo primitivo antigo — 4 arestas derivadas dos 2 cantos, ver
+// RectShape em types.ts) nos segmentos que a formam — compartilhado por
+// findNearestPointOnShapes e findNearbyLineMidpoint, que precisam da mesma
+// lista de arestas.
+function lineLikeSegments(shape: SketchShape, points: Record<string, SketchPoint>): [Point, Point][] {
+  if (shape.type === "line") {
+    const p1 = points[shape.p1];
+    const p2 = points[shape.p2];
+    return p1 && p2 ? [[p1, p2]] : [];
+  }
+  if (shape.type === "rect") {
+    const p1 = points[shape.p1];
+    const p2 = points[shape.p2];
+    if (!p1 || !p2) return [];
+    const b = { x: p2.x, y: p1.y };
+    const d = { x: p1.x, y: p2.y };
+    return [
+      [p1, b],
+      [b, p2],
+      [p2, d],
+      [d, p1],
+    ];
+  }
+  return [];
+}
+
 // Encosta um novo ponto numa ARESTA existente (não só nos endpoints dela) —
 // é o que dá a sensação de "a linha reconhece a outra e junta", ao estilo
 // Inventor. Não faz split topológico da aresta existente (isso exigiria
@@ -313,29 +354,45 @@ export function findNearestPointOnShapes(
     if (shape.type === "circle" || shape.type === "point" || shape.type === "arc" || shape.type === "slot")
       continue;
 
-    const segments: [Point, Point][] =
-      shape.type === "line"
-        ? [[points[shape.p1], points[shape.p2]]]
-        : (() => {
-            const p1 = points[shape.p1];
-            const p2 = points[shape.p2];
-            if (!p1 || !p2) return [];
-            const b = { x: p2.x, y: p1.y };
-            const d = { x: p1.x, y: p2.y };
-            return [
-              [p1, b],
-              [b, p2],
-              [p2, d],
-              [d, p1],
-            ] as [Point, Point][];
-          })();
-
-    for (const [a, b] of segments) {
-      if (!a || !b) continue;
+    for (const [a, b] of lineLikeSegments(shape, points)) {
       const { t, distance } = projectOntoSegment(raw, a, b);
       if (distance < bestDist) {
         bestDist = distance;
         best = { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
+      }
+    }
+  }
+
+  return best;
+}
+
+// Ponto MÉDIO de uma aresta reta — snap específico, ao estilo Inventor (o
+// glifo triangular que aparece exatamente no meio de uma aresta ao passar
+// perto, distinto de "ponto mais próximo nela" acima, que gruda em
+// QUALQUER posição ao longo dela). Gira sobre distância até o PRÓPRIO
+// MEIO (não até a aresta em geral) — é isso que faz competir em pé de
+// igualdade com os outros candidatos de snap em resolveSnapWithEdges: só
+// "puxa" quando o cursor já está perto o bastante do meio de verdade, não
+// simplesmente perto de qualquer trecho da aresta.
+export function findNearbyLineMidpoint(
+  raw: Point,
+  shapes: SketchShape[],
+  points: Record<string, SketchPoint>,
+  tolerance: number
+): Point | null {
+  let best: Point | null = null;
+  let bestDist = tolerance;
+
+  for (const shape of shapes) {
+    if (shape.type === "circle" || shape.type === "point" || shape.type === "arc" || shape.type === "slot")
+      continue;
+
+    for (const [a, b] of lineLikeSegments(shape, points)) {
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      const d = Math.hypot(raw.x - mid.x, raw.y - mid.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = mid;
       }
     }
   }

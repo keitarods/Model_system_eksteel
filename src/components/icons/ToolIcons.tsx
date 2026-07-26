@@ -252,6 +252,17 @@ export function IconPatternCircular({ className }: IconProps) {
   );
 }
 
+export function IconProjectGeometry({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <line x1="3" y1="5" x2="17" y2="5" strokeDasharray="2.2 1.6" />
+      <line x1="6" y1="15" x2="14" y2="15" />
+      <path d="M7 9l0 3M13 9l0 3" strokeDasharray="1.6 1.2" />
+      <path d="M6.3 11.2l0.7 1.8 1.8-0.7M13.7 11.2l-0.7 1.8-1.8-0.7" />
+    </svg>
+  );
+}
+
 export function IconUndo({ className }: IconProps) {
   return (
     <svg {...base} className={className}>
@@ -434,6 +445,62 @@ export function IconRotateCCW({ className }: IconProps) {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+export function IconFace({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <rect x="3.5" y="8" width="13" height="3.4" />
+      <path d="M3.5 8l3-3h10l-3 3" />
+    </svg>
+  );
+}
+
+export function IconPlane({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M3 13.5L8 5l9 1.5-5 8.5z" />
+      <line x1="6" y1="17" x2="14" y2="17" strokeDasharray="2 1.4" />
+    </svg>
+  );
+}
+
+export function IconAxis({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <line x1="3" y1="17" x2="17" y2="3" strokeDasharray="3 1.6" />
+      <path d="M17 3l-3 0.5M17 3l-0.5 3" />
+    </svg>
+  );
+}
+
+export function IconSheetMetal({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M4 5h8v8h4" />
+      <path d="M4 8h8M13 5v8" />
+    </svg>
+  );
+}
+
+export function IconFlange({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M4 16V8h9" />
+      <path d="M13 8V4" strokeDasharray="2 1.4" />
+      <path d="M10.4 5.4L13 3l2.6 2.4" />
+    </svg>
+  );
+}
+
+export function IconFlatten({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M3 15V7h6" />
+      <line x1="11" y1="10" x2="16" y2="10" />
+      <path d="M14 8l2 2-2 2" />
     </svg>
   );
 }

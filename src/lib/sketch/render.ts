@@ -16,6 +16,19 @@ import type {
 // compartilhadas pelo editor 2D (SVG) e pelo overlay 3D (Three.js), pra não
 // duplicar a mesma lógica em dois lugares que podem divergir com o tempo.
 
+// Projeta p na reta INFINITA que passa por line.a/line.b (não no segmento —
+// sem clamp em [0,1], ao contrário de projectOntoSegment em hitTest.ts, que
+// é pra hit-test). Usado por cotas "edgeDistance" pra achar o pé da
+// perpendicular na aresta medida.
+function projectOnInfiniteLine(p: Point, line: { a: Point; b: Point }): { x2: number; y2: number } {
+  const dx = line.b.x - line.a.x;
+  const dy = line.b.y - line.a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-9) return { x2: line.a.x, y2: line.a.y };
+  const t = ((p.x - line.a.x) * dx + (p.y - line.a.y) * dy) / lenSq;
+  return { x2: line.a.x + t * dx, y2: line.a.y + t * dy };
+}
+
 export function createId() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -90,6 +103,17 @@ function resolveEdgeRefSegment(
     return { a: { x, y: p1.y }, b: { x, y: p2.y } };
   }
 
+  // Ponto solto (ex.: centro de um círculo) — "segmento" degenerado de
+  // comprimento 0. resolveDimension's edgeDistance projeta o ponto MÉDIO de
+  // `a` na reta infinita de `b`; com a=b=esse ponto, o "médio" é o próprio
+  // ponto — dá a distância dele até a OUTRA referência (linha ou outro
+  // ponto) de graça, sem precisar de um kind de cota novo só pra isso.
+  if (ref.kind === "point") {
+    const p = points[ref.pointId];
+    if (!p) return null;
+    return { a: { x: p.x, y: p.y }, b: { x: p.x, y: p.y } };
+  }
+
   // slotTangent
   const slot = shapes.find((s): s is SlotShape => s.type === "slot" && s.id === ref.slotId);
   const c1 = slot ? points[slot.center1] : null;
@@ -151,22 +175,26 @@ export function resolveDimension(
     const segB = resolveEdgeRefSegment(dim.b, shapes, points);
     if (!segA || !segB) return null;
 
+    // Um ponto solto (ex.: centro de círculo, ver EdgeRef "point" em
+    // types.ts) contra uma aresta reta mede a distância PERPENDICULAR de
+    // verdade, na reta infinita da aresta — funciona igual não importa qual
+    // dos dois foi clicado primeiro (a ou b), ao contrário do caminho
+    // genérico abaixo que sempre projeta o médio de A em B.
+    if (dim.a.kind === "point" && dim.b.kind !== "point") {
+      return { kind: "distance", x1: segA.a.x, y1: segA.a.y, ...projectOnInfiniteLine(segA.a, segB) };
+    }
+    if (dim.b.kind === "point" && dim.a.kind !== "point") {
+      const proj = projectOnInfiniteLine(segB.a, segA);
+      return { kind: "distance", x1: proj.x2, y1: proj.y2, x2: segB.a.x, y2: segB.a.y };
+    }
+
     // Ponto médio de A, projetado na reta INFINITA de B — exato quando as
     // 2 arestas são paralelas (o caso normal: 2 tangentes de rasgo, ou 2
     // arestas de largura/altura de retângulo), uma aproximação razoável
-    // quando não são.
+    // quando não são. Também cobre ponto-a-ponto (os dois lados degenerados
+    // "colapsam" pro próprio ponto, ver resolveEdgeRefSegment).
     const midA = { x: (segA.a.x + segA.b.x) / 2, y: (segA.a.y + segA.b.y) / 2 };
-    const dx = segB.b.x - segB.a.x;
-    const dy = segB.b.y - segB.a.y;
-    const lenSq = dx * dx + dy * dy;
-    const proj =
-      lenSq < 1e-9
-        ? segB.a
-        : {
-            x: segB.a.x + ((midA.x - segB.a.x) * dx + (midA.y - segB.a.y) * dy) * (dx / lenSq),
-            y: segB.a.y + ((midA.x - segB.a.x) * dx + (midA.y - segB.a.y) * dy) * (dy / lenSq),
-          };
-    return { kind: "distance", x1: midA.x, y1: midA.y, x2: proj.x, y2: proj.y };
+    return { kind: "distance", x1: midA.x, y1: midA.y, ...projectOnInfiniteLine(midA, segB) };
   }
 
   const p1 = points[dim.p1];
@@ -206,7 +234,7 @@ export function arrowheadTriangle(tip: Point, dirX: number, dirY: number): [Poin
 export type DimensionLineGeometry = {
   dimA: Point;
   dimB: Point;
-  mid: Point;
+  labelPos: Point;
   extAStart: Point;
   extAEnd: Point;
   extBStart: Point;
@@ -224,7 +252,11 @@ export type DimensionLineGeometry = {
 // Geometria completa de uma cota linear (distância entre `a` e `b`), já
 // deslocada por `offset` — linhas de extensão saindo da própria geometria
 // até a linha de cota, e uma seta em cada ponta apontando uma pra outra.
-export function computeDimensionLineGeometry(a: Point, b: Point, offset: number): DimensionLineGeometry | null {
+// `labelT` (0 = ponta A, 1 = ponta B, 0.5 = meio, padrão) posiciona o
+// RÓTULO ao longo dessa linha — arrastável independente do offset (ver
+// dimensionDrag em store.ts), pra dar o mesmo "arrastar o texto pra
+// qualquer lugar perto da cota" que o Inventor tem.
+export function computeDimensionLineGeometry(a: Point, b: Point, offset: number, labelT = 0.5): DimensionLineGeometry | null {
   const length = distance(a, b);
   if (length < 1e-6) return null;
 
@@ -237,7 +269,8 @@ export function computeDimensionLineGeometry(a: Point, b: Point, offset: number)
 
   const dimA = { x: a.x + nx * offset, y: a.y + ny * offset };
   const dimB = { x: b.x + nx * offset, y: b.y + ny * offset };
-  const mid = { x: (dimA.x + dimB.x) / 2, y: (dimA.y + dimB.y) / 2 };
+  const t = Math.max(0, Math.min(1, labelT));
+  const labelPos = { x: dimA.x + (dimB.x - dimA.x) * t, y: dimA.y + (dimB.y - dimA.y) * t };
 
   const extAStart = { x: a.x + nx * gap, y: a.y + ny * gap };
   const extAEnd = { x: a.x + nx * (offset + overshoot), y: a.y + ny * (offset + overshoot) };
@@ -247,7 +280,7 @@ export function computeDimensionLineGeometry(a: Point, b: Point, offset: number)
   return {
     dimA,
     dimB,
-    mid,
+    labelPos,
     extAStart,
     extAEnd,
     extBStart,
@@ -260,9 +293,11 @@ export function computeDimensionLineGeometry(a: Point, b: Point, offset: number)
   };
 }
 
-// Direção fixa (45°) da cota de raio/diâmetro — a mesma que o rótulo já
-// usava antes dessa cota ganhar seta/offset (edge = cx+r·√2/2, cy+r·√2/2).
-export const RADIUS_DIM_DIR: Point = { x: Math.SQRT1_2, y: Math.SQRT1_2 };
+// Ângulo padrão (45°) da cota de raio/diâmetro quando a cota não tem um
+// `angle` próprio ainda (compatibilidade com cotas de projetos salvos antes
+// desse campo existir) — o mesmo que o rótulo sempre usou antes de virar
+// arrastável em volta do círculo inteiro.
+const RADIUS_DIM_DEFAULT_ANGLE_DEG = 45;
 
 export type RadiusDimensionGeometry = {
   edge: Point; // ponto na borda do círculo/arco/rasgo — onde a seta encosta
@@ -273,10 +308,22 @@ export type RadiusDimensionGeometry = {
 // Linha reta do centro até a borda (raio em si) + uma extensão deslocável
 // além da borda com seta encostando nela, ao estilo de cota de raio de
 // desenho técnico — offset negativo puxa o rótulo pra dentro do círculo.
-export function computeRadiusDimensionGeometry(cx: number, cy: number, r: number, offset: number): RadiusDimensionGeometry {
-  const edge = { x: cx + RADIUS_DIM_DIR.x * r, y: cy + RADIUS_DIM_DIR.y * r };
-  const tip = { x: cx + RADIUS_DIM_DIR.x * (r + offset), y: cy + RADIUS_DIM_DIR.y * (r + offset) };
-  return { edge, tip, arrow: arrowheadTriangle(edge, -RADIUS_DIM_DIR.x, -RADIUS_DIM_DIR.y) };
+// `angleDeg` (0 = eixo X positivo, anti-horário) escolhe PRA ONDE em volta
+// do círculo a cota aponta — também arrastável (ver dimensionDrag em
+// store.ts), não mais fixo em 45°.
+export function computeRadiusDimensionGeometry(
+  cx: number,
+  cy: number,
+  r: number,
+  offset: number,
+  angleDeg = RADIUS_DIM_DEFAULT_ANGLE_DEG
+): RadiusDimensionGeometry {
+  const rad = (angleDeg * Math.PI) / 180;
+  const dirX = Math.cos(rad);
+  const dirY = Math.sin(rad);
+  const edge = { x: cx + dirX * r, y: cy + dirY * r };
+  const tip = { x: cx + dirX * (r + offset), y: cy + dirY * (r + offset) };
+  return { edge, tip, arrow: arrowheadTriangle(edge, -dirX, -dirY) };
 }
 
 // Forma "resolvida" pronta pra desenhar — usada tanto pros shapes de
@@ -423,6 +470,11 @@ export function draftPreviewFor(tool: SketchTool, start: Point, end: Point): Ren
 }
 
 export function edgeHitToDimension(hit: EdgeHit, shapes: SketchShape[]): DimensionAnnotation | null {
+  // Ponto sozinho não tem uma "dimensão própria" (ao contrário de linha/
+  // retângulo/rasgo) — clicar o MESMO ponto de novo (ou clicar no vazio)
+  // enquanto ele está pendente em dimensionPick1 só cancela a espera, não
+  // cria nada (ver handleRawUp em store.ts).
+  if (hit.kind === "point") return null;
   if (hit.kind === "line") {
     const line = shapes.find((s) => s.id === hit.shapeId);
     if (!line || line.type !== "line") return null;

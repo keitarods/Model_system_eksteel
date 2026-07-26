@@ -2,7 +2,7 @@ import { drawCircle, drawRoundedRectangle, genericSweep, makeHelix } from "repli
 import type { Sketch, Solid } from "replicad";
 import type { Feature, SketchFeature } from "@/lib/features/types";
 import type { SketchPlane } from "@/lib/sketch/types";
-import { extrudeProfile, pathToDrawing, profileReferencePoint, pointToLineDistance2D, profileToDrawing } from "./geometry";
+import { extrudeProfile, pathToDrawing, profileReferencePoint, pointToLineDistance2D, profileToDrawing, profilesToDrawing } from "./geometry";
 import { findEdgesByPoints, listLinearEdges } from "./edgeTools";
 import { buildFlangeSolid, type FlattenLink } from "./sheetMetal";
 import { applyPatternOffset, computePatternOffsets, isPatternable } from "./pattern";
@@ -17,7 +17,7 @@ import {
 function buildExtrudeSolid(
   feature: Extract<Feature, { type: "extrude" }>
 ): Solid | null {
-  const drawing = profileToDrawing(feature.profile);
+  const drawing = profilesToDrawing(feature.profile);
   return drawing ? extrudeProfile(drawing, feature.depth, feature.plane, feature.direction ?? "normal") : null;
 }
 
@@ -29,7 +29,7 @@ function buildFaceSolid(
   feature: Extract<Feature, { type: "face" }>,
   thickness: number
 ): Solid | null {
-  const drawing = profileToDrawing(feature.profile);
+  const drawing = profilesToDrawing(feature.profile);
   return drawing ? extrudeProfile(drawing, thickness, feature.plane, feature.direction ?? "normal") : null;
 }
 
@@ -38,7 +38,7 @@ function buildFaceSolid(
 function buildRevolveSolid(
   feature: Extract<Feature, { type: "revolve" }>
 ): Solid | null {
-  const drawing = profileToDrawing(feature.profile);
+  const drawing = profilesToDrawing(feature.profile);
   if (!drawing) return null;
 
   const sketch = drawing.sketchOnPlane(toReplicadPlane(feature.plane));

@@ -1,5 +1,5 @@
 import type { Point, SketchPoint, SketchShape } from "./types";
-import { findNearestPointOnShapes, findNearestPointOnSegments } from "./hitTest";
+import { findNearestPointOnShapes, findNearestPointOnSegments, findNearbyLineMidpoint } from "./hitTest";
 
 export function snapToGrid(point: Point, gridSize: number): Point {
   return {
@@ -61,7 +61,10 @@ export type ResolvedEdgeSnap = ResolvedSnap & {
 // uma ARESTA existente do sketch (linha/retângulo) ou sobre a geometria de
 // referência projetada do sólido 3D — dá a sensação de "a linha reconhece
 // a outra e junta", ao estilo Inventor, e também é o mecanismo que torna a
-// geometria de referência utilizável (não só visual).
+// geometria de referência utilizável (não só visual). O MEIO de uma aresta
+// (findNearbyLineMidpoint) entra como mais um candidato, competindo por
+// distância igual aos outros — não tem prioridade fixa, só "puxa" quando o
+// cursor já está perto o bastante do meio de verdade (ver comentário lá).
 export function resolveSnapWithEdges(
   raw: Point,
   points: Record<string, SketchPoint>,
@@ -77,8 +80,9 @@ export function resolveSnapWithEdges(
 
   const onShape = findNearestPointOnShapes(raw, shapes, points, toleranceWorld);
   const onReference = findNearestPointOnSegments(raw, referenceGeometry, toleranceWorld);
+  const onMidpoint = findNearbyLineMidpoint(raw, shapes, points, toleranceWorld);
 
-  const candidates = [onShape, onReference].filter((p): p is Point => p !== null);
+  const candidates = [onShape, onReference, onMidpoint].filter((p): p is Point => p !== null);
   if (candidates.length > 0) {
     candidates.sort((a, b) => distance(raw, a) - distance(raw, b));
     return { point: candidates[0], existingId: null, snapped: true };

@@ -143,9 +143,18 @@ export function undoModel() {
   const previous = past[past.length - 1];
   const current = captureSnapshot();
 
+  // try/finally: se applySnapshot lançar no meio (ex.: um dos 3 setState
+  // encadeados dispara um re-render que estoura em algum componente), sem
+  // isso `restoring` ficava travado em true pra sempre — e como
+  // onStoreChange começa com `if (restoring) return`, NENHUMA edição
+  // seguinte voltaria a entrar no histórico, dando exatamente a impressão
+  // de "desfazer parou de funcionar" (mesmo continuando clicável).
   restoring = true;
-  applySnapshot(previous);
-  restoring = false;
+  try {
+    applySnapshot(previous);
+  } finally {
+    restoring = false;
+  }
   lastSnapshot = previous;
 
   useUndoStore.setState((s) => ({
@@ -162,8 +171,11 @@ export function redoModel() {
   const current = captureSnapshot();
 
   restoring = true;
-  applySnapshot(next);
-  restoring = false;
+  try {
+    applySnapshot(next);
+  } finally {
+    restoring = false;
+  }
   lastSnapshot = next;
 
   useUndoStore.setState((s) => ({

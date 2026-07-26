@@ -71,6 +71,72 @@ function findClosedLoop(
   };
 }
 
+// Igual findClosedLoop, mas achando o loop que CONTÉM uma aresta específica
+// (startShapeId) em vez de exigir que TODAS as linhas/arcos do sketch
+// formem um loop só — usado pelo Ctrl+clique de seleção múltipla de perfil
+// numa aresta solta (ex.: um dos 4 lados de um retângulo desenhado como 4
+// linhas independentes, ver handleRawUp em sketch/store.ts): precisa achar
+// o CONTORNO INTEIRO daquela aresta, ignorando outras arestas soltas do
+// sketch que não têm nada a ver com ela. Só resolve loops SIMPLES (cada
+// ponto tocado por exatamente 2 arestas do caminho) — uma ramificação (3+
+// arestas no mesmo ponto) devolve null.
+export function findClosedLoopContaining(
+  shapes: SketchShape[],
+  points: Record<string, SketchPoint>,
+  startShapeId: string
+): { shapeIds: string[]; points: Point[]; arcCenters: (Point | null)[] } | null {
+  const edges = shapes.filter(
+    (s): s is LineShape | ArcShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc"
+  );
+  const start = edges.find((e) => e.id === startShapeId);
+  if (!start) return null;
+
+  const touching = new Map<string, (LineShape | ArcShape)[]>();
+  for (const e of edges) {
+    if (!touching.has(e.p1)) touching.set(e.p1, []);
+    if (!touching.has(e.p2)) touching.set(e.p2, []);
+    touching.get(e.p1)!.push(e);
+    touching.get(e.p2)!.push(e);
+  }
+
+  const startId = start.p1;
+  let currentId = start.p2;
+  const orderedEdges: (LineShape | ArcShape)[] = [start];
+  const usedIds = new Set<string>([start.id]);
+
+  while (currentId !== startId) {
+    const candidates = (touching.get(currentId) ?? []).filter((e) => !usedIds.has(e.id));
+    if (candidates.length !== 1) return null; // ramificação ou ponta solta — não é loop simples
+    const next = candidates[0];
+    usedIds.add(next.id);
+    orderedEdges.push(next);
+    currentId = next.p1 === currentId ? next.p2 : next.p1;
+    if (orderedEdges.length > edges.length) return null; // guarda contra loop mal formado
+  }
+
+  if (orderedEdges.length < 3) return null;
+
+  const vertexIds: string[] = [startId];
+  const arcCenterIds: (string | null)[] = [];
+  let walkId = startId;
+  for (const edge of orderedEdges) {
+    const nextId = edge.p1 === walkId ? edge.p2 : edge.p1;
+    arcCenterIds.push(edge.type === "arc" ? edge.center : null);
+    if (nextId !== startId) vertexIds.push(nextId);
+    walkId = nextId;
+  }
+
+  const resolvedPoints = vertexIds.map((id) => points[id]);
+  if (resolvedPoints.some((p) => !p)) return null;
+  const resolvedArcCenters = arcCenterIds.map((id) => (id ? points[id] : null));
+
+  return {
+    shapeIds: orderedEdges.map((e) => e.id),
+    points: resolvedPoints.map((p) => ({ x: p.x, y: p.y })),
+    arcCenters: resolvedArcCenters.map((p) => (p ? { x: p.x, y: p.y } : null)),
+  };
+}
+
 // Perfil já resolvido (coordenadas concretas, não mais ids de ponto) — é o
 // que fica congelado dentro de uma feature, independente do sketch (que é
 // limpo logo depois de a feature ser criada). arcCenters é opcional e
@@ -120,6 +186,76 @@ export function findProfileSource(
   );
   const loop = findClosedLoop(edges, points);
   return loop ? { kind: "loop", points: loop.points, arcCenters: loop.arcCenters } : null;
+}
+
+// Perfil de UMA forma específica — só rect/circle/slot; LINHA é tratada à
+// parte em findProfileSources (precisa achar o contorno fechado INTEIRO
+// que ela pertence, e ela sozinha não chega lá — ver findClosedLoopContaining).
+function profileSourceForShape(
+  shape: SketchShape,
+  points: Record<string, SketchPoint>
+): NonNullable<ProfileSource> | null {
+  if (shape.type === "rect") {
+    const p1 = points[shape.p1];
+    const p2 = points[shape.p2];
+    if (!p1 || !p2) return null;
+    return { kind: "rect", x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+  }
+  if (shape.type === "circle") {
+    const center = points[shape.center];
+    if (!center) return null;
+    return { kind: "circle", cx: center.x, cy: center.y, r: shape.radius };
+  }
+  if (shape.type === "slot") {
+    const c1 = points[shape.center1];
+    const c2 = points[shape.center2];
+    if (!c1 || !c2) return null;
+    return { kind: "slot", c1: { x: c1.x, y: c1.y }, c2: { x: c2.x, y: c2.y }, r: shape.radius };
+  }
+  return null;
+}
+
+// Perfis a extrudar/revolucionar/etc — com seleção múltipla (Ctrl+clique
+// com a ferramenta Selecionar, ver toggleProfileSelection em
+// sketch/store.ts) usa exatamente essas formas; sem seleção, cai no
+// comportamento de sempre (findProfileSource: a forma mais recente, ou o
+// contorno fechado de linhas). Vários perfis são UNIDOS (fuse) antes de
+// extrudar, ver profilesToDrawing — não há detecção de "ilha vira furo"
+// aqui, perfis sobrepostos só se fundem num só. Ctrl+clicar em QUALQUER
+// lado de um contorno de linhas (ex.: retângulo desenhado como 4 linhas,
+// ver handleRawUp em sketch/store.ts) marca as 4 na seleção (ver
+// toggleProfileSelection) — dedup pelo seenLoopKeys abaixo, senão as 4
+// virariam o MESMO perfil repetido 4x (profilesToDrawing tentaria fundir a
+// mesma geometria consigo mesma).
+export function findProfileSources(
+  shapes: SketchShape[],
+  points: Record<string, SketchPoint>,
+  selectedIds: string[]
+): NonNullable<ProfileSource>[] {
+  if (selectedIds.length === 0) {
+    const single = findProfileSource(shapes, points);
+    return single ? [single] : [];
+  }
+
+  const byId = new Map(shapes.map((s) => [s.id, s]));
+  const seenLoopKeys = new Set<string>();
+  const results: NonNullable<ProfileSource>[] = [];
+  for (const id of selectedIds) {
+    const shape = byId.get(id);
+    if (!shape) continue;
+    if (shape.type === "line") {
+      const loop = findClosedLoopContaining(shapes, points, id);
+      if (!loop) continue;
+      const loopKey = [...loop.shapeIds].sort().join(",");
+      if (seenLoopKeys.has(loopKey)) continue;
+      seenLoopKeys.add(loopKey);
+      results.push({ kind: "loop", points: loop.points, arcCenters: loop.arcCenters });
+      continue;
+    }
+    const profile = profileSourceForShape(shape, points);
+    if (profile) results.push(profile);
+  }
+  return results;
 }
 
 // Independente do perfil escolhido pra extrudar/revolucionar, o Furo sempre
@@ -373,6 +509,21 @@ export function profileToDrawing(profile: ProfileSource): Drawing | null {
   }
 
   return pen.close();
+}
+
+// Aceita 1 perfil OU vários (seleção múltipla, ver findProfileSources) e
+// devolve um Drawing só, unindo (fuse) um a um — extrude/revolução/etc não
+// precisam saber se veio de 1 forma ou de várias, só recebem um Drawing
+// pronto igual sempre receberam.
+export function profilesToDrawing(profiles: NonNullable<ProfileSource> | NonNullable<ProfileSource>[]): Drawing | null {
+  const list = Array.isArray(profiles) ? profiles : [profiles];
+  let combined: Drawing | null = null;
+  for (const p of list) {
+    const d = profileToDrawing(p);
+    if (!d) continue;
+    combined = combined ? combined.fuse(d) : d;
+  }
+  return combined;
 }
 
 // Um perfil fechado único (retângulo, círculo ou contorno de linhas) sempre
