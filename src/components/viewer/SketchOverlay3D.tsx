@@ -103,11 +103,16 @@ function circlePoints(center: LocalPoint, radius: number): LocalPoint[] {
   return pts;
 }
 
-// Retângulo semitransparente + cruz de eixos locais na posição real do
-// plano — dá a mesma noção de "onde estou esboçando" que o destaque azul
-// de plano do Inventor, sem precisar desenhar uma grade completa.
+// Retângulo semitransparente na posição real do plano — dá a mesma noção
+// de "onde estou esboçando" que o destaque azul de plano do Inventor, sem
+// precisar desenhar uma grade completa. NÃO desenha uma cruz de eixos
+// local própria: ao esboçar numa face qualquer, isso pareceria "criar um
+// eixo novo" ali (confuso, já que os eixos de referência são sempre os
+// globais, ver <axesHelper> em Viewer3D.tsx) — a câmera é que recentraliza
+// na nova sketch (ver PlaneFocusCameraRig em Viewer3D.tsx), os eixos
+// continuam sendo os mesmos do início.
 function PlaneHighlight({ plane }: { plane: SketchPlane }) {
-  const { quaternion, corners, axisX, axisY } = useMemo(() => {
+  const { quaternion, corners } = useMemo(() => {
     const q = planeBasisQuaternion(plane);
     const s = PLANE_HALF_SIZE;
     const corners: Vec3[] = [
@@ -118,11 +123,7 @@ function PlaneHighlight({ plane }: { plane: SketchPlane }) {
       localToWorldPoint(plane, { x: -s, y: -s }),
     ];
 
-    const axisLen = s * 0.3;
-    const axisX: Vec3[] = [plane.origin, localToWorldPoint(plane, { x: axisLen, y: 0 })];
-    const axisY: Vec3[] = [plane.origin, localToWorldPoint(plane, { x: 0, y: axisLen })];
-
-    return { quaternion: q, corners, axisX, axisY };
+    return { quaternion: q, corners };
   }, [plane]);
 
   return (
@@ -138,8 +139,6 @@ function PlaneHighlight({ plane }: { plane: SketchPlane }) {
         />
       </mesh>
       <Line points={corners} color={PLANE_COLOR} transparent opacity={0.5} lineWidth={1} />
-      <Line points={axisX} color="#e53935" lineWidth={1.5} />
-      <Line points={axisY} color="#43a047" lineWidth={1.5} />
     </group>
   );
 }
@@ -172,6 +171,25 @@ function OriginMarker({ plane }: { plane: SketchPlane }) {
         <meshBasicMaterial color={ORIGIN_MARKER_COLOR} />
       </mesh>
     </group>
+  );
+}
+
+// Marcador de restrição "Fixo" (ao estilo Inventor: indicador no ponto
+// travado — ver fixedPointIds em store.ts) — esfera wireframe em volta do
+// ponto, mesmo estilo já usado pros marcadores de seleção pendente
+// (pendingConstraint/dimensionPick1 mais abaixo), só numa cor própria
+// (cinza-azulado, distinta do verde da origem e do vermelho de seleção)
+// pra deixar visualmente óbvio quais pontos não podem mais ser arrastados.
+// Sempre esférico (não um plano/anel) de propósito — não depende de
+// orientação nenhuma pra ficar de frente pro plano do esboço.
+const FIXED_MARKER_COLOR = "#546e7a";
+
+function FixedPointMarker({ point }: { point: Vec3 }) {
+  return (
+    <mesh position={point}>
+      <sphereGeometry args={[2, 10, 10]} />
+      <meshBasicMaterial color={FIXED_MARKER_COLOR} wireframe />
+    </mesh>
   );
 }
 
@@ -382,6 +400,24 @@ function DimensionLabel({
                 onCommitEdit?.(e.currentTarget.value);
               } else if (e.key === "Escape") {
                 onCancelEdit?.();
+              } else if ((e.key === "Delete" || e.key === "Backspace") && onRemove) {
+                const el = e.currentTarget;
+                // Ao estilo Inventor (clicar na cota + Delete remove ela):
+                // o valor inteiro já vem SELECIONADO ao abrir a edição (ver
+                // onFocus), então Delete/Backspace logo depois do clique já
+                // cai aqui na hora — sem precisar apagar caractere por
+                // caractere. Também dispara num campo já vazio (deixado
+                // assim de propósito), como reforço. Fora desses dois casos
+                // (cursor só no meio/fim do texto, sem seleção total),
+                // deixa o Backspace/Delete normal do <input> agir — edição
+                // comum de texto não deve remover a cota sem querer.
+                const isEmpty = el.value === "";
+                const isFullySelected = el.selectionStart === 0 && el.selectionEnd === el.value.length && el.value.length > 0;
+                if (isEmpty || isFullySelected) {
+                  e.preventDefault();
+                  suppressBlurRef.current = true;
+                  onRemove();
+                }
               }
             }}
             onBlur={(e) => {
@@ -769,6 +805,7 @@ export function SketchOverlay3D({
   const shapes = useSketchStore((s) => s.shapes);
   const points = useSketchStore((s) => s.points);
   const dimensions = useSketchStore((s) => s.dimensions);
+  const fixedPointIds = useSketchStore((s) => s.fixedPointIds);
   const tool = useSketchStore((s) => s.tool);
   const downRaw = useSketchStore((s) => s.downRaw);
   const draftPoint = useSketchStore((s) => s.draftPoint);
@@ -848,19 +885,29 @@ export function SketchOverlay3D({
     <group>
       {interactive && <PlaneHighlight plane={plane} />}
       {interactive && <OriginMarker plane={plane} />}
+      {interactive &&
+        fixedPointIds.map((id) => {
+          const p = renderPoints[id];
+          if (!p) return null;
+          return <FixedPointMarker key={id} point={toWorld(p)} />;
+        })}
       {interactive && <InteractivePlane plane={plane} referenceGeometry={referenceGeometry} />}
 
       {renderShapes.map((shape) => {
         const resolved = resolveShape(shape, renderPoints);
         if (!resolved) return null;
         // "joinPoints" (Coincidente) só destaca a forma aqui quando o 1º
-        // clique foi numa LINHA (firstKind) — 1º clique num PONTO usa o
-        // marcador esférico separado logo abaixo, já que um ponto não é
-        // uma "forma" com id próprio pra bater em shape.id.
+        // clique foi numa LINHA — "line" (qualquer trecho) OU
+        // "lineMidpoint" (perto do meio, ver findNearbyLineMidpointShape) —
+        // 1º clique num PONTO usa o marcador esférico separado logo
+        // abaixo, já que um ponto não é uma "forma" com id próprio pra
+        // bater em shape.id.
         const isPendingFirst =
           interactive &&
           ((pendingConstraint?.kind !== "joinPoints" && pendingConstraint?.firstId === shape.id) ||
-            (pendingConstraint?.kind === "joinPoints" && pendingConstraint.firstKind === "line" && pendingConstraint.firstId === shape.id));
+            (pendingConstraint?.kind === "joinPoints" &&
+              (pendingConstraint.firstKind === "line" || pendingConstraint.firstKind === "lineMidpoint") &&
+              pendingConstraint.firstId === shape.id));
         const isPendingEdge = interactive && dimensionPick1?.shapeId === shape.id;
         const selected = interactive && (shape.id === selectedShapeId || isPendingFirst || isPendingEdge);
         const inProfileSelection = interactive && multiProfileSelection.includes(shape.id);
@@ -891,6 +938,42 @@ export function SketchOverlay3D({
             <meshBasicMaterial color={SELECTED_COLOR} wireframe />
           </mesh>
         )}
+
+      {/* Marcador no MEIO exato da linha escolhida (não só a linha
+          destacada acima) — deixa claro que o ponto pego pra coincidir é
+          especificamente o centro dela, não "a linha em geral". */}
+      {interactive &&
+        pendingConstraint?.kind === "joinPoints" &&
+        pendingConstraint.firstKind === "lineMidpoint" &&
+        (() => {
+          const line = renderShapes.find((s) => s.id === pendingConstraint.firstId);
+          if (!line || line.type !== "line") return null;
+          const p1 = renderPoints[line.p1];
+          const p2 = renderPoints[line.p2];
+          if (!p1 || !p2) return null;
+          const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+          return (
+            <mesh position={toWorld(mid)}>
+              <sphereGeometry args={[2.4, 12, 12]} />
+              <meshBasicMaterial color={SELECTED_COLOR} wireframe />
+            </mesh>
+          );
+        })()}
+
+      {/* 1ª referência da ferramenta Cota, quando é um PONTO (centro de
+          círculo, ponta de linha, canto de retângulo, origem etc. — ver
+          kind "point" em findEdgeHit/hitTest.ts), aguardando a 2ª pra virar
+          uma cota "edgeDistance" — mesmo marcador esférico do 1º clique de
+          "Coincidente" acima, já que um ponto solto não é uma "forma" com
+          id próprio pra destacar via isPendingEdge (dimensionPick1.shapeId
+          só bate com shape.id de verdade pro caso já existente de centro
+          de círculo, que também ganha esse destaque de forma inteira). */}
+      {interactive && dimensionPick1?.kind === "point" && renderPoints[dimensionPick1.pointId] && (
+        <mesh position={toWorld(renderPoints[dimensionPick1.pointId])}>
+          <sphereGeometry args={[2.4, 12, 12]} />
+          <meshBasicMaterial color={SELECTED_COLOR} wireframe />
+        </mesh>
+      )}
 
       {dimensions.map((dim) => {
         const render = resolveDimension(dim, renderShapes, renderPoints);

@@ -1,4 +1,4 @@
-import type { Point, RectShape, SketchPoint, SketchShape } from "./types";
+import type { CircleShape, Point, RectShape, SketchPoint, SketchShape } from "./types";
 
 export function projectOntoSegment(p: Point, a: Point, b: Point): { t: number; distance: number } {
   const dx = b.x - a.x;
@@ -192,6 +192,49 @@ export function findEdgeHit(
   return best;
 }
 
+// Variante de findEdgeHit usada SÓ pela ferramenta Cota: além do que
+// findEdgeHit já acha (linha/aresta/raio/centro de círculo), também
+// reconhece QUALQUER outro ponto já existente no pool — ponta de linha,
+// canto de retângulo, ponto solto, ou a própria origem — como uma
+// referência "point" cotável (distância até uma linha ou outro ponto
+// qualquer, ver dimensionPick1 em store.ts). NÃO é o findEdgeHit padrão
+// (usado também por Selecionar/Perpendicular/Tangente/Coincidente) porque
+// essas outras ferramentas dependem de pegar a ARESTA (não o vértice) perto
+// de uma ponta — dar prioridade a ponto ali quebraria, por exemplo,
+// escolher uma linha pela Tangente clicando perto da extremidade dela.
+// Centro de círculo fica de fora do "qualquer outro ponto" (mantém o
+// critério relativo de findEdgeHit — perto do centro X perto da borda —
+// intocado); checado ANTES do resto (não como mais um candidato competindo
+// por distância): perto de um vértice, a aresta que o contém fica a uma
+// distância quase idêntica (a ponta É o ponto mais próximo dela), então
+// competir por distância seria instável — mesma lição do meio de linha em
+// resolveSnapWithEdges (snap.ts).
+export function findEdgeOrPointHit(
+  raw: Point,
+  shapes: SketchShape[],
+  points: Record<string, SketchPoint>,
+  tolerance: number
+): EdgeHit | null {
+  const circleCenterIds = new Set(
+    shapes.filter((s): s is CircleShape => s.type === "circle").map((s) => s.center)
+  );
+  let closestId: string | null = null;
+  let closestDist = tolerance;
+  for (const p of Object.values(points)) {
+    if (circleCenterIds.has(p.id)) continue;
+    const d = Math.hypot(raw.x - p.x, raw.y - p.y);
+    if (d < closestDist) {
+      closestDist = d;
+      closestId = p.id;
+    }
+  }
+  if (closestId) {
+    return { kind: "point", shapeId: closestId, pointId: closestId };
+  }
+
+  return findEdgeHit(raw, shapes, points, tolerance);
+}
+
 type RectRegion =
   | { region: "edge"; axis: "x" | "y"; corner: "p1" | "p2" }
   | { region: "interior" };
@@ -370,17 +413,20 @@ export function findNearestPointOnShapes(
 // glifo triangular que aparece exatamente no meio de uma aresta ao passar
 // perto, distinto de "ponto mais próximo nela" acima, que gruda em
 // QUALQUER posição ao longo dela). Gira sobre distância até o PRÓPRIO
-// MEIO (não até a aresta em geral) — é isso que faz competir em pé de
-// igualdade com os outros candidatos de snap em resolveSnapWithEdges: só
-// "puxa" quando o cursor já está perto o bastante do meio de verdade, não
-// simplesmente perto de qualquer trecho da aresta.
-export function findNearbyLineMidpoint(
+// MEIO (não até a aresta em geral) — pra ter prioridade sobre "ponto mais
+// próximo na aresta" em resolveSnapWithEdges (senão esse outro sempre
+// ganharia, por construção, e o "ponto" só pareceria deslizar em cima da
+// linha em vez de grudar firme no centro). Devolve também o id da forma
+// (não só a coordenada) — usado pela ferramenta Coincidente pra saber
+// qual LINHA pegar o meio, quando o clique não caiu perto de um ponto
+// real já existente (ver handleConstraintClick em store.ts).
+export function findNearbyLineMidpointShape(
   raw: Point,
   shapes: SketchShape[],
   points: Record<string, SketchPoint>,
   tolerance: number
-): Point | null {
-  let best: Point | null = null;
+): { shapeId: string; midpoint: Point } | null {
+  let best: { shapeId: string; midpoint: Point } | null = null;
   let bestDist = tolerance;
 
   for (const shape of shapes) {
@@ -392,12 +438,21 @@ export function findNearbyLineMidpoint(
       const d = Math.hypot(raw.x - mid.x, raw.y - mid.y);
       if (d < bestDist) {
         bestDist = d;
-        best = mid;
+        best = { shapeId: shape.id, midpoint: mid };
       }
     }
   }
 
   return best;
+}
+
+export function findNearbyLineMidpoint(
+  raw: Point,
+  shapes: SketchShape[],
+  points: Record<string, SketchPoint>,
+  tolerance: number
+): Point | null {
+  return findNearbyLineMidpointShape(raw, shapes, points, tolerance)?.midpoint ?? null;
 }
 
 // Mesma ideia, pra geometria de referência (arestas do sólido 3D projetadas

@@ -61,10 +61,19 @@ export type ResolvedEdgeSnap = ResolvedSnap & {
 // uma ARESTA existente do sketch (linha/retângulo) ou sobre a geometria de
 // referência projetada do sólido 3D — dá a sensação de "a linha reconhece
 // a outra e junta", ao estilo Inventor, e também é o mecanismo que torna a
-// geometria de referência utilizável (não só visual). O MEIO de uma aresta
-// (findNearbyLineMidpoint) entra como mais um candidato, competindo por
-// distância igual aos outros — não tem prioridade fixa, só "puxa" quando o
-// cursor já está perto o bastante do meio de verdade (ver comentário lá).
+// geometria de referência utilizável (não só visual).
+//
+// O MEIO de uma aresta (findNearbyLineMidpoint) é checado com PRIORIDADE
+// sobre "ponto mais próximo na aresta" (onShape) — não como mais um
+// candidato competindo por distância: onShape, por construção, é SEMPRE o
+// ponto da própria aresta mais perto do cursor, então numa disputa por
+// "quem fica mais perto do raw" ele ganharia de qualquer outro ponto FIXO
+// na mesma aresta (o meio incluso) quase sempre, e o "ponto" pareceria só
+// deslizar em cima da linha em vez de grudar firme no centro. Por isso o
+// meio tem sua PRÓPRIA zona de captura (perto o bastante do centro de
+// verdade) e, se acertar essa zona, vence na hora — só cai pro
+// deslizamento genérico de onShape se o cursor estiver longe o bastante do
+// meio.
 export function resolveSnapWithEdges(
   raw: Point,
   points: Record<string, SketchPoint>,
@@ -78,11 +87,15 @@ export function resolveSnapWithEdges(
     return { point: { x: nearby.x, y: nearby.y }, existingId: nearby.id, snapped: true };
   }
 
+  const onMidpoint = findNearbyLineMidpoint(raw, shapes, points, toleranceWorld);
+  if (onMidpoint) {
+    return { point: onMidpoint, existingId: null, snapped: true };
+  }
+
   const onShape = findNearestPointOnShapes(raw, shapes, points, toleranceWorld);
   const onReference = findNearestPointOnSegments(raw, referenceGeometry, toleranceWorld);
-  const onMidpoint = findNearbyLineMidpoint(raw, shapes, points, toleranceWorld);
 
-  const candidates = [onShape, onReference, onMidpoint].filter((p): p is Point => p !== null);
+  const candidates = [onShape, onReference].filter((p): p is Point => p !== null);
   if (candidates.length > 0) {
     candidates.sort((a, b) => distance(raw, a) - distance(raw, b));
     return { point: candidates[0], existingId: null, snapped: true };

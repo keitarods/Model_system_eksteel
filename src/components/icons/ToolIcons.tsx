@@ -504,3 +504,15 @@ export function IconFlatten({ className }: IconProps) {
     </svg>
   );
 }
+
+// Cadeado — restrição "Fixo" (ao estilo Inventor: pino/cadeado num ponto ou
+// geometria projetada), ver toggleFixedShape em sketch/store.ts.
+export function IconFixed({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <rect x="5" y="9" width="10" height="8" rx="1.4" />
+      <path d="M7 9V6a3 3 0 0 1 6 0v3" />
+      <circle cx="10" cy="13" r="1.1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}

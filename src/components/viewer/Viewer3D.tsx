@@ -467,6 +467,23 @@ function ViewCubeOrbitCatcher({
   return <group onPointerDown={handlePointerDown}>{children}</group>;
 }
 
+// Centro da caixa delimitadora do sólido (fallback (0,0,0) sem sólido
+// ainda) — compartilhado por HomeKeyHandler (enquadra a peça inteira) e
+// PlaneFocusCameraRig (mira nesse centro projetado no plano escolhido, não
+// no ponto exato do clique — ver comentário de PlaneFocusCameraRig).
+function computeMeshBoundsCenter(mesh: ShapeMesh | null): THREE.Vector3 {
+  const center = new THREE.Vector3(0, 0, 0);
+  if (!mesh || mesh.vertices.length < 3) return center;
+
+  const box = new THREE.Box3();
+  const vertices = mesh.vertices;
+  for (let i = 0; i + 2 < vertices.length; i += 3) {
+    box.expandByPoint(new THREE.Vector3(vertices[i], vertices[i + 1], vertices[i + 2]));
+  }
+  box.getCenter(center);
+  return center;
+}
+
 // Ao estilo Inventor/SolidWorks: ao escolher/reabrir um plano de esboço, a
 // câmera gira pra encarar esse plano de frente (perpendicular à normal,
 // "up" alinhado ao eixo Y local do plano) — em vez de deixar o usuário
@@ -474,12 +491,23 @@ function ViewCubeOrbitCatcher({
 // referência de "plane") é o gatilho de propósito: garante que reescolher
 // o MESMO plano padrão (ex.: XY de novo) ainda reoriente a câmera, mesmo
 // que o objeto plane seja idêntico ao de antes.
+//
+// O ALVO da câmera NÃO é plane.origin (o ponto exato onde o usuário
+// clicou na face) — isso deixava a vista "puxada" pro canto onde o clique
+// caiu em vez de centralizar a peça, principalmente em faces grandes.
+// Em vez disso, projeta o centro da caixa delimitadora do sólido no
+// próprio plano escolhido (mesma normal/orientação do clique, só o ponto
+// de mira que muda) — a câmera sempre encara o plano/face selecionado,
+// mas centralizada na peça, não no pixel exato clicado. plane.origin em
+// si (usado como (0,0) local do esboço) continua intocado.
 function PlaneFocusCameraRig({
   plane,
+  mesh,
   token,
   onTargetChange,
 }: {
   plane: SketchPlane | null;
+  mesh: ShapeMesh | null;
   token: number;
   onTargetChange: (target: [number, number, number]) => void;
 }) {
@@ -489,17 +517,23 @@ function PlaneFocusCameraRig({
   useEffect(() => {
     if (!plane || token === 0) return;
 
+    const origin = new THREE.Vector3(plane.origin[0], plane.origin[1], plane.origin[2]);
+    const normalVec = new THREE.Vector3(plane.normal[0], plane.normal[1], plane.normal[2]);
+    const boundsCenter = computeMeshBoundsCenter(mesh);
+    const distAlongNormal = boundsCenter.clone().sub(origin).dot(normalVec);
+    const target = boundsCenter.clone().sub(normalVec.clone().multiplyScalar(distAlongNormal));
+
     const yDir = planeYDir(plane);
     const position: [number, number, number] = [
-      plane.origin[0] + plane.normal[0] * PLANE_FOCUS_DISTANCE,
-      plane.origin[1] + plane.normal[1] * PLANE_FOCUS_DISTANCE,
-      plane.origin[2] + plane.normal[2] * PLANE_FOCUS_DISTANCE,
+      target.x + plane.normal[0] * PLANE_FOCUS_DISTANCE,
+      target.y + plane.normal[1] * PLANE_FOCUS_DISTANCE,
+      target.z + plane.normal[2] * PLANE_FOCUS_DISTANCE,
     ];
 
     camera.up.set(yDir[0], yDir[1], yDir[2]);
     camera.position.set(position[0], position[1], position[2]);
-    camera.lookAt(plane.origin[0], plane.origin[1], plane.origin[2]);
-    onTargetChange(plane.origin);
+    camera.lookAt(target.x, target.y, target.z);
+    onTargetChange([target.x, target.y, target.z]);
     controls?.update?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
@@ -544,7 +578,7 @@ function HomeKeyHandler({
       }
       event.preventDefault();
 
-      let center = new THREE.Vector3(0, 0, 0);
+      const center = computeMeshBoundsCenter(mesh);
       let radius = HOME_FALLBACK_RADIUS;
 
       if (mesh && mesh.vertices.length >= 3) {
@@ -553,7 +587,6 @@ function HomeKeyHandler({
         for (let i = 0; i + 2 < vertices.length; i += 3) {
           box.expandByPoint(new THREE.Vector3(vertices[i], vertices[i + 1], vertices[i + 2]));
         }
-        box.getCenter(center);
         radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1);
       }
 
@@ -753,7 +786,7 @@ export function Viewer3D({
           <ambientLight intensity={0.7} />
           <directionalLight position={[120, -150, 220]} intensity={1} castShadow />
           <CameraRig position={VIEW_PRESETS[view]} />
-          <PlaneFocusCameraRig plane={focusPlane} token={focusToken} onTargetChange={setOrbitTarget} />
+          <PlaneFocusCameraRig plane={focusPlane} mesh={mesh} token={focusToken} onTargetChange={setOrbitTarget} />
           <HomeKeyHandler mesh={mesh} orbitTarget={orbitTarget} onTargetChange={setOrbitTarget} />
           {mesh && (
             <SolidMesh

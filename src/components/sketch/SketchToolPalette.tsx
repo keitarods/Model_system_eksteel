@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type ComponentType } from "react";
-import { useSketchStore } from "@/lib/sketch/store";
+import { pointIdsOfShape, useSketchStore } from "@/lib/sketch/store";
 import { SKETCH_TOOLS, TOOL_SECTIONS } from "@/lib/sketch/tools";
 import {
   IconSelect,
@@ -24,6 +24,7 @@ import {
   IconPatternRect,
   IconPatternCircular,
   IconProjectGeometry,
+  IconFixed,
 } from "@/components/icons/ToolIcons";
 import type { SketchTool } from "@/lib/sketch/types";
 
@@ -65,7 +66,14 @@ export function SketchToolPalette({ className = "" }: { className?: string }) {
   const selectedShapeId = useSketchStore((s) => s.selectedShapeId);
   const patternShapeRectangular = useSketchStore((s) => s.patternShapeRectangular);
   const patternShapeCircular = useSketchStore((s) => s.patternShapeCircular);
+  const fixedPointIds = useSketchStore((s) => s.fixedPointIds);
+  const toggleFixedShape = useSketchStore((s) => s.toggleFixedShape);
   const hasValidSelection = shapes.some((s) => s.id === selectedShapeId);
+  const selectedShape = shapes.find((s) => s.id === selectedShapeId);
+  // "Meio fixa" não existe (toggleFixedShape sempre alterna em bloco) —
+  // basta checar o 1º ponto da forma selecionada pra saber o estado atual.
+  const isSelectionFixed =
+    !!selectedShape && pointIdsOfShape(selectedShape).some((id) => fixedPointIds.includes(id));
 
   // Padrão 2D — ação de um disparo sobre a forma SELECIONADA (não é uma
   // SketchTool: virar `tool` limpa selectedShapeId no store, o que
@@ -194,6 +202,37 @@ export function SketchToolPalette({ className = "" }: { className?: string }) {
             </button>
           </div>
           <span className="text-[10px] font-semibold uppercase tracking-wide text-primary-400">Padrão</span>
+        </div>
+
+        {/* Restrição "Fixo" (ao estilo Inventor): trava a forma selecionada
+            no lugar (nenhum ponto dela se move mais, nem arrastando nem
+            propagando de outra edição — ver fixedPointIds em store.ts).
+            Geometria projetada (ferramenta Projetar Geometria) já nasce
+            fixa sozinha; este botão alterna manualmente pra QUALQUER forma
+            selecionada, e serve também pra REMOVER a restrição de uma
+            projetada, se quiser editá-la livremente depois — mesma coisa
+            que apagar a restrição "Fix" no Inventor. */}
+        <div className="flex shrink-0 flex-col items-center gap-1 rounded-lg border border-primary-200 bg-white/70 px-1.5 pb-1 pt-1.5">
+          <div className="grid grid-flow-col grid-rows-2 gap-1">
+            <button
+              type="button"
+              onClick={() => selectedShapeId && toggleFixedShape(selectedShapeId)}
+              disabled={!hasValidSelection}
+              title={
+                isSelectionFixed
+                  ? "Remover a restrição Fixo — a forma volta a poder ser arrastada"
+                  : "Fixar a forma selecionada no lugar — nenhum ponto dela se move mais"
+              }
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                isSelectionFixed ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
+              }`}
+            >
+              <IconFixed className="shrink-0" />
+            </button>
+          </div>
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-primary-400">
+            {isSelectionFixed ? "Desafixar" : "Fixar"}
+          </span>
         </div>
       </div>
 

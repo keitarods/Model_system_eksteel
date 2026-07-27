@@ -190,6 +190,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const shapes = useSketchStore((s) => s.shapes);
   const points = useSketchStore((s) => s.points);
   const dimensions = useSketchStore((s) => s.dimensions);
+  const constraints = useSketchStore((s) => s.constraints);
+  const fixedPointIds = useSketchStore((s) => s.fixedPointIds);
   const activePlane = useSketchStore((s) => s.activePlane);
   const setActivePlane = useSketchStore((s) => s.setActivePlane);
   const clearSketch = useSketchStore((s) => s.clear);
@@ -207,9 +209,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
   // Ao estilo Inventor: ou você está esboçando (só ferramentas de sketch,
   // sem aplicar features) ou está no modelo (aplica Extrudar/Revolucionar/
-  // Furo/Cortar sobre o último esboço concluído). Começa em modo esboço,
-  // no plano base, pra não exigir um clique extra antes do primeiro desenho.
-  const [sketching, setSketching] = useState(true);
+  // Furo/Cortar sobre o último esboço concluído). Começa FORA do modo
+  // esboço — abrir o app não deveria jogar direto num sketch vazio/solto
+  // sem o usuário ter pedido isso; "Criar Esboço" (que já pede o plano,
+  // ver handleCreateSketch/pickingPlane) é o único jeito de entrar num.
+  const [sketching, setSketching] = useState(false);
   const [pickingPlane, setPickingPlane] = useState(false);
   // Criar Plano (ao estilo Inventor/SolidWorks "Plane"): creatingPlane liga
   // o modo inteiro; planeBase null = ainda escolhendo a referência (plano
@@ -233,8 +237,16 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const [chamferDistance3d, setChamferDistance3d] = useState(3);
   // Ambiente de Chapa (ao estilo Inventor "Sheet Metal"): a espessura vive
   // numa SheetMetalFeature única na árvore, não em estado local — isso é só
-  // o valor sugerido pro campo de "Virar Chapa" antes de existir uma.
+  // o valor sugerido/editado no confirm-step de "Virar Chapa" (ver
+  // creatingSheetMetal) antes de existir uma, ou ao reabrir a feature já
+  // criada pra editar (double-click na árvore).
   const [newSheetThickness, setNewSheetThickness] = useState(2);
+  // "Virar Chapa" agora abre seu próprio confirm-step (ao estilo Fillet/
+  // Chamfer/Plano), em vez de um campo de espessura solto na barra ANTES
+  // de clicar a ferramenta — a espessura só é digitada DENTRO da
+  // ferramenta, e o mesmo confirm-step é reaproveitado pra editar a
+  // SheetMetalFeature já existente (ver handleEditFeature).
+  const [creatingSheetMetal, setCreatingSheetMetal] = useState(false);
   const [faceDirection, setFaceDirection] = useState<ExtrudeDirection>("normal");
   // "Cut" da chapa (Inventor): mesma extrusão da Face, na espessura da
   // chapa, mas subtraindo — recorta a chapa com o perfil desenhado.
@@ -706,9 +718,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // acontecem) sempre que entrar num desses modos — evita o usuário ficar
   // preso na aba Histórico sem ver o que precisa clicar.
   useEffect(() => {
-    if (sketching || pickingPlane || creatingPlane || pickingAxisFace || edgeToolMode || flangePicking)
+    if (sketching || pickingPlane || creatingPlane || pickingAxisFace || edgeToolMode || flangePicking || creatingSheetMetal)
       setMobileTab("viewer");
-  }, [sketching, pickingPlane, creatingPlane, pickingAxisFace, edgeToolMode, flangePicking]);
+  }, [sketching, pickingPlane, creatingPlane, pickingAxisFace, edgeToolMode, flangePicking, creatingSheetMetal]);
 
   // Título da aba ao estilo Inventor: mostra o nome do arquivo aberto/salvo
   // por último, não só o nome genérico do app.
@@ -828,7 +840,15 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         return;
       }
 
-      if (!sketching && !pickingPlane && !creatingPlane && !pickingAxisFace && !edgeToolMode && !flangePicking) {
+      if (
+        !sketching &&
+        !pickingPlane &&
+        !creatingPlane &&
+        !pickingAxisFace &&
+        !edgeToolMode &&
+        !flangePicking &&
+        !creatingSheetMetal
+      ) {
         e.preventDefault();
         handleCreateSketch();
       }
@@ -836,7 +856,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [sketching, pickingPlane, creatingPlane, pickingAxisFace, edgeToolMode, flangePicking, handleCreateSketch]);
+  }, [sketching, pickingPlane, creatingPlane, pickingAxisFace, edgeToolMode, flangePicking, creatingSheetMetal, handleCreateSketch]);
 
   const handleUseStandardPlane = useCallback(
     (plane: SketchPlane) => {
@@ -1035,15 +1055,36 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     setSelectedEdgePoints([]);
   }, [edgeToolMode, selectedEdgePoints, filletRadius3d, chamferDistance3d, addFeature, showNotice, editingFeatureId, features, updateFeature]);
 
-  // Ambiente de Chapa: "Virar Chapa" cria a SheetMetalFeature única da
-  // árvore (espessura compartilhada por Face/Flange dela em diante);
-  // "Voltar a ser Peça" só remove essa feature — as Face/Flange já criadas
-  // continuam existindo como geometria comum, só perdem as ferramentas
-  // específicas de chapa.
-  const handleToggleSheetMetal = useCallback(() => {
-    if (sheetMetalFeature) {
-      removeFeature(sheetMetalFeature.id);
-      showNotice("Voltou a ser peça comum.");
+  // "Voltar a ser Peça": só remove a SheetMetalFeature — as Face/Flange já
+  // criadas continuam existindo como geometria comum, só perdem as
+  // ferramentas específicas de chapa. Não tem confirm-step (não pede
+  // nenhum valor), diferente de criar/editar (ver handleConfirmSheetMetal).
+  const handleRevertSheetMetal = useCallback(() => {
+    if (!sheetMetalFeature) return;
+    removeFeature(sheetMetalFeature.id);
+    showNotice("Voltou a ser peça comum.");
+  }, [sheetMetalFeature, removeFeature, showNotice]);
+
+  // Confirma o confirm-step de "Virar Chapa" — cria a SheetMetalFeature
+  // única da árvore (espessura compartilhada por Face/Flange dela em
+  // diante) ou, se estiver editando uma já existente (double-click na
+  // árvore, ver handleEditFeature), só atualiza a espessura dela.
+  const handleConfirmSheetMetal = useCallback(() => {
+    if (newSheetThickness <= 0) return;
+    if (editingFeatureId) {
+      const original = features.find((f) => f.id === editingFeatureId && f.type === "sheetMetal") as
+        | Extract<Feature, { type: "sheetMetal" }>
+        | undefined;
+      if (original) {
+        updateFeature(editingFeatureId, {
+          ...original,
+          thickness: newSheetThickness,
+          label: `Chapa ${newSheetThickness}mm`,
+        });
+        showNotice("Espessura da chapa atualizada.");
+      }
+      setEditingFeatureId(null);
+      setCreatingSheetMetal(false);
       return;
     }
     addFeature({
@@ -1053,7 +1094,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       thickness: newSheetThickness,
     });
     showNotice(`Peça virou chapa de ${newSheetThickness}mm.`);
-  }, [sheetMetalFeature, newSheetThickness, addFeature, removeFeature, showNotice]);
+    setCreatingSheetMetal(false);
+  }, [editingFeatureId, features, newSheetThickness, addFeature, updateFeature, showNotice]);
+
+  const handleCancelSheetMetal = useCallback(() => {
+    setCreatingSheetMetal(false);
+    setEditingFeatureId(null);
+  }, []);
 
   // "Face" (Inventor): igual Extrudar, mas a profundidade é sempre a
   // espessura da chapa ativa, nunca escolhida aqui. Com "Corte" marcado,
@@ -1310,6 +1357,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         // ponto no JSON.
         points: { [ORIGIN_POINT_ID]: ORIGIN_POINT, ...feature.points },
         dimensions: feature.dimensions,
+        // Projetos salvos antes desse campo existir não têm constraints/
+        // fixedPointIds no JSON — cai pra lista vazia.
+        constraints: feature.constraints ?? [],
+        fixedPointIds: feature.fixedPointIds ?? [],
         activePlane: feature.plane,
       });
       setEditingSketchId(feature.id);
@@ -1334,6 +1385,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         shapes,
         points,
         dimensions,
+        constraints,
+        fixedPointIds,
       });
     } else {
       const id = createId();
@@ -1345,12 +1398,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         shapes,
         points,
         dimensions,
+        constraints,
+        fixedPointIds,
       });
       setEditingSketchId(id);
     }
 
     setSketching(false);
-  }, [features, editingSketchId, activePlane, shapes, points, dimensions, addFeature, updateFeature]);
+  }, [features, editingSketchId, activePlane, shapes, points, dimensions, constraints, fixedPointIds, addFeature, updateFeature]);
 
   const handleEditSketch = useCallback(() => {
     setSketching(true);
@@ -1629,13 +1684,12 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       }
 
       if (feature.type === "sheetMetal") {
-        // Espessura é o único campo que "Virar Chapa" já sempre teve — não
-        // há outras opções escondidas aqui pra justificar um painel próprio.
-        const input = window.prompt("Nova espessura da chapa (mm):", String(feature.thickness));
-        if (input === null) return;
-        const thickness = Number(input.replace(",", "."));
-        if (!Number.isFinite(thickness) || thickness <= 0) return;
-        updateFeature(feature.id, { ...feature, thickness, label: `Chapa ${thickness}mm` });
+        // Mesmo confirm-step de "Virar Chapa" (ver handleConfirmSheetMetal),
+        // só com editingFeatureId setado — igual Plano/Fillet/Chamfer, em
+        // vez do window.prompt nativo que existia aqui antes.
+        setNewSheetThickness(feature.thickness);
+        setEditingFeatureId(feature.id);
+        setCreatingSheetMetal(true);
         return;
       }
 
@@ -2436,6 +2490,38 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               Cancelar
             </button>
           </div>
+        ) : creatingSheetMetal ? (
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <span className="shrink-0 font-semibold text-primary-800">
+              {editingFeatureId ? "Editando Chapa" : "Virar Chapa"}
+            </span>
+            <label className="flex shrink-0 items-center gap-1.5 text-primary-700">
+              Espessura
+              <input
+                type="number"
+                min={0.1}
+                step={0.1}
+                value={newSheetThickness}
+                onChange={(e) => setNewSheetThickness(Number(e.target.value))}
+                className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
+              />
+              mm
+            </label>
+            <button
+              type="button"
+              onClick={handleConfirmSheetMetal}
+              className="shrink-0 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground hover:bg-primary-hover"
+            >
+              {editingFeatureId ? "Salvar" : "Virar Chapa"}
+            </button>
+            <button
+              type="button"
+              onClick={handleCancelSheetMetal}
+              className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-primary-500 hover:bg-primary-100"
+            >
+              Cancelar
+            </button>
+          </div>
         ) : flangePicking ? (
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             {!flangeCandidate ? (
@@ -2538,7 +2624,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           </div>
         )}
 
-        {!sketching && !pickingPlane && !creatingPlane && !pickingAxisFace && !edgeToolMode && !flangePicking && (
+        {!sketching && !pickingPlane && !creatingPlane && !pickingAxisFace && !edgeToolMode && !flangePicking && !creatingSheetMetal && (
           <>
             <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
 
@@ -3176,12 +3262,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                   </span>
                 )}
                 <FeaturePanel label="Criar">
-                  <FeatureToolButton
-                    icon={IconExtrude}
-                    label="Extrudar"
-                    onClick={() => setFeatureToolMode("extrude")}
-                    disabled={!profile}
-                  />
+                  {!isSheetMetal && (
+                    <FeatureToolButton
+                      icon={IconExtrude}
+                      label="Extrudar"
+                      onClick={() => setFeatureToolMode("extrude")}
+                      disabled={!profile}
+                    />
+                  )}
                   {isSheetMetal && (
                     <FeatureToolButton
                       icon={IconFace}
@@ -3191,13 +3279,19 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                       title={`Extrude/recorta na espessura da chapa (${sheetMetalFeature?.thickness}mm)`}
                     />
                   )}
-                  <FeatureToolButton
-                    icon={IconRevolve}
-                    label="Revolucionar"
-                    onClick={() => setFeatureToolMode("revolve")}
-                    disabled={!profile || !centerLine}
-                    title={!centerLine ? "Desenhe uma Linha de Centro no sketch antes de revolucionar" : "Revolucionar"}
-                  />
+                  {/* Revolucionar/Varredura fazem sólidos livres (perfil
+                      girado/varrido), incompatíveis com uma peça que virou
+                      chapa (sempre a mesma espessura constante, só Face/
+                      Flange fazem sentido) — escondidos nesse caso. */}
+                  {!isSheetMetal && (
+                    <FeatureToolButton
+                      icon={IconRevolve}
+                      label="Revolucionar"
+                      onClick={() => setFeatureToolMode("revolve")}
+                      disabled={!profile || !centerLine}
+                      title={!centerLine ? "Desenhe uma Linha de Centro no sketch antes de revolucionar" : "Revolucionar"}
+                    />
+                  )}
                   <FeatureToolButton
                     icon={IconHole}
                     label="Furo"
@@ -3205,20 +3299,79 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                     disabled={!lastCircle || !hasActiveSolid}
                     title={!hasActiveSolid ? "Extrude ou revolucione um sólido antes de furar" : "Furo"}
                   />
-                  <FeatureToolButton
-                    icon={IconSweep}
-                    label="Varredura"
-                    onClick={() => setFeatureToolMode("sweep")}
-                    disabled={!singleProfile}
-                    title={!singleProfile ? "Feche um perfil no esboço antes de usar Varredura" : "Varre o perfil ao longo do caminho de outro esboço já salvo"}
-                  />
-                  <FeatureToolButton
-                    icon={IconHelix}
-                    label="Espiral"
-                    onClick={() => setFeatureToolMode("helix")}
-                    disabled={!singleProfile || !centerLine}
-                    title={!centerLine ? "Desenhe uma Linha de Centro no sketch antes de usar Espiral" : "Varre o perfil ao longo de uma hélice (mola/rosca)"}
-                  />
+                  {!isSheetMetal && (
+                    <FeatureToolButton
+                      icon={IconSweep}
+                      label="Varredura"
+                      onClick={() => setFeatureToolMode("sweep")}
+                      disabled={!singleProfile}
+                      title={!singleProfile ? "Feche um perfil no esboço antes de usar Varredura" : "Varre o perfil ao longo do caminho de outro esboço já salvo"}
+                    />
+                  )}
+                  {!isSheetMetal && (
+                    <FeatureToolButton
+                      icon={IconHelix}
+                      label="Espiral"
+                      onClick={() => setFeatureToolMode("helix")}
+                      disabled={!singleProfile || !centerLine}
+                      title={!centerLine ? "Desenhe uma Linha de Centro no sketch antes de usar Espiral" : "Varre o perfil ao longo de uma hélice (mola/rosca)"}
+                    />
+                  )}
+                  {/* Ferramentas de chapa (ao estilo Inventor: Flange/
+                      Planificar/Virar Chapa moram dentro de "Criar", não
+                      numa aba própria) — a espessura em si só é digitada
+                      DENTRO do confirm-step de "Virar Chapa" (ver
+                      creatingSheetMetal), nunca antes de abri-lo. */}
+                  {isSheetMetal && (
+                    <FeatureToolButton
+                      icon={IconFlange}
+                      label="Flange"
+                      onClick={handleStartFlange}
+                      disabled={!hasActiveSolid}
+                      title={!hasActiveSolid ? "Crie uma Face antes de criar uma flange" : "Cria uma dobra a partir de uma aresta reta da chapa"}
+                    />
+                  )}
+                  {isSheetMetal && hasFlangeFeature && (
+                    <FeatureToolButton
+                      icon={IconFlatten}
+                      label={flattenView ? "Ver Dobrada" : "Planificar"}
+                      onClick={() => setFlattenView((v) => !v)}
+                      active={flattenView}
+                      title="Alterna entre a peça dobrada (3D) e o padrão planificado (pra corte/DXF)"
+                    />
+                  )}
+                  {!isSheetMetal ? (
+                    <FeatureToolButton
+                      icon={IconSheetMetal}
+                      label="Virar Chapa"
+                      onClick={() => setCreatingSheetMetal(true)}
+                      title="Vira a peça inteira em chapa metálica — habilita Face, Flange e Planificar"
+                    />
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!sheetMetalFeature) return;
+                          setNewSheetThickness(sheetMetalFeature.thickness);
+                          setEditingFeatureId(sheetMetalFeature.id);
+                          setCreatingSheetMetal(true);
+                        }}
+                        title="Editar espessura da chapa"
+                        className="flex w-16 shrink-0 flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 text-center text-[11px] font-semibold leading-tight text-primary-500 hover:bg-primary-100"
+                      >
+                        {sheetMetalFeature?.thickness}mm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRevertSheetMetal}
+                        title="Volta a peça a ser uma peça comum (a geometria já criada continua existindo)"
+                        className="flex w-16 shrink-0 items-center justify-center rounded-lg px-1 py-1.5 text-center text-[10px] text-primary-500 hover:bg-primary-100"
+                      >
+                        Voltar a Peça
+                      </button>
+                    </>
+                  )}
                 </FeaturePanel>
               </div>
             )}
@@ -3282,61 +3435,6 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                     onClick={handleCreateAxis}
                     title="Criar eixo X/Y/Z padrão, ou pelo centroide de uma face (cilíndrica: ao longo dela; plana: normal a ela)"
                   />
-                </FeaturePanel>
-
-                <FeaturePanel label="Chapa">
-                  {!isSheetMetal ? (
-                    <>
-                      <label className="flex shrink-0 flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 text-center text-[11px] font-semibold leading-tight text-primary-700">
-                        <input
-                          type="number"
-                          min={0.1}
-                          step={0.1}
-                          value={newSheetThickness}
-                          onChange={(e) => setNewSheetThickness(Number(e.target.value))}
-                          title="Espessura (mm)"
-                          className="w-12 rounded border border-primary-200 bg-white px-1 py-0.5 text-center text-foreground"
-                        />
-                        mm
-                      </label>
-                      <FeatureToolButton
-                        icon={IconSheetMetal}
-                        label="Virar Chapa"
-                        onClick={handleToggleSheetMetal}
-                        title="Vira a peça inteira em chapa metálica — habilita Face, Flange e Planificar"
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <span className="flex w-16 shrink-0 flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 text-center text-[11px] font-semibold leading-tight text-primary-500">
-                        {sheetMetalFeature?.thickness}mm
-                      </span>
-                      <FeatureToolButton
-                        icon={IconFlange}
-                        label="Flange"
-                        onClick={handleStartFlange}
-                        disabled={!hasActiveSolid}
-                        title={!hasActiveSolid ? "Crie uma Face antes de criar uma flange" : "Cria uma dobra a partir de uma aresta reta da chapa"}
-                      />
-                      {hasFlangeFeature && (
-                        <FeatureToolButton
-                          icon={IconFlatten}
-                          label={flattenView ? "Ver Dobrada" : "Planificar"}
-                          onClick={() => setFlattenView((v) => !v)}
-                          active={flattenView}
-                          title="Alterna entre a peça dobrada (3D) e o padrão planificado (pra corte/DXF)"
-                        />
-                      )}
-                      <button
-                        type="button"
-                        onClick={handleToggleSheetMetal}
-                        title="Volta a peça a ser uma peça comum (a geometria já criada continua existindo)"
-                        className="flex w-16 shrink-0 items-center justify-center rounded-lg px-1 py-1.5 text-center text-[10px] text-primary-500 hover:bg-primary-100"
-                      >
-                        Voltar a Peça
-                      </button>
-                    </>
-                  )}
                 </FeaturePanel>
               </>
             )}
@@ -3429,8 +3527,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               (flangePicking && !flangeCandidate)
             }
             onPickPlane={handleFacePicked}
-            onPickStandardPlane={pickingAxisFace || edgeToolMode || flangePicking ? undefined : handleStandardPlanePicked}
-            showPlanePicker={!pickingAxisFace && !edgeToolMode && !flangePicking}
+            onPickStandardPlane={
+              pickingAxisFace || edgeToolMode || flangePicking || creatingSheetMetal ? undefined : handleStandardPlanePicked
+            }
+            showPlanePicker={!pickingAxisFace && !edgeToolMode && !flangePicking && !creatingSheetMetal}
             linearEdges={flangePicking && !flangeCandidate ? linearEdges : []}
             onPickLinearEdge={handleFlangeLinePicked}
             pickModeHint={

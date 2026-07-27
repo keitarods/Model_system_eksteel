@@ -119,6 +119,35 @@ export type SlotShape = {
 
 export type SketchShape = LineShape | RectShape | CircleShape | PointShape | ArcShape | SlotShape;
 
+// Restrição relacional PERSISTENTE (ao estilo Inventor: o ícone da
+// restrição fica "vivo" depois de aplicado, reforçando o resultado sempre
+// que a geometria envolvida se mover de novo) — diferente de axisLock
+// (campo simples embutido na própria LineShape, usado por
+// Horizontal/Vertical), essas envolvem DUAS formas/pontos, então moram
+// numa lista à parte em vez de num campo de uma forma só. Reaplicadas por
+// reapplyConstraints (sketch/store.ts) toda vez que qualquer ponto se
+// move (via movePoints) — numa ÚNICA passada, na ORDEM da lista (não é um
+// solver de verdade: uma restrição no início da lista não "sente", na
+// MESMA passada, uma mudança causada por outra restrição depois dela).
+// Cada shape dependente (lineBId/lineId/pointId, conforme o kind) só deve
+// ter NO MÁXIMO uma restrição deste tipo agindo sobre ele por vez — ver
+// upsertConstraint em store.ts.
+export type SketchConstraint =
+  | { id: string; kind: "perpendicular"; lineAId: string; lineBId: string }
+  | { id: string; kind: "tangent"; lineId: string; circleId: string }
+  | { id: string; kind: "pointOnLine"; pointId: string; lineId: string }
+  | { id: string; kind: "lineMidpointOnPoint"; lineId: string; pointId: string };
+
+// Omit comum NÃO distribui sobre union (usa Pick por baixo, que colapsa os
+// 4 variantes de SketchConstraint num só objeto genérico, perdendo a
+// correlação entre `kind` e os campos específicos de cada um) — "T extends
+// any" força a distribuição por membro da união.
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
+
+// SketchConstraint sem o id — o que upsertConstraint recebe, antes de
+// gerar um novo id (ver store.ts).
+export type NewSketchConstraint = DistributiveOmit<SketchConstraint, "id">;
+
 // Referência a UMA aresta reta específica (não a forma inteira) — precisa
 // desambiguar qual das 2 arestas paralelas de um retângulo/rasgo, já que
 // nenhuma das duas tem um id de ponto próprio pros 2 cantos derivados (só

@@ -1,6 +1,7 @@
 import type {
   DimensionAnnotation,
   Point,
+  SketchConstraint,
   SketchPlane,
   SketchPoint,
   SketchShape,
@@ -27,6 +28,13 @@ export type SketchFeature = {
   shapes: SketchShape[];
   points: Record<string, SketchPoint>;
   dimensions: DimensionAnnotation[];
+  // Restrições persistentes (Perpendicular/Tangente/Coincidente — ver
+  // SketchConstraint em sketch/types.ts). Opcional só por compatibilidade
+  // com projetos salvos antes desse campo existir.
+  constraints?: SketchConstraint[];
+  // Ids de ponto com restrição "Fixo" (ver fixedPointIds em sketch/
+  // store.ts). Opcional pelo mesmo motivo de constraints acima.
+  fixedPointIds?: string[];
 };
 
 export type ExtrudeFeature = {
