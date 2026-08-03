@@ -83,6 +83,13 @@ export type HoleFeature = {
   // entra. Opcional por compatibilidade — ausência vira "flipped" (o
   // comportamento fixo que a ferramenta sempre teve).
   direction?: "normal" | "flipped";
+  // Furos ADICIONAIS (Ctrl+clique em vários círculos do sketch de uma vez,
+  // ao estilo Extrudar/Face/Revolução com multiProfileSelection) — center/
+  // radius acima continuam sendo o 1º furo, por compatibilidade com
+  // projetos salvos antes desse campo existir; ausente/vazio = furo único
+  // de sempre. Todos compartilham through/depth/direction/plane — só
+  // centro e raio mudam por furo.
+  extraHoles?: { center: Point; radius: number }[];
 };
 
 // Corta o sólido ativo ao meio num plano, descartando um dos dois lados —
@@ -221,7 +228,9 @@ export type SweepFeature = {
   id: string;
   type: "sweep";
   label: string;
-  profile: NonNullable<ProfileSource>;
+  // Vários perfis (Ctrl+clique) são unidos entre si (ver profilesToDrawing)
+  // antes de varrer — mesma convenção de Extrudar/Face/Revolução.
+  profile: ProfileSources;
   plane: SketchPlane;
   pathFeatureId: string;
   cut?: boolean;
@@ -236,7 +245,9 @@ export type HelixFeature = {
   id: string;
   type: "helix";
   label: string;
-  profile: NonNullable<ProfileSource>;
+  // Vários perfis (Ctrl+clique) são unidos entre si (ver profilesToDrawing)
+  // antes de varrer — mesma convenção de Extrudar/Face/Revolução.
+  profile: ProfileSources;
   plane: SketchPlane;
   axisOrigin: Point;
   axisDirection: Point;

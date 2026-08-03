@@ -35,7 +35,7 @@ import { useSketchStore } from "@/lib/sketch/store";
 import { BASE_SKETCH_PLANE, ORIGIN_POINT, ORIGIN_POINT_ID } from "@/lib/sketch/types";
 import type { SketchPlane } from "@/lib/sketch/types";
 import { loadOpenCascade } from "@/lib/replicad/opencascade";
-import { findCenterLine, findLastCircle, findProfileSource, findProfileSources } from "@/lib/replicad/geometry";
+import { findCenterLine, findLastCircle, findProfileSource, findProfileSources, findSelectedCircles } from "@/lib/replicad/geometry";
 import { rebuildModel, findFlangeParentId } from "@/lib/replicad/build-model";
 import { sketchPlaneFromHit, worldToLocalPoint, offsetOrigin, STANDARD_PLANES, STANDARD_AXES } from "@/lib/replicad/plane";
 import { isPatternable } from "@/lib/replicad/pattern";
@@ -477,6 +477,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // resultado já deduplicado (profile) em vez do array bruto.
   const selectedProfileCount = multiProfileSelection.length > 0 ? (Array.isArray(profile) ? profile.length : profile ? 1 : 0) : 0;
   const lastCircle = findLastCircle(shapes, points);
+  // Furo com Ctrl+clique: cada círculo marcado em multiProfileSelection
+  // (ver toggleProfileSelection em sketch/store.ts) vira um furo próprio —
+  // sem seleção múltipla, cai pro círculo mais recente de sempre.
+  const selectedCircles = multiProfileSelection.length > 0 ? findSelectedCircles(shapes, points, multiProfileSelection) : [];
+  const holeCircles = selectedCircles.length > 0 ? selectedCircles : lastCircle ? [lastCircle] : [];
   // Ao estilo Inventor: Revolução exige uma linha de centro explícita no
   // sketch — sem ela, o eixo não está definido e só Extrudar fica disponível.
   const centerLine = findCenterLine(shapes, points);
@@ -573,14 +578,16 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       };
     }
     if (featureToolMode === "hole") {
-      if (!lastCircle || !hasActiveSolid) return null;
+      if (holeCircles.length === 0 || !hasActiveSolid) return null;
+      const [firstHole, ...restHoles] = holeCircles;
       return {
         id: "__preview__",
         type: "hole",
         label: "",
-        center: { x: lastCircle.cx, y: lastCircle.cy },
+        center: { x: firstHole.cx, y: firstHole.cy },
         plane: activePlane,
-        radius: lastCircle.r,
+        radius: firstHole.r,
+        extraHoles: restHoles.map((c) => ({ center: { x: c.cx, y: c.cy }, radius: c.r })),
         through: holeThrough,
         depth: holeDepth,
         direction: holeDirection,
@@ -591,24 +598,24 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       return { id: "__preview__", type: "split", label: "", plane: activePlane, keepSide: splitKeepSide };
     }
     if (featureToolMode === "sweep") {
-      if (!singleProfile || !sweepPathFeatureId) return null;
+      if (!profile || !sweepPathFeatureId) return null;
       return {
         id: "__preview__",
         type: "sweep",
         label: "",
-        profile: singleProfile,
+        profile,
         plane: activePlane,
         pathFeatureId: sweepPathFeatureId,
         cut: sweepCut,
       };
     }
     if (featureToolMode === "helix") {
-      if (!singleProfile || !centerLine) return null;
+      if (!profile || !centerLine) return null;
       return {
         id: "__preview__",
         type: "helix",
         label: "",
-        profile: singleProfile,
+        profile,
         plane: activePlane,
         axisOrigin: centerLine.origin,
         axisDirection: centerLine.direction,
@@ -624,11 +631,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     editingFeatureId,
     features,
     profile,
-    singleProfile,
     activePlane,
     sheetMetalFeature,
     centerLine,
-    lastCircle,
+    holeCircles,
     hasActiveSolid,
     sweepPathFeatureId,
     extrudeDepth,
@@ -1554,6 +1560,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         setFeatureToolMode(null);
         return;
       }
+      const extraCount = original.extraHoles?.length ?? 0;
       updateFeature(editingFeatureId, {
         ...original,
         through: holeThrough,
@@ -1561,7 +1568,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         direction: holeDirection,
         label: `Furo Ø${(original.radius * 2).toFixed(1)}${
           holeThrough ? " passante" : ` x${holeDepth}mm ${holeDirection === "flipped" ? "←" : "→"}`
-        }`,
+        }${extraCount > 0 ? ` (${extraCount + 1}x)` : ""}`,
       });
       setEditingFeatureId(null);
       setFeatureToolMode(null);
@@ -1569,25 +1576,28 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       return;
     }
 
-    if (!lastCircle || !hasActiveSolid) return;
+    if (holeCircles.length === 0 || !hasActiveSolid) return;
+    const [firstHole, ...restHoles] = holeCircles;
     addFeature({
       id: createId(),
       type: "hole",
-      label: `Furo Ø${(lastCircle.r * 2).toFixed(1)}${
+      label: `Furo Ø${(firstHole.r * 2).toFixed(1)}${
         holeThrough ? " passante" : ` x${holeDepth}mm ${holeDirection === "flipped" ? "←" : "→"}`
-      }`,
-      center: { x: lastCircle.cx, y: lastCircle.cy },
+      }${holeCircles.length > 1 ? ` (${holeCircles.length}x)` : ""}`,
+      center: { x: firstHole.cx, y: firstHole.cy },
       plane: activePlane,
-      radius: lastCircle.r,
+      radius: firstHole.r,
+      extraHoles: restHoles.map((c) => ({ center: { x: c.cx, y: c.cy }, radius: c.r })),
       through: holeThrough,
       depth: holeDepth,
       direction: holeDirection,
     });
     clearSketch();
+    clearProfileSelection();
     setEditingSketchId(null);
     setFeatureToolMode(null);
   }, [
-    lastCircle,
+    holeCircles,
     hasActiveSolid,
     holeThrough,
     holeDepth,
@@ -1595,6 +1605,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     activePlane,
     addFeature,
     clearSketch,
+    clearProfileSelection,
     editingFeatureId,
     features,
     updateFeature,
@@ -1824,7 +1835,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       return;
     }
 
-    if (!singleProfile || !sweepPathFeatureId) return;
+    if (!profile || !sweepPathFeatureId) return;
     if (sweepCut && !hasActiveSolid) {
       setErrorMessage("Não há sólido ativo para cortar — desmarque “Corte” ou crie um sólido primeiro.");
       return;
@@ -1833,22 +1844,24 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       id: createId(),
       type: "sweep",
       label: `Varredura${sweepCut ? " (corte)" : ""}`,
-      profile: singleProfile,
+      profile,
       plane: activePlane,
       pathFeatureId: sweepPathFeatureId,
       cut: sweepCut,
     });
     clearSketch();
+    clearProfileSelection();
     setEditingSketchId(null);
     setFeatureToolMode(null);
   }, [
-    singleProfile,
+    profile,
     sweepPathFeatureId,
     sweepCut,
     hasActiveSolid,
     activePlane,
     addFeature,
     clearSketch,
+    clearProfileSelection,
     editingFeatureId,
     features,
     updateFeature,
@@ -1879,7 +1892,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       return;
     }
 
-    if (!singleProfile || !centerLine) return;
+    if (!profile || !centerLine) return;
     if (helixCut && !hasActiveSolid) {
       setErrorMessage("Não há sólido ativo para cortar — desmarque “Corte” ou crie um sólido primeiro.");
       return;
@@ -1888,7 +1901,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       id: createId(),
       type: "helix",
       label: `Espiral p${helixPitch}mm x${helixTurns}v${helixCut ? " (corte)" : ""}`,
-      profile: singleProfile,
+      profile,
       plane: activePlane,
       axisOrigin: centerLine.origin,
       axisDirection: centerLine.direction,
@@ -1898,10 +1911,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       cut: helixCut,
     });
     clearSketch();
+    clearProfileSelection();
     setEditingSketchId(null);
     setFeatureToolMode(null);
   }, [
-    singleProfile,
+    profile,
     centerLine,
     helixPitch,
     helixTurns,
@@ -1911,6 +1925,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     activePlane,
     addFeature,
     clearSketch,
+    clearProfileSelection,
     editingFeatureId,
     features,
     updateFeature,
@@ -2879,7 +2894,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 <button
                   type="button"
                   onClick={handleAddHole}
-                  disabled={editingFeatureId ? false : !lastCircle || !hasActiveSolid}
+                  disabled={editingFeatureId ? false : holeCircles.length === 0 || !hasActiveSolid}
                   title={
                     !editingFeatureId && !hasActiveSolid
                       ? "Extrude ou revolucione um sólido antes de furar"
@@ -2961,7 +2976,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 <button
                   type="button"
                   onClick={handleAddSweep}
-                  disabled={editingFeatureId ? false : !singleProfile || !sweepPathFeatureId}
+                  disabled={editingFeatureId ? false : !profile || !sweepPathFeatureId}
                   title={pathSketchOptions.length === 0 ? "Conclua outro esboço (o caminho) antes de usar Varredura" : undefined}
                   className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -3038,7 +3053,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 <button
                   type="button"
                   onClick={handleAddHelix}
-                  disabled={editingFeatureId ? false : !singleProfile || !centerLine}
+                  disabled={editingFeatureId ? false : !profile || !centerLine}
                   title={!editingFeatureId && !centerLine ? "Desenhe uma Linha de Centro no sketch antes de usar Espiral" : undefined}
                   className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-semibold text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -3296,16 +3311,16 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                     icon={IconHole}
                     label="Furo"
                     onClick={() => setFeatureToolMode("hole")}
-                    disabled={!lastCircle || !hasActiveSolid}
-                    title={!hasActiveSolid ? "Extrude ou revolucione um sólido antes de furar" : "Furo"}
+                    disabled={holeCircles.length === 0 || !hasActiveSolid}
+                    title={!hasActiveSolid ? "Extrude ou revolucione um sólido antes de furar" : "Furo — Ctrl+clique em vários círculos pra furar todos de uma vez"}
                   />
                   {!isSheetMetal && (
                     <FeatureToolButton
                       icon={IconSweep}
                       label="Varredura"
                       onClick={() => setFeatureToolMode("sweep")}
-                      disabled={!singleProfile}
-                      title={!singleProfile ? "Feche um perfil no esboço antes de usar Varredura" : "Varre o perfil ao longo do caminho de outro esboço já salvo"}
+                      disabled={!profile}
+                      title={!profile ? "Feche um perfil no esboço antes de usar Varredura" : "Varre o perfil ao longo do caminho de outro esboço já salvo"}
                     />
                   )}
                   {!isSheetMetal && (
@@ -3313,7 +3328,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                       icon={IconHelix}
                       label="Espiral"
                       onClick={() => setFeatureToolMode("helix")}
-                      disabled={!singleProfile || !centerLine}
+                      disabled={!profile || !centerLine}
                       title={!centerLine ? "Desenhe uma Linha de Centro no sketch antes de usar Espiral" : "Varre o perfil ao longo de uma hélice (mola/rosca)"}
                     />
                   )}

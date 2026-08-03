@@ -200,14 +200,17 @@ function findLoopShapeIds(shapes: SketchShape[], startShapeId: string): string[]
 // cota — travar os dois deixaria "editar a cota não faz nada" sem
 // explicação nenhuma pro usuário.
 //
-// cascadeBlocked é o oposto: NUNCA filtra o(s) ponto(s) SEED (o alvo
-// direto/deliberado da chamada — ex.: p2 da própria cota sendo editada),
-// só os pontos alcançados por CASCATA (a ponta oposta de uma linha
-// axisLock vizinha). Usado por movePoints pra impedir que editar UMA cota
-// arraste, de carona, um ponto que já pertence a OUTRA cota não-referência
-// já definida (ver isPointDrivenByDimension) — ao estilo Inventor, um
-// valor já travado só muda se a PRÓPRIA cota for editada (ou reagir a uma
-// fórmula), nunca como efeito colateral de mexer em outra cota.
+// cascadeBlocked (opcional, default nenhum filtro): NUNCA filtra o(s)
+// ponto(s) SEED (o alvo direto/deliberado da chamada), só os pontos
+// alcançados por CASCATA (a ponta oposta de uma linha axisLock vizinha).
+// Passado só por updateDistanceDimension/updateEdgeDistanceDimension (via
+// movePoints), pra impedir que editar UMA cota arraste, de carona via
+// axisLock, um ponto que já pertence a OUTRA cota não-referência já
+// definida — ao estilo Inventor, um valor já travado só muda se a PRÓPRIA
+// cota for editada. Uma tentativa anterior de aplicar isso em TODA chamada
+// de movePoints (inclusive commit de arrasto manual) quebrava a rigidez
+// H/V de qualquer retângulo que tivesse alguma cota nele — por isso fica
+// de fora por padrão, só entra em cena nesses 2 chamadores específicos.
 function propagateAxisLocks(
   initialUpdates: Record<string, Point>,
   shapes: SketchShape[],
@@ -483,22 +486,15 @@ function computeDragPreview(
   shapes: SketchShape[],
   points: Record<string, SketchPoint>,
   constraints: SketchConstraint[],
-  fixedPointIds: ReadonlySet<string>,
-  dimensions: DimensionAnnotation[]
+  fixedPointIds: ReadonlySet<string>
 ): Record<string, Point> {
-  // Arrastar um ponto/aresta desbloqueado pode, via axisLock/constraints,
-  // puxar de carona um ponto que já pertence a OUTRA cota não-referência
-  // já definida — mesma proteção usada por movePoints (ver
-  // isPointDrivenByDimension), só que aqui pro PREVIEW ao vivo do
-  // arrasto, não só no commit.
-  const cascadeBlocked = (id: string) => isPointDrivenByDimension(id, dimensions, shapes);
-  const expanded = propagateAxisLocks(updates, shapes, points, fixedPointIds, cascadeBlocked);
+  const expanded = propagateAxisLocks(updates, shapes, points, fixedPointIds);
   const merged: Record<string, SketchPoint> = { ...points };
   for (const [id, pos] of Object.entries(expanded)) {
     if (!merged[id] || id === ORIGIN_POINT_ID) continue;
     merged[id] = { id, x: pos.x, y: pos.y };
   }
-  const reapplied = reapplyConstraints(constraints, shapes, merged, fixedPointIds, cascadeBlocked);
+  const reapplied = reapplyConstraints(constraints, shapes, merged, fixedPointIds);
 
   const diff: Record<string, Point> = {};
   for (const [id, p] of Object.entries(reapplied)) {
@@ -510,22 +506,26 @@ function computeDragPreview(
   return diff;
 }
 
-// Uma referência de aresta (a ou b de uma cota "edgeDistance") toca esse
-// ponto? "line"/"rectEdge" resolvem pras pontas de verdade da forma;
-// "point" é o próprio ponto; "slotTangent" nunca referencia um ponto
-// próprio (o raio do rasgo não é a posição de um ponto), então nunca
-// trava nada por aqui.
-function edgeRefIncludesPoint(ref: EdgeRef, pointId: string, shapes: SketchShape[]): boolean {
+// Ids de ponto que uma referência de aresta (a ou b de uma cota
+// "edgeDistance") toca — "line"/"rectEdge" resolvem pras pontas de
+// verdade da forma; "point" é o próprio ponto; "slotTangent" nunca
+// referencia um ponto próprio (o raio do rasgo não é a posição de um
+// ponto), devolve lista vazia.
+function edgeRefPointIds(ref: EdgeRef, shapes: SketchShape[]): string[] {
   if (ref.kind === "line") {
     const line = shapes.find((sh) => sh.id === ref.lineId);
-    return !!line && line.type === "line" && (line.p1 === pointId || line.p2 === pointId);
+    return line && line.type === "line" ? [line.p1, line.p2] : [];
   }
-  if (ref.kind === "point") return ref.pointId === pointId;
+  if (ref.kind === "point") return [ref.pointId];
   if (ref.kind === "rectEdge") {
     const rect = shapes.find((sh) => sh.id === ref.rectId);
-    return !!rect && rect.type === "rect" && (rect.p1 === pointId || rect.p2 === pointId);
+    return rect && rect.type === "rect" ? [rect.p1, rect.p2] : [];
   }
-  return false;
+  return [];
+}
+
+function edgeRefIncludesPoint(ref: EdgeRef, pointId: string, shapes: SketchShape[]): boolean {
+  return edgeRefPointIds(ref, shapes).includes(pointId);
 }
 
 // Ao estilo Inventor: uma vez que uma cota (não-referência, ver
@@ -538,14 +538,25 @@ function edgeRefIncludesPoint(ref: EdgeRef, pointId: string, shapes: SketchShape
 // seleciona a forma (ver cada chamador), só não arma arrasto nenhum, então
 // a geometria simplesmente não se move (igual um sketch totalmente
 // restringido no Inventor: o clique "pega" mas arrastar não faz nada).
+// excludeDimensionId pula UMA cota específica na varredura — usado por
+// updateDistanceDimension/updateEdgeDistanceDimension pra perguntar "esse
+// ponto já pertence a OUTRA cota (que não essa que estou editando agora)?"
+// sem a cota se auto-travar (ela SEMPRE referencia os próprios pontos).
 function isPointDrivenByDimension(
   pointId: string,
   dimensions: DimensionAnnotation[],
-  shapes: SketchShape[]
+  shapes: SketchShape[],
+  excludeDimensionId?: string
 ): boolean {
   for (const d of dimensions) {
+    if (d.id === excludeDimensionId) continue;
     if (d.isReference) continue;
-    if (d.kind === "distance" && (d.p1 === pointId || d.p2 === pointId)) return true;
+    if (
+      d.kind === "distance" &&
+      (d.p1 === pointId || d.p2 === pointId || d.patternFollowers?.some((f) => f.pointId === pointId))
+    ) {
+      return true;
+    }
     if (d.kind === "arcRadius") {
       const arc = shapes.find((sh) => sh.id === d.arcId);
       if (arc && arc.type === "arc" && (arc.p1 === pointId || arc.p2 === pointId)) return true;
@@ -559,14 +570,29 @@ function isPointDrivenByDimension(
       const rect = shapes.find((sh) => sh.id === d.rectId);
       if (rect && rect.type === "rect" && (rect.p1 === pointId || rect.p2 === pointId)) return true;
     }
-    if (
-      d.kind === "edgeDistance" &&
-      (edgeRefIncludesPoint(d.a, pointId, shapes) || edgeRefIncludesPoint(d.b, pointId, shapes))
-    ) {
+    if (d.kind === "edgeDistance" && (edgeRefIncludesPoint(d.a, pointId, shapes) || edgeRefIncludesPoint(d.b, pointId, shapes))) {
       return true;
     }
   }
   return false;
+}
+
+// "Restritivo" pro propósito de updateDistanceDimension/
+// updateEdgeDistanceDimension escolherem qual lado mover: OU já medido
+// por outra cota não-referência (ver isPointDrivenByDimension) OU tem a
+// restrição "Fixo" (ver fixedPointIds/toggleFixedShape — ex.: geometria
+// projetada, que nasce fixa nas 2 pontas). Sem incluir "Fixo" aqui, editar
+// a distância até uma linha PROJETADA movia a linha em vez do outro lado
+// — "Fixo" bloqueia arrasto manual (ver handleRawDown) mas não passava
+// pela checagem de isPointDrivenByDimension, que só olha outras cotas.
+function isPointRestrictive(
+  pointId: string,
+  dimensions: DimensionAnnotation[],
+  shapes: SketchShape[],
+  fixedPointIds: ReadonlySet<string>,
+  excludeDimensionId?: string
+): boolean {
+  return fixedPointIds.has(pointId) || isPointDrivenByDimension(pointId, dimensions, shapes, excludeDimensionId);
 }
 
 function isCircleRadiusDrivenByDimension(circleId: string, dimensions: DimensionAnnotation[]): boolean {
@@ -922,7 +948,12 @@ type SketchState = {
   resolvePointAt: (raw: Point, toleranceWorld: number, referenceGeometry?: ReferenceSegment[]) => string;
   // Move um ou mais pontos do pool de uma vez (uma chamada = um passo de
   // undo) — usado pela ferramenta Selecionar pra arrastar vértices/formas.
-  movePoints: (updates: Record<string, Point>) => void;
+  // cascadeBlocked opcional (ver propagateAxisLocks): só
+  // updateDistanceDimension/updateEdgeDistanceDimension passam um de
+  // verdade, pra a cascata de axisLock não vazar pra dentro de OUTRA cota
+  // já definida; todo resto (arrasto manual, makeLineHorizontal etc.) usa
+  // o padrão (sem filtro), preservando a rigidez H/V normal.
+  movePoints: (updates: Record<string, Point>, cascadeBlocked?: (pointId: string) => boolean) => void;
   // Redimensiona um círculo direto (arrastar o corpo dele com Selecionar) —
   // sem precisar de uma cota de raio já existente.
   resizeCircle: (shapeId: string, radius: number) => void;
@@ -1569,17 +1600,12 @@ export const useSketchStore = create<SketchState>((set, get) => {
     // — movePoints também é o caminho de edição de cota/ferramentas de
     // restrição, que devem continuar funcionando mesmo num ponto "Fixo";
     // só o arrasto manual (computeDragPreview, mais abaixo) respeita essa
-    // restrição. COM cascadeBlocked (ver propagateAxisLocks) baseado em
-    // isPointDrivenByDimension: o(s) ponto(s) SEED (o alvo direto desta
-    // chamada — ex.: p2 da própria cota sendo editada) sempre se move,
-    // mas se essa mudança propagar (via axisLock) até um ponto que já
-    // pertence a OUTRA cota não-referência já definida, essa propagação
-    // é recusada — ao estilo Inventor, o valor de uma cota já travada só
-    // muda editando ELA mesma (ou uma fórmula que a alimenta), nunca como
-    // efeito colateral de editar outra cota.
-    movePoints: (updates) =>
+    // restrição. cascadeBlocked só é passado de verdade por
+    // updateDistanceDimension/updateEdgeDistanceDimension (ver assinatura
+    // acima) — todo resto chama sem esse argumento, preservando a rigidez
+    // H/V normal de qualquer retângulo cotado.
+    movePoints: (updates, cascadeBlocked) =>
       set((s) => {
-        const cascadeBlocked = (id: string) => isPointDrivenByDimension(id, s.dimensions, s.shapes);
         const expanded = propagateAxisLocks(updates, s.shapes, s.points, EMPTY_FIXED_SET, cascadeBlocked);
         let nextPoints = { ...s.points };
         for (const [id, pos] of Object.entries(expanded)) {
@@ -1590,7 +1616,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
         // Tangente/Coincidente, ver reapplyConstraints) contra o resultado
         // acima — é isso que faz essas ferramentas continuarem "de pé"
         // depois de editar a geometria de novo, em vez de só valerem no
-        // instante em que foram usadas. Mesma cascadeBlocked aqui também.
+        // instante em que foram usadas.
         nextPoints = reapplyConstraints(s.constraints, s.shapes, nextPoints, EMPTY_FIXED_SET, cascadeBlocked);
         return { points: nextPoints };
       }),
@@ -1655,13 +1681,19 @@ export const useSketchStore = create<SketchState>((set, get) => {
     // Move p2 em relação a p1 ao longo da direção atual entre eles — qualquer
     // shape que referencie esses ids (inclusive de outra aresta) acompanha na
     // hora, porque todo mundo lê do mesmo pool.
-    // Move só p2 (p1 fica parado) — via movePoints, não um set() direto,
-    // pra propagar sozinho pra qualquer linha com axisLock que compartilhe
-    // esse ponto com um lado vizinho (ver propagateAxisLocks): senão editar
-    // a cota de um lado do retângulo desconectava o canto com o lado ao
-    // lado, já que só aquele ponto se movia.
+    // Por padrão move só p2 (p1 fica parado) — via movePoints, não um
+    // set() direto, pra propagar sozinho pra qualquer linha com axisLock
+    // que compartilhe esse ponto com um lado vizinho (ver
+    // propagateAxisLocks): senão editar a cota de um lado do retângulo
+    // desconectava o canto com o lado ao lado, já que só aquele ponto se
+    // movia. Se p2 já for restritivo (ver isPointRestrictive — outra cota
+    // não-referência já definida, OU a restrição "Fixo" de geometria
+    // projetada), esse ponto não deve se mexer — move p1 no sentido
+    // oposto em vez dele; se os dois forem restritivos, ignora (não dá
+    // pra satisfazer o valor novo sem violar uma cota/restrição já
+    // definida).
     updateDistanceDimension: (id, newLength) => {
-      const { dimensions, points } = get();
+      const { dimensions, points, shapes, fixedPointIds } = get();
       const dim = dimensions.find((d) => d.id === id);
       if (!dim || dim.kind !== "distance" || newLength <= 0) return;
 
@@ -1677,7 +1709,35 @@ export const useSketchStore = create<SketchState>((set, get) => {
       const ux = dx / currentLength;
       const uy = dy / currentLength;
 
-      get().movePoints({ [p2.id]: { x: p1.x + ux * newLength, y: p1.y + uy * newLength } });
+      const fixed = new Set(fixedPointIds);
+      // Também usado como cascadeBlocked de movePoints abaixo: além de
+      // decidir qual lado é o SEED, impede que a propagação de axisLock
+      // vaze pra dentro de um ponto que já pertence a OUTRA cota (nunca
+      // filtra o próprio seed, ver propagateAxisLocks).
+      const restrictive = (pid: string) => isPointRestrictive(pid, dimensions, shapes, fixed, dim.id);
+      if (!restrictive(dim.p2)) {
+        const newP2 = { x: p1.x + ux * newLength, y: p1.y + uy * newLength };
+        const updates: Record<string, Point> = { [p2.id]: newP2 };
+        // Cota de espaçamento do Padrão Retangular (ver
+        // patternShapeRectangular): reposiciona a GRADE inteira junto,
+        // cada seguidor escalado pelo próprio índice ao longo da direção
+        // do padrão — mesmo delta que p2 recebeu, só multiplicado.
+        if (dim.patternFollowers) {
+          const deltaX = newP2.x - p2.x;
+          const deltaY = newP2.y - p2.y;
+          for (const follower of dim.patternFollowers) {
+            const fp = points[follower.pointId];
+            if (!fp) continue;
+            updates[follower.pointId] = {
+              x: fp.x + deltaX * follower.multiplier,
+              y: fp.y + deltaY * follower.multiplier,
+            };
+          }
+        }
+        get().movePoints(updates, restrictive);
+      } else if (!restrictive(dim.p1)) {
+        get().movePoints({ [p1.id]: { x: p2.x - ux * newLength, y: p2.y - uy * newLength } }, restrictive);
+      }
     },
 
     updateRadiusDimension: (id, newRadius) =>
@@ -1742,8 +1802,17 @@ export const useSketchStore = create<SketchState>((set, get) => {
     // propagateAxisLocks): senão cotar a distância entre 2 lados de um
     // retângulo (ex.: a "largura") e editar o valor desconectava os cantos
     // do lado que se moveu com os lados adjacentes.
+    // Por padrão translada só `b` (a 2ª referência escolhida) — mas se os
+    // pontos de `b` já pertencem a OUTRA cota não-referência já definida
+    // (ex.: a largura do retângulo, ver isPointDrivenByDimension), essa
+    // geometria é restritiva e não deve se mexer por causa de uma cota
+    // DIFERENTE — translada `a` no sentido oposto em vez disso (ex.:
+    // "distância do centro do círculo até uma linha do retângulo": se a
+    // linha já tem a própria largura cotada, quem anda é o círculo, não a
+    // linha). Se os dois lados forem restritivos, ignora — não dá pra
+    // satisfazer o valor novo sem violar uma cota já definida.
     updateEdgeDistanceDimension: (id, newValue) => {
-      const { dimensions, shapes, points } = get();
+      const { dimensions, shapes, points, fixedPointIds } = get();
       const dim = dimensions.find((d) => d.id === id);
       if (!dim || dim.kind !== "edgeDistance" || newValue <= 0) return;
 
@@ -1759,9 +1828,26 @@ export const useSketchStore = create<SketchState>((set, get) => {
       const ux = dx / curDist;
       const uy = dy / curDist;
 
-      const patch = translateEdgeRef(dim.b, delta * ux, delta * uy, shapes, points);
+      // "Restritivo" inclui a restrição "Fixo" (ver isPointRestrictive) —
+      // sem isso, editar a distância até uma linha PROJETADA (que nasce
+      // fixa, não com uma cota própria) movia a linha em vez do outro
+      // lado, já que isPointDrivenByDimension sozinho não enxerga "Fixo".
+      // Também usado como cascadeBlocked de movePoints abaixo, pra
+      // propagação de axisLock não vazar pra dentro de outra cota já
+      // definida (nunca filtra o próprio seed, ver propagateAxisLocks).
+      const fixed = new Set(fixedPointIds);
+      const restrictive = (pid: string) => isPointRestrictive(pid, dimensions, shapes, fixed, dim.id);
+      const bLocked = edgeRefPointIds(dim.b, shapes).some(restrictive);
+      const target = !bLocked
+        ? { ref: dim.b, dx: delta * ux, dy: delta * uy }
+        : { ref: dim.a, dx: -delta * ux, dy: -delta * uy };
+      if (bLocked && edgeRefPointIds(dim.a, shapes).some(restrictive)) {
+        return; // os dois lados são restritivos, nenhum pode se mover
+      }
+
+      const patch = translateEdgeRef(target.ref, target.dx, target.dy, shapes, points);
       if (!patch) return;
-      if ("points" in patch) get().movePoints(patch.points);
+      if ("points" in patch) get().movePoints(patch.points, restrictive);
       else set({ shapes: patch.shapes });
     },
 
@@ -2358,7 +2444,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
     },
 
     handleRawMove: (raw, referenceGeometry = []) => {
-      const { selectDrag, downRaw, tool, shapes, points, dimensionDrag, constraints, fixedPointIds, dimensions } = get();
+      const { selectDrag, downRaw, tool, shapes, points, dimensionDrag, constraints, fixedPointIds } = get();
       const fixedSet = new Set(fixedPointIds);
 
       if (dimensionDrag) {
@@ -2397,7 +2483,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
       if (selectDrag) {
         if (selectDrag.mode === "point") {
           const snapped = previewSnap(raw, referenceGeometry);
-          set({ dragPreview: computeDragPreview({ [selectDrag.pointId]: snapped }, shapes, points, constraints, fixedSet, dimensions) });
+          set({ dragPreview: computeDragPreview({ [selectDrag.pointId]: snapped }, shapes, points, constraints, fixedSet) });
         } else if (selectDrag.mode === "circleRadius") {
           const radius = Math.max(distance(selectDrag.center, raw), 0.5);
           set({ dragRadiusPreview: { shapeId: selectDrag.shapeId, radius } });
@@ -2422,7 +2508,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
             const start = selectDrag.startPositions[id];
             preview[id] = { x: start.x + dx, y: start.y + dy };
           }
-          set({ dragPreview: computeDragPreview(preview, shapes, points, constraints, fixedSet, dimensions) });
+          set({ dragPreview: computeDragPreview(preview, shapes, points, constraints, fixedSet) });
         } else if (selectDrag.mode === "lineEnd") {
           // Estica/encolhe só ao longo da direção original da linha — não
           // deixa o ângulo mudar, só o comprimento a partir dessa ponta.
@@ -2430,7 +2516,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
           const projected = (raw.x - anchor.x) * direction.x + (raw.y - anchor.y) * direction.y;
           const clamped = Math.max(projected, 2);
           const newPos = { x: anchor.x + direction.x * clamped, y: anchor.y + direction.y * clamped };
-          set({ dragPreview: computeDragPreview({ [selectDrag.movingPointId]: newPos }, shapes, points, constraints, fixedSet, dimensions) });
+          set({ dragPreview: computeDragPreview({ [selectDrag.movingPointId]: newPos }, shapes, points, constraints, fixedSet) });
         }
         return;
       }
@@ -2601,45 +2687,61 @@ export const useSketchStore = create<SketchState>((set, get) => {
           // área em branco. "snapped" é exatamente esse sinal: true só
           // quando colou em algo real, não quando só caiu no grid.
           const { points: pts, shapes: shs, gridSize } = get();
+          // Círculo/arco/rasgo: reconhece o CENTRO com o mesmo critério
+          // relativo (perto do centro X perto da borda) que o clique
+          // único já usa em findEdgeHit — resolveSnapWithEdges sozinho usa
+          // uma tolerância fixa pequena pro "ponto já existente" e círculo
+          // fica de fora do "ponto mais próximo numa aresta" (ver
+          // findNearestPointOnShapes), então um arrasto começado um pouco
+          // fora do centro exato caía no ponto de GRID mais perto em vez
+          // do centro de verdade — resultando numa cota torta/deslocada em
+          // ângulo em vez de sair certinho do centro.
+          const startCenterHit = findEdgeHit(downRaw, shs, pts, EDGE_SELECT_TOLERANCE);
+          const startCenterId = startCenterHit?.kind === "point" ? startCenterHit.pointId : null;
           const startSnap = resolveSnapWithEdges(downRaw, pts, shs, referenceGeometry, gridSize, SNAP_TOLERANCE);
-          if (startSnap.snapped) {
-            const startId = startSnap.existingId ?? get().resolvePointAt(downRaw, SNAP_TOLERANCE, referenceGeometry);
+          if (startCenterId || startSnap.snapped) {
+            const startId = startCenterId ?? startSnap.existingId ?? get().resolvePointAt(downRaw, SNAP_TOLERANCE, referenceGeometry);
             const circle = findCircleByCenter(get().shapes, startId);
             const arc = circle ? null : findArcByCenter(get().shapes, startId);
             const slot = circle || arc ? null : findSlotByCenter(get().shapes, startId);
             const centerShape = circle || arc || slot;
 
-            const endSnap = resolveSnapWithEdges(rawEnd, get().points, get().shapes, referenceGeometry, gridSize, SNAP_TOLERANCE);
             // Só busca isso quando o arrasto começa num centro — pro caso
-            // comum (arrasto ponto a ponto) é trabalho à toa.
-            const endLineHit = centerShape ? findEdgeHit(rawEnd, get().shapes, get().points, EDGE_SELECT_TOLERANCE) : null;
+            // comum (arrasto ponto a ponto) é trabalho à toa. Mesma
+            // melhoria pro FIM do arrasto: findEdgeOrPointHit já reconhece
+            // ponto (incl. centro de OUTRO círculo) e linha com o critério
+            // certo, num campo só, então cobre um alvo impreciso melhor
+            // que resolveSnapWithEdges sozinho também cobriria.
+            const endHit = centerShape ? findEdgeOrPointHit(rawEnd, get().shapes, get().points, EDGE_SELECT_TOLERANCE) : null;
 
-            if (centerShape && endLineHit?.kind === "line") {
+            if (centerShape && endHit?.kind === "line") {
               // Arrastou o centro do círculo/arco/rasgo até uma LINHA —
               // mede a distância perpendicular de verdade até ela (mesma
-              // cota "edgeDistance" que o clique único já cria, ver
-              // findEdgeOrPointHit em hitTest.ts), em vez do atalho de
-              // raio abaixo, que ignorava pra onde o arrasto foi.
+              // cota "edgeDistance" que o clique único já cria), em vez do
+              // atalho de raio abaixo, que ignorava pra onde o arrasto foi.
               get().addDimension({
                 id: createId(),
                 kind: "edgeDistance",
                 a: { kind: "point", pointId: startId },
-                b: { kind: "line", lineId: endLineHit.shapeId },
+                b: { kind: "line", lineId: endHit.shapeId },
               });
-            } else if (centerShape && endSnap.snapped && endSnap.existingId && endSnap.existingId !== startId) {
-              // Arrastou até OUTRO ponto de verdade (não recém-criado no
-              // grid) — mede a distância até ele, mesma ideia acima.
-              get().addDimension({ id: createId(), kind: "distance", p1: startId, p2: endSnap.existingId });
+            } else if (centerShape && endHit?.kind === "point" && endHit.pointId !== startId) {
+              // Arrastou até OUTRO ponto de verdade (outro centro, vértice
+              // etc.) — mede a distância até ele, mesma ideia acima.
+              get().addDimension({ id: createId(), kind: "distance", p1: startId, p2: endHit.pointId });
             } else if (circle) {
               get().addDimension({ id: createId(), kind: "radius", circleId: circle.id });
             } else if (arc) {
               get().addDimension({ id: createId(), kind: "arcRadius", arcId: arc.id });
             } else if (slot) {
               get().addDimension({ id: createId(), kind: "slotRadius", slotId: slot.id });
-            } else if (endSnap.snapped) {
-              const endId = endSnap.existingId ?? get().resolvePointAt(rawEnd, SNAP_TOLERANCE, referenceGeometry);
-              if (startId !== endId) {
-                get().addDimension({ id: createId(), kind: "distance", p1: startId, p2: endId });
+            } else {
+              const endSnap = resolveSnapWithEdges(rawEnd, get().points, get().shapes, referenceGeometry, gridSize, SNAP_TOLERANCE);
+              if (endSnap.snapped) {
+                const endId = endSnap.existingId ?? get().resolvePointAt(rawEnd, SNAP_TOLERANCE, referenceGeometry);
+                if (startId !== endId) {
+                  get().addDimension({ id: createId(), kind: "distance", p1: startId, p2: endId });
+                }
               }
             }
           }
@@ -2748,6 +2850,12 @@ export const useSketchStore = create<SketchState>((set, get) => {
       const n2 = dir2 && count2 ? Math.max(1, Math.round(count2)) : 1;
       const newPoints: Record<string, SketchPoint> = {};
       const newShapes: SketchShape[] = [];
+      // anchorId[i][j]: id do 1º ponto da instância (i,j) (mesmo ponto que
+      // representa a posição de QUALQUER forma, ver pointIdsOfShape) — só
+      // pra montar as cotas de espaçamento abaixo, editáveis depois (ver
+      // patternFollowers em types.ts/updateDistanceDimension).
+      const anchorId: string[][] = Array.from({ length: n1 }, () => new Array<string>(n2));
+      anchorId[0][0] = sourcePoints[0].id;
 
       for (let i = 0; i < n1; i++) {
         for (let j = 0; j < n2; j++) {
@@ -2761,6 +2869,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
             newPoints[newId] = { id: newId, x: p.x + dx, y: p.y + dy };
           }
           newShapes.push(remapShapePoints(shape, createId(), idMap));
+          anchorId[i][j] = idMap.get(sourcePoints[0].id)!;
         }
       }
 
@@ -2768,6 +2877,47 @@ export const useSketchStore = create<SketchState>((set, get) => {
         points: { ...s.points, ...newPoints },
         shapes: [...s.shapes, ...newShapes],
       }));
+
+      // Cota de espaçamento por direção usada (ao estilo Inventor): p1/p2
+      // são a origem e a 1ª instância nessa direção, medindo exatamente
+      // o espaçamento; patternFollowers lista TODA instância além dessas
+      // duas (de qualquer linha/coluna) que também precisa acompanhar,
+      // escalada pelo próprio índice — editar o valor depois reposiciona
+      // a grade inteira, não só a instância mais próxima. Só cria se
+      // houver mais de 1 instância naquela direção (senão não tem
+      // espaçamento nenhum pra cotar).
+      if (n1 > 1) {
+        const followers: { pointId: string; multiplier: number }[] = [];
+        for (let i = 1; i < n1; i++) {
+          for (let j = 0; j < n2; j++) {
+            if (i === 1 && j === 0) continue; // é o próprio p2
+            followers.push({ pointId: anchorId[i][j], multiplier: i });
+          }
+        }
+        get().addDimension({
+          id: createId(),
+          kind: "distance",
+          p1: anchorId[0][0],
+          p2: anchorId[1][0],
+          patternFollowers: followers,
+        });
+      }
+      if (n2 > 1) {
+        const followers: { pointId: string; multiplier: number }[] = [];
+        for (let j = 1; j < n2; j++) {
+          for (let i = 0; i < n1; i++) {
+            if (i === 0 && j === 1) continue; // é o próprio p2
+            followers.push({ pointId: anchorId[i][j], multiplier: j });
+          }
+        }
+        get().addDimension({
+          id: createId(),
+          kind: "distance",
+          p1: anchorId[0][0],
+          p2: anchorId[0][1],
+          patternFollowers: followers,
+        });
+      }
     },
 
     patternShapeCircular: (shapeId, center, count, angle) => {

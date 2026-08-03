@@ -63,10 +63,14 @@ function buildHoleTool(
 ): Solid {
   const box = activeSolid.boundingBox;
   const diagonal = Math.hypot(box.width, box.height, box.depth) || 1;
-  const drawing = drawCircle(feature.radius).translate(
-    feature.center.x,
-    feature.center.y
-  );
+  // extraHoles (Ctrl+clique em vários círculos, ver findSelectedCircles em
+  // geometry.ts) — cada um vira mais um círculo unido no MESMO desenho, ao
+  // estilo profilesToDrawing: um corte/extrusão só, com um cilindro por
+  // furo, em vez de reconstruir o sólido furo a furo.
+  let drawing = drawCircle(feature.radius).translate(feature.center.x, feature.center.y);
+  for (const extra of feature.extraHoles ?? []) {
+    drawing = drawing.fuse(drawCircle(extra.radius).translate(extra.center.x, extra.center.y));
+  }
 
   if (feature.through) {
     const span = diagonal * 3;
@@ -143,7 +147,7 @@ function buildSweepSolid(feature: Extract<Feature, { type: "sweep" }>, features:
   );
   if (!pathFeature) return null;
 
-  const profileDrawing = profileToDrawing(feature.profile);
+  const profileDrawing = profilesToDrawing(feature.profile);
   const pathDrawing = pathToDrawing(pathFeature.shapes, pathFeature.points);
   if (!profileDrawing || !pathDrawing) return null;
 
@@ -164,10 +168,14 @@ function buildSweepSolid(feature: Extract<Feature, { type: "sweep" }>, features:
 // (makeHelix) — raio da hélice = distância do perfil até o eixo (nunca
 // escolhido à parte, igual Revolução não pede raio).
 function buildHelixSolid(feature: Extract<Feature, { type: "helix" }>): Solid | null {
-  const drawing = profileToDrawing(feature.profile);
+  const drawing = profilesToDrawing(feature.profile);
   if (!drawing) return null;
 
-  const refPoint = profileReferencePoint(feature.profile);
+  // Raio da hélice usa a referência do 1º perfil só — com vários perfis
+  // unidos (Ctrl+clique), o raio de varredura continua sendo definido pelo
+  // perfil "principal" (o primeiro marcado), não uma média entre todos.
+  const firstProfile = Array.isArray(feature.profile) ? feature.profile[0] : feature.profile;
+  const refPoint = profileReferencePoint(firstProfile);
   if (!refPoint) return null;
   const radius = pointToLineDistance2D(refPoint, feature.axisOrigin, feature.axisDirection);
   if (radius < 1e-6) return null; // perfil em cima do eixo — sem raio, sem hélice

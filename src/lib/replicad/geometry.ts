@@ -276,6 +276,28 @@ export function findLastCircle(
   return null;
 }
 
+// Furo com Ctrl+clique (multiProfileSelection, ver toggleProfileSelection
+// em sketch/store.ts): cada círculo marcado vira um furo próprio — mesma
+// through/depth/direction pra todos, só centro e raio mudam (ver
+// extraHoles em features/types.ts). Ids marcados que não são círculo são
+// ignorados (não faz sentido furar com outra forma) — devolve [] se nada
+// sobrar, pra quem chama cair de volta pro findLastCircle de sempre.
+export function findSelectedCircles(
+  shapes: SketchShape[],
+  points: Record<string, SketchPoint>,
+  selectedIds: string[]
+): { cx: number; cy: number; r: number }[] {
+  const results: { cx: number; cy: number; r: number }[] = [];
+  for (const id of selectedIds) {
+    const shape = shapes.find((s) => s.id === id);
+    if (!shape || shape.type !== "circle") continue;
+    const center = points[shape.center];
+    if (!center) continue;
+    results.push({ cx: center.x, cy: center.y, r: shape.radius });
+  }
+  return results;
+}
+
 // Revolução (ao estilo Inventor) precisa de uma linha de centro explícita no
 // sketch — sem ela, não tem eixo definido e a operação não deve ficar
 // disponível. Origin/direction ficam em coordenadas locais do plano do

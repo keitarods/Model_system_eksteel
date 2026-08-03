@@ -225,7 +225,21 @@ type DimensionCommon = {
 };
 
 export type DimensionAnnotation =
-  | ({ id: string; kind: "distance"; p1: string; p2: string } & DimensionCommon)
+  | ({
+      id: string;
+      kind: "distance";
+      p1: string;
+      p2: string;
+      // Pontos extra que acompanham p2 na MESMA direção quando essa cota
+      // é editada, cada um escalado por um múltiplo do deslocamento —
+      // usado SÓ pela cota de espaçamento que o Padrão Retangular cria
+      // (ver patternShapeRectangular em store.ts): editar o espaçamento
+      // move a GRADE inteira de instâncias junto (cada uma escalada pelo
+      // seu próprio índice ao longo da direção do padrão), não só a
+      // instância mais próxima de p2. Ausente numa cota "distance" comum
+      // (a grande maioria).
+      patternFollowers?: { pointId: string; multiplier: number }[];
+    } & DimensionCommon)
   | ({ id: string; kind: "radius"; circleId: string } & DimensionCommon)
   | ({ id: string; kind: "width"; rectId: string } & DimensionCommon)
   | ({ id: string; kind: "height"; rectId: string } & DimensionCommon)

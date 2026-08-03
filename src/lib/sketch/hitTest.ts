@@ -209,17 +209,29 @@ export function findEdgeHit(
 // distância quase idêntica (a ponta É o ponto mais próximo dela), então
 // competir por distância seria instável — mesma lição do meio de linha em
 // resolveSnapWithEdges (snap.ts).
+//
+// A zona de captura do vértice é mais APERTADA que a tolerância normal de
+// aresta (metade dela) — de propósito: perto do MEIO de uma linha comprida
+// não tem ambiguidade nenhuma (só a linha está por perto), mas perto de
+// QUALQUER ponta a linha e o vértice ficam a uma distância quase idêntica
+// do clique. Usar a tolerância cheia fazia até um clique claramente em
+// cima do corpo da linha, só "por acaso" perto o bastante de uma das
+// pontas, virar vértice em vez de linha — cotar "círculo até a linha do
+// retângulo" virava sem querer "círculo até aquele canto específico"
+// (uma cota reta/vertical em vez da perpendicular esperada) quase toda
+// vez que o clique não caía bem no meio da aresta.
 export function findEdgeOrPointHit(
   raw: Point,
   shapes: SketchShape[],
   points: Record<string, SketchPoint>,
   tolerance: number
 ): EdgeHit | null {
+  const vertexTolerance = tolerance / 2;
   const circleCenterIds = new Set(
     shapes.filter((s): s is CircleShape => s.type === "circle").map((s) => s.center)
   );
   let closestId: string | null = null;
-  let closestDist = tolerance;
+  let closestDist = vertexTolerance;
   for (const p of Object.values(points)) {
     if (circleCenterIds.has(p.id)) continue;
     const d = Math.hypot(raw.x - p.x, raw.y - p.y);
