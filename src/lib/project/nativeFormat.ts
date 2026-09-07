@@ -1,5 +1,6 @@
 import type { Feature } from "@/lib/features/types";
 import type { DrawingSheet } from "@/lib/drawing/types";
+import { normalizePartProperties, type PartProperties } from "@/lib/project/partProperties";
 
 // Formato nativo do Modelador Eksteel — JSON com a árvore de features
 // inteira (inclusive os sketches, com shapes/points/dimensions), pra poder
@@ -21,20 +22,32 @@ type NativeProjectFile = {
   // Opcional — ausente em projetos salvos antes da ferramenta de Desenho
   // existir. parseProject devolve [] nesse caso (ver abaixo).
   drawingSheets?: DrawingSheet[];
+  // Opcional pelo mesmo motivo — ausente antes das "iProperties" existirem.
+  // parseProject devolve o padrão (ver normalizePartProperties) nesse caso.
+  // É daqui que a Lista de Peças (BOM) de uma MONTAGEM tira código/
+  // descrição/material/densidade de cada peça vinculada — ver
+  // src/lib/drawing/bom.ts.
+  properties?: PartProperties;
 };
 
 export type ParsedProject = {
   features: Feature[];
   drawingSheets: DrawingSheet[];
+  properties: PartProperties;
 };
 
-export function serializeProject(features: Feature[], drawingSheets: DrawingSheet[] = []): string {
+export function serializeProject(
+  features: Feature[],
+  drawingSheets: DrawingSheet[] = [],
+  properties?: PartProperties
+): string {
   const payload: NativeProjectFile = {
     format: NATIVE_FORMAT_ID,
     version: NATIVE_FORMAT_VERSION,
     savedAt: new Date().toISOString(),
     features,
     drawingSheets,
+    properties: normalizePartProperties(properties),
   };
   return JSON.stringify(payload, null, 2);
 }
@@ -62,5 +75,6 @@ export function parseProject(json: string): ParsedProject {
   return {
     features: file.features,
     drawingSheets: Array.isArray(file.drawingSheets) ? file.drawingSheets : [],
+    properties: normalizePartProperties(file.properties),
   };
 }

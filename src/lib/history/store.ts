@@ -2,16 +2,21 @@ import { create } from "zustand";
 import { useSketchStore } from "@/lib/sketch/store";
 import { useFeatureStore } from "@/lib/features/store";
 import { useDrawingStore } from "@/lib/drawing/store";
+import { useAssemblyStore } from "@/lib/assembly/store";
 import type { DimensionAnnotation, SketchPlane, SketchPoint, SketchShape } from "@/lib/sketch/types";
 import type { Feature } from "@/lib/features/types";
 import type { DrawingSheet } from "@/lib/drawing/types";
+import type { AssemblyConstraint, ComponentInstance } from "@/lib/assembly/types";
 
-// Desfazer/refazer global: observa as TRÊS stores (sketch + features +
-// folhas de desenho) juntas e guarda snapshots — mais simples e mais seguro
-// do que escrever a operação inversa de cada ação (linha, cota, extrude,
-// remover feature, mover vista na folha...). Como todo update nessas
-// stores já cria objetos/arrays novos (nunca muta em lugar), guardar as
-// referências antigas no snapshot é seguro.
+// Desfazer/refazer global: observa as stores (sketch + features + folhas de
+// desenho + montagem) juntas e guarda snapshots — mais simples e mais
+// seguro do que escrever a operação inversa de cada ação (linha, cota,
+// extrude, remover feature, mover vista na folha, inserir/restringir
+// componente...). Como todo update nessas stores já cria objetos/arrays
+// novos (nunca muta em lugar), guardar as referências antigas no snapshot
+// é seguro. useAssemblyStore só existe no documento de Montagem (rota
+// /montagem) — no Modelador ela nunca muda, então nunca gera snapshot ali,
+// as duas telas convivem sem interferir uma na outra.
 type Snapshot = {
   shapes: SketchShape[];
   points: Record<string, SketchPoint>;
@@ -19,6 +24,8 @@ type Snapshot = {
   activePlane: SketchPlane;
   features: Feature[];
   drawingSheets: DrawingSheet[];
+  assemblyInstances: ComponentInstance[];
+  assemblyConstraints: AssemblyConstraint[];
 };
 
 const MAX_HISTORY = 100;
@@ -35,6 +42,7 @@ export const useUndoStore = create<UndoStoreState>(() => ({
 
 function captureSnapshot(): Snapshot {
   const sketch = useSketchStore.getState();
+  const assembly = useAssemblyStore.getState();
   return {
     shapes: sketch.shapes,
     points: sketch.points,
@@ -42,6 +50,8 @@ function captureSnapshot(): Snapshot {
     activePlane: sketch.activePlane,
     features: useFeatureStore.getState().features,
     drawingSheets: useDrawingStore.getState().sheets,
+    assemblyInstances: assembly.instances,
+    assemblyConstraints: assembly.constraints,
   };
 }
 
@@ -54,6 +64,7 @@ function applySnapshot(snapshot: Snapshot) {
   });
   useFeatureStore.setState({ features: snapshot.features });
   useDrawingStore.setState({ sheets: snapshot.drawingSheets });
+  useAssemblyStore.setState({ instances: snapshot.assemblyInstances, constraints: snapshot.assemblyConstraints });
 }
 
 let restoring = false;
@@ -132,9 +143,32 @@ function onDrawingStoreChange() {
   onStoreChange();
 }
 
+// Mesmo raciocínio das duas fatias acima — useAssemblyStore não guarda
+// nenhum estado efêmero de UI hoje (nem seleção), mas o filtro fica pronto
+// pra quando isso mudar (ex.: instância selecionada na árvore).
+function persistentAssemblySlice() {
+  const s = useAssemblyStore.getState();
+  return { instances: s.instances, constraints: s.constraints };
+}
+
+let lastPersistentAssemblySlice = persistentAssemblySlice();
+
+function onAssemblyStoreChange() {
+  const current = persistentAssemblySlice();
+  if (
+    current.instances === lastPersistentAssemblySlice.instances &&
+    current.constraints === lastPersistentAssemblySlice.constraints
+  ) {
+    return;
+  }
+  lastPersistentAssemblySlice = current;
+  onStoreChange();
+}
+
 useSketchStore.subscribe(onSketchStoreChange);
 useFeatureStore.subscribe(onStoreChange);
 useDrawingStore.subscribe(onDrawingStoreChange);
+useAssemblyStore.subscribe(onAssemblyStoreChange);
 
 export function undoModel() {
   const { past } = useUndoStore.getState();

@@ -10,6 +10,7 @@ import type {
   TitleBlockInfo,
 } from "./types";
 import { DEFAULT_TOLERANCE_ROWS } from "./types";
+import { normalizeBomTable, type BomRow, type BomTable } from "./bom";
 import { createId } from "@/lib/sketch/render";
 
 // Patch de anotação — campos soltos em vez de Partial<DrawingAnnotation>
@@ -62,11 +63,12 @@ export function createSheetObject(
     views: [],
     dimensions: [],
     annotations: [],
+    bomTables: [],
     titleBlock: defaultTitleBlock(),
   };
 }
 
-type DrawingState = {
+export type DrawingState = {
   sheets: DrawingSheet[];
   activeSheetId: string | null;
 
@@ -93,6 +95,15 @@ type DrawingState = {
 
   updateTitleBlock: (sheetId: string, patch: Partial<TitleBlockInfo>) => void;
 
+  // Lista de Peças (BOM) — ver src/lib/drawing/bom.ts.
+  addBomTable: (sheetId: string, table: BomTable) => void;
+  updateBomTable: (sheetId: string, tableId: string, patch: Partial<BomTable>) => void;
+  removeBomTable: (sheetId: string, tableId: string) => void;
+  // Edição de uma célula à mão — grava em `overrides` (não em `values`),
+  // pra sobreviver a um "Atualizar Lista" depois.
+  setBomCell: (sheetId: string, tableId: string, rowId: string, key: string, value: string) => void;
+  setBomRows: (sheetId: string, tableId: string, rows: BomRow[]) => void;
+
   // Aplica um modelo de folha (tamanho/orientação/bloco de título) numa
   // folha já existente — SEM tocar em views/dimensions dela (o modelo não
   // sabe nada sobre a peça, só sobre a "moldura" da folha).
@@ -104,7 +115,14 @@ type DrawingState = {
   clear: () => void;
 };
 
-export const useDrawingStore = create<DrawingState>((set, get) => ({
+// Fábrica (não uma store única): o Modelador e a Montagem têm CADA UM as
+// suas folhas, com a mesma lógica mas estados totalmente separados — as
+// stores do zustand são singletons de módulo e sobrevivem à navegação
+// client-side entre /modelador e /montagem, então uma store só faria as
+// folhas da peça vazarem pra montagem (e serem salvas no arquivo errado,
+// já que o Modelador serializa `sheets` dentro do .eks3d).
+function createDrawingStore() {
+  return create<DrawingState>((set, get) => ({
   sheets: [],
   activeSheetId: null,
 
@@ -217,21 +235,94 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
       sheets: s.sheets.map((sh) => (sh.id === sheetId ? { ...sh, titleBlock: { ...sh.titleBlock, ...patch } } : sh)),
     })),
 
-  applyTemplate: (sheetId, template) =>
+  addBomTable: (sheetId, table) =>
+    set((s) => ({
+      sheets: s.sheets.map((sh) =>
+        sh.id === sheetId ? { ...sh, bomTables: [...(sh.bomTables ?? []), table] } : sh
+      ),
+    })),
+
+  updateBomTable: (sheetId, tableId, patch) =>
     set((s) => ({
       sheets: s.sheets.map((sh) =>
         sh.id === sheetId
-          ? { ...sh, size: template.size, orientation: template.orientation, scale: template.scale, titleBlock: template.titleBlock }
+          ? { ...sh, bomTables: (sh.bomTables ?? []).map((t) => (t.id === tableId ? { ...t, ...patch } : t)) }
           : sh
       ),
     })),
 
-  // annotations/scale são opcionais na normalização — projetos salvos antes
-  // dessas ferramentas existirem não têm esses campos no JSON.
+  removeBomTable: (sheetId, tableId) =>
+    set((s) => ({
+      sheets: s.sheets.map((sh) =>
+        sh.id === sheetId ? { ...sh, bomTables: (sh.bomTables ?? []).filter((t) => t.id !== tableId) } : sh
+      ),
+    })),
+
+  setBomCell: (sheetId, tableId, rowId, key, value) =>
+    set((s) => ({
+      sheets: s.sheets.map((sh) =>
+        sh.id === sheetId
+          ? {
+              ...sh,
+              bomTables: (sh.bomTables ?? []).map((t) =>
+                t.id === tableId
+                  ? {
+                      ...t,
+                      rows: t.rows.map((r) =>
+                        r.id === rowId ? { ...r, overrides: { ...r.overrides, [key]: value } } : r
+                      ),
+                    }
+                  : t
+              ),
+            }
+          : sh
+      ),
+    })),
+
+  setBomRows: (sheetId, tableId, rows) => get().updateBomTable(sheetId, tableId, { rows }),
+
+  applyTemplate: (sheetId, template) =>
+    set((s) => ({
+      sheets: s.sheets.map((sh) =>
+        sh.id === sheetId
+          ? {
+              ...sh,
+              size: template.size,
+              orientation: template.orientation,
+              scale: template.scale,
+              titleBlock: template.titleBlock,
+              // A moldura da lista do modelo (colunas/medidas) entra nas
+              // listas JÁ colocadas na folha, preservando as linhas delas —
+              // trocar de modelo padroniza o formato da lista, não apaga o
+              // conteúdo dela.
+              bomTables: template.bom
+                ? (sh.bomTables ?? []).map((t) => ({ ...t, ...template.bom!, columns: template.bom!.columns.map((c) => ({ ...c })) }))
+                : sh.bomTables,
+            }
+          : sh
+      ),
+    })),
+
+  // annotations/scale/bomTables são opcionais na normalização — projetos
+  // salvos antes dessas ferramentas existirem não têm esses campos no JSON.
   loadSheets: (sheets) =>
     set({
-      sheets: sheets.map((sh): DrawingSheet => ({ ...sh, annotations: sh.annotations ?? [], scale: sh.scale ?? 1 })),
+      sheets: sheets.map(
+        (sh): DrawingSheet => ({
+          ...sh,
+          annotations: sh.annotations ?? [],
+          scale: sh.scale ?? 1,
+          bomTables: (sh.bomTables ?? []).map(normalizeBomTable),
+        })
+      ),
       activeSheetId: sheets[0]?.id ?? null,
     }),
   clear: () => set({ sheets: [], activeSheetId: null }),
-}));
+  }));
+}
+
+// Folhas da PEÇA (Modelador) — salvas dentro do .eks3d (ver nativeFormat.ts).
+export const useDrawingStore = createDrawingStore();
+
+// Folhas da MONTAGEM — salvas dentro do .eks3dasm (ver assemblyFormat.ts).
+export const useAssemblyDrawingStore = createDrawingStore();

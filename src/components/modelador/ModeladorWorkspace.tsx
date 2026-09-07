@@ -40,6 +40,22 @@ import { rebuildModel, findFlangeParentId } from "@/lib/replicad/build-model";
 import { sketchPlaneFromHit, worldToLocalPoint, offsetOrigin, STANDARD_PLANES, STANDARD_AXES } from "@/lib/replicad/plane";
 import { isPatternable } from "@/lib/replicad/pattern";
 import { useFeatureStore } from "@/lib/features/store";
+import { usePartPropertiesStore } from "@/lib/features/propertiesStore";
+import { MATERIAL_PRESETS, type PartProperties } from "@/lib/project/partProperties";
+import {
+  convertArea,
+  convertVolume,
+  formatMass,
+  formatNumberPtBr,
+  measurePhysicalProperties,
+  AREA_UNIT_LABELS,
+  DEFAULT_AREA_UNIT,
+  DEFAULT_VOLUME_UNIT,
+  VOLUME_UNIT_LABELS,
+  type AreaUnit,
+  type PhysicalProperties,
+  type VolumeUnit,
+} from "@/lib/replicad/physicalProperties";
 import { useDrawingStore } from "@/lib/drawing/store";
 import type { Feature } from "@/lib/features/types";
 import type { ExtrudeDirection } from "@/lib/replicad/geometry";
@@ -58,6 +74,20 @@ import {
   saveOrDownload,
   writeToFileHandle,
 } from "@/lib/project/folder";
+import {
+  clearDraft,
+  flushDraftSave,
+  loadDraft,
+  rememberCurrentFileHandle,
+  restoreCurrentFileHandle,
+  scheduleDraftSave,
+} from "@/lib/project/autosave";
+import {
+  consumePendingEditInContext,
+  requestReturnSelection,
+  type EditInContextRequest,
+} from "@/lib/project/editInContext";
+import { ensureReadPermission, loadLinkedFileHandle } from "@/lib/project/linkedFiles";
 
 function createId() {
   return Math.random().toString(36).slice(2, 10);
@@ -187,6 +217,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // 3D) pela folha de desenho 2D — mesmo projeto, só uma tela diferente,
   // ao estilo de trocar de aba (não é uma rota/página separada).
   const [mode, setMode] = useState<"modelar" | "desenho">("modelar");
+  const [propertiesOpen, setPropertiesOpen] = useState(false);
   const shapes = useSketchStore((s) => s.shapes);
   const points = useSketchStore((s) => s.points);
   const dimensions = useSketchStore((s) => s.dimensions);
@@ -203,6 +234,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const updateFeature = useFeatureStore((s) => s.updateFeature);
   const removeFeature = useFeatureStore((s) => s.removeFeature);
   const drawingSheets = useDrawingStore((s) => s.sheets);
+  // "iProperties" da peça (código/descrição/material/densidade/responsáveis)
+  // — viajam no .eks3d e alimentam a Lista de Peças de qualquer MONTAGEM
+  // que referencie esta peça, ver src/lib/drawing/bom.ts.
+  const partProperties = usePartPropertiesStore((s) => s.properties);
+  const updatePartProperties = usePartPropertiesStore((s) => s.update);
 
   const canUndo = useUndoStore((s) => s.past.length > 0);
   const canRedo = useUndoStore((s) => s.future.length > 0);
@@ -351,6 +387,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const [projectFolder, setProjectFolder] = useState<FileSystemDirectoryHandle | null>(null);
   const [currentFileHandle, setCurrentFileHandle] = useState<FileSystemFileHandle | null>(null);
   const [currentFileName, setCurrentFileName] = useState<string | null>(null);
+  // != null quando esta peça foi aberta por duplo clique num componente da
+  // Montagem (ver src/lib/project/editInContext.ts) — troca o botão "Abrir
+  // Montagem" por "Voltar pra Montagem" (salva e retorna), ao estilo do
+  // "Return" do Inventor na edição em contexto.
+  const [editingInContext, setEditingInContext] = useState<EditInContextRequest | null>(null);
   // null = ainda não checou (evita mismatch de hidratação: no servidor
   // isFileSystemAccessSupported() sempre dá false por não ter `window`).
   // Só depois de montado no client é que sabemos de verdade se o navegador
@@ -742,6 +783,89 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       if (handle) setProjectFolder(handle);
     });
   }, []);
+
+  // Restaura, ao montar (só uma vez), nesta ordem de prioridade:
+  //   1. Pedido de "editar peça no contexto" vindo da Montagem (duplo
+  //      clique num componente, ver editInContext.ts) — abre o arquivo
+  //      vinculado direto, como se fosse "Abrir", e liga o modo "Voltar pra
+  //      Montagem".
+  //   2. Senão, o rascunho automático (ver autosave.ts), só se ainda não
+  //      tiver nenhuma feature/folha carregada (recém-aberto, nunca depois
+  //      de abrir um projeto de verdade).
+  // `hasRestoredAutosaveRef` trava o efeito de autosave logo abaixo até essa
+  // tentativa terminar, senão um autosave do estado ainda VAZIO (disparado
+  // no mesmo instante, antes de qualquer coisa ter sido lida) sobrescreveria
+  // o rascunho de verdade com nada.
+  const hasRestoredAutosaveRef = useRef(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const pending = consumePendingEditInContext();
+        if (pending) {
+          const handle = await loadLinkedFileHandle(pending.linkKey);
+          if (handle && (await ensureReadPermission(handle))) {
+            const file = await handle.getFile();
+            const loaded = parseProject(await file.text());
+            useFeatureStore.setState({ features: loaded.features });
+            useDrawingStore.getState().loadSheets(loaded.drawingSheets);
+            usePartPropertiesStore.getState().load(loaded.properties);
+            clearSketch();
+            setEditingSketchId(null);
+            setSketching(false);
+            setPickingPlane(false);
+            setCurrentFileHandle(handle);
+            setCurrentFileName(file.name);
+            setEditingInContext(pending);
+            rememberCurrentFileHandle("modelador", handle);
+            showNotice(`Editando "${pending.instanceLabel}" (da Montagem) — use "Voltar pra Montagem" ao terminar.`);
+          } else {
+            showNotice(
+              `Não foi possível abrir "${pending.instanceLabel}" automaticamente — religue o arquivo na Montagem e tente de novo.`
+            );
+          }
+        } else if (useFeatureStore.getState().features.length === 0 && useDrawingStore.getState().sheets.length === 0) {
+          const json = await loadDraft("modelador");
+          if (json) {
+            const loaded = parseProject(json);
+            useFeatureStore.setState({ features: loaded.features });
+            useDrawingStore.getState().loadSheets(loaded.drawingSheets);
+            usePartPropertiesStore.getState().load(loaded.properties);
+            showNotice("Rascunho automático restaurado (última alteração antes de fechar/atualizar a página).");
+          }
+          if (isFileSystemAccessSupported()) {
+            const handle = await restoreCurrentFileHandle("modelador");
+            if (handle) {
+              setCurrentFileHandle(handle);
+              setCurrentFileName(handle.name);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Falha ao restaurar rascunho automático:", err);
+      } finally {
+        hasRestoredAutosaveRef.current = true;
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    })();
+  }, []);
+
+  // Autosave: qualquer mudança em features/folhas vira um rascunho salvo no
+  // IndexedDB (debounced), pra sobreviver a um reload/fechar sem "Salvar"
+  // manual — ver justificativa do guard em hasRestoredAutosaveRef acima.
+  useEffect(() => {
+    if (!hasRestoredAutosaveRef.current) return;
+    scheduleDraftSave("modelador", serializeProject(features, drawingSheets, partProperties));
+  }, [features, drawingSheets, partProperties]);
+
+  // Flush imediato ao fechar/recarregar a aba — ver flushDraftSave.
+  useEffect(() => {
+    function handlePageHide() {
+      if (!hasRestoredAutosaveRef.current) return;
+      flushDraftSave("modelador", serializeProject(features, drawingSheets, partProperties));
+    }
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, [features, drawingSheets, partProperties]);
 
   // Reconstrói o sólido do zero sempre que o histórico de features muda —
   // mais simples e mais seguro do que tentar atualizar incrementalmente.
@@ -2076,7 +2200,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // escolher pasta de verdade, então só pergunta o nome via prompt e cai no
   // download de sempre.
   const handleSaveProjectAs = useCallback(async () => {
-    const json = serializeProject(features, drawingSheets);
+    const json = serializeProject(features, drawingSheets, partProperties);
     const suggestedName = currentFileName ?? `projeto${NATIVE_FILE_EXTENSION}`;
 
     if (isFileSystemAccessSupported()) {
@@ -2087,6 +2211,12 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       await writeToFileHandle(handle, json);
       setCurrentFileHandle(handle);
       setCurrentFileName(handle.name);
+      // "Salvar Como" bifurca num arquivo novo — "Voltar pra Montagem"
+      // (que salvaria NESTE handle, não mais no da peça vinculada
+      // original) deixaria de fazer sentido, então encerra o modo de
+      // edição em contexto se houver um ativo.
+      setEditingInContext(null);
+      rememberCurrentFileHandle("modelador", handle);
       showNotice(`"${handle.name}" salvo.`);
       return;
     }
@@ -2096,6 +2226,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     const result = await saveOrDownload(projectFolder, json, filename);
     setCurrentFileHandle(null);
     setCurrentFileName(filename);
+    setEditingInContext(null);
+    rememberCurrentFileHandle("modelador", null);
     showNotice(result === "folder" ? "Projeto salvo na pasta selecionada." : "Projeto baixado.");
   }, [features, drawingSheets, currentFileName, projectFolder, showNotice]);
 
@@ -2110,7 +2242,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     }
 
     try {
-      await writeToFileHandle(currentFileHandle, serializeProject(features, drawingSheets));
+      await writeToFileHandle(currentFileHandle, serializeProject(features, drawingSheets, partProperties));
       showNotice(`"${currentFileHandle.name}" salvo.`);
     } catch {
       // Handle pode ter ficado inválido (arquivo movido/apagado fora do
@@ -2120,6 +2252,64 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       await handleSaveProjectAs();
     }
   }, [features, drawingSheets, currentFileHandle, handleSaveProjectAs, showNotice]);
+
+  // Fecha a peça atual (ao estilo Inventor: descarta o documento aberto,
+  // volta pra um Modelador vazio) — sem isso, a única forma de "largar" uma
+  // peça era abrir outra por cima (troca o conteúdo, mas o handle do
+  // arquivo anterior e o rascunho automático dela continuavam guardados) ou
+  // deixar a mesma peça sempre restaurando sozinha a cada reload. Também
+  // apaga o rascunho automático (clearDraft) — sem isso ela voltaria
+  // sozinha na próxima vez que a página abrisse, apesar de "fechada".
+  const handleCloseProject = useCallback(() => {
+    if (features.length === 0 && drawingSheets.length === 0 && !currentFileName) return;
+    if (
+      !window.confirm(
+        "Fechar a peça atual? Qualquer alteração que ainda não esteja salva num arquivo será perdida (o rascunho automático também é apagado)."
+      )
+    ) {
+      return;
+    }
+    useFeatureStore.setState({ features: [] });
+    useDrawingStore.getState().loadSheets([]);
+    usePartPropertiesStore.getState().clear();
+    useUndoStore.setState({ past: [], future: [] });
+    clearSketch();
+    setEditingSketchId(null);
+    setSketching(false);
+    setPickingPlane(false);
+    setCurrentFileHandle(null);
+    setCurrentFileName(null);
+    setEditingInContext(null);
+    rememberCurrentFileHandle("modelador", null);
+    clearDraft("modelador").catch((err) => console.error("Falha ao apagar rascunho automático:", err));
+    showNotice("Peça fechada.");
+  }, [features.length, drawingSheets.length, currentFileName, clearSketch, showNotice]);
+
+  // "Voltar pra Montagem" (ao estilo do "Return" do Inventor, na edição em
+  // contexto): salva a peça de volta no MESMO arquivo vinculado (se tiver
+  // handle) e navega de volta — a Montagem, ao remontar, relê o arquivo do
+  // zero (resolveLinkedFile) e já mostra a peça atualizada sozinha, sem
+  // precisar de nenhum sinal explícito daqui além do arquivo em si já estar
+  // salvo. Se salvar falhar (handle inválido, permissão negada), pergunta
+  // se quer voltar mesmo assim — só perde a última alteração, não trava.
+  const handleReturnToAssembly = useCallback(async () => {
+    if (!editingInContext) return;
+    if (currentFileHandle) {
+      try {
+        await writeToFileHandle(currentFileHandle, serializeProject(features, drawingSheets, partProperties));
+      } catch (err) {
+        const proceed = window.confirm(
+          `Não foi possível salvar "${currentFileHandle.name}" automaticamente (${
+            err instanceof Error ? err.message : "erro desconhecido"
+          }). Voltar pra Montagem mesmo assim, sem salvar essa alteração?`
+        );
+        if (!proceed) return;
+      }
+    }
+    requestReturnSelection(editingInContext.instanceId);
+    setEditingInContext(null);
+    router.push("/montagem");
+  }, [editingInContext, currentFileHandle, features, drawingSheets, router]);
 
   // Ctrl+S salva no arquivo já aberto (ou pede onde salvar, na primeira
   // vez); Ctrl+Shift+S é "Salvar Como" — convenção padrão (Word, VSCode
@@ -2150,12 +2340,18 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       const loaded = parseProject(await picked.file.text());
       useFeatureStore.setState({ features: loaded.features });
       useDrawingStore.getState().loadSheets(loaded.drawingSheets);
+      usePartPropertiesStore.getState().load(loaded.properties);
       clearSketch();
       setEditingSketchId(null);
       setSketching(false);
       setPickingPlane(false);
       setCurrentFileHandle(picked.handle);
       setCurrentFileName(picked.file.name);
+      // Abrir outro arquivo manualmente troca de peça de vez — encerra o
+      // modo de edição em contexto se houver um ativo (senão "Voltar pra
+      // Montagem" salvaria ESTE arquivo novo por cima do vínculo antigo).
+      setEditingInContext(null);
+      rememberCurrentFileHandle("modelador", picked.handle);
       showNotice(`Projeto "${picked.file.name}" aberto.`);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "Erro ao abrir o projeto.");
@@ -2175,6 +2371,41 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     const result = await saveOrDownload(projectFolder, blob, "esboco.dxf");
     showNotice(result === "folder" ? "DXF salvo na pasta selecionada." : "DXF baixado.");
   }, [hasFinishedSketch, shapes, points, projectFolder, showNotice]);
+
+  // "Atualizar" das propriedades físicas, ao estilo do botão Update da aba
+  // Physical das iProperties do Inventor: reconstrói a peça e mede volume/
+  // área/massa/caixa envolvente na hora. Deliberadamente sob demanda (não a
+  // cada alteração do modelo) — medir passa pelo OpenCascade e é caro.
+  //
+  // Reconstrói com flatten:false de propósito, mesmo que a tela esteja
+  // mostrando a chapa planificada: a massa que interessa é a da peça
+  // DOBRADA, a peça real que vai ser pesada/orçada.
+  const handleMeasurePart = useCallback(async (): Promise<PhysicalProperties | null> => {
+    if (features.length === 0) return null;
+    await loadOpenCascade();
+    const solid = rebuildModel(features, { flatten: false });
+    if (!solid) return null;
+    try {
+      return measurePhysicalProperties(solid, partProperties.density);
+    } finally {
+      solid.delete();
+    }
+  }, [features, partProperties.density]);
+
+  // Fonte de geometria da folha de desenho DESTA peça — a montagem passa
+  // uma equivalente montada a partir das peças vinculadas (ver
+  // AssemblyWorkspace). Sem lista de peças aqui: uma folha de peça única
+  // não tem o que listar (a BOM é coisa de montagem, igual no Inventor).
+  const partSheetSource = useMemo(
+    () => ({
+      kind: "peca" as const,
+      buildShape: ({ flatten }: { flatten: boolean }) => rebuildModel(features, { flatten }),
+      signature: JSON.stringify(features),
+      supportsFlatten: features.some((f) => f.type === "sheetMetal"),
+      emptyMessage: "Nenhum sólido modelado ainda — crie a peça no Modelador antes de adicionar uma vista.",
+    }),
+    [features]
+  );
 
   return (
     <div className="flex h-dvh flex-col bg-background text-foreground">
@@ -2209,6 +2440,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             {currentFileName}
           </span>
         )}
+        {editingInContext && (
+          <span
+            className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary"
+            title={`Peça vinculada à Montagem como "${editingInContext.instanceLabel}"`}
+          >
+            editando da Montagem
+          </span>
+        )}
         <span className="text-xs text-chrome-text-subtle">
           {sketching
             ? `Modo esboço — ${isBasePlane(activePlane) ? "plano XY" : "face selecionada"}`
@@ -2219,6 +2458,26 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         )}
 
         <div className="ml-auto flex flex-wrap items-center gap-1">
+          {editingInContext ? (
+            <button
+              type="button"
+              onClick={handleReturnToAssembly}
+              title={`Salvar "${editingInContext.instanceLabel}" e voltar pra Montagem`}
+              className="rounded-lg bg-primary px-2.5 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90"
+            >
+              ↩ Voltar pra Montagem
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => router.push("/montagem")}
+              title="Ir para o ambiente de Montagem"
+              className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+            >
+              Abrir Montagem
+            </button>
+          )}
+          <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
           <button
             type="button"
             onClick={handleSelectFolder}
@@ -2226,6 +2485,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             className="max-w-[9rem] truncate rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
           >
             {projectFolder ? projectFolder.name : "Selecionar Pasta"}
+          </button>
+          <button
+            type="button"
+            onClick={handleCloseProject}
+            title="Fechar a peça atual (volta pro Modelador vazio)"
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            Fechar
           </button>
           <button
             type="button"
@@ -2294,6 +2561,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               Desenho
             </button>
           </div>
+          <button
+            type="button"
+            onClick={() => setPropertiesOpen(true)}
+            title="Propriedades da peça (código, material, massa, responsáveis) — alimentam a Lista de Peças das montagens"
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            Propriedades
+          </button>
           <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
           <button
             type="button"
@@ -2333,7 +2608,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       </header>
 
       {mode === "desenho" ? (
-        <DrawingSheetWorkspace />
+        <DrawingSheetWorkspace source={partSheetSource} />
       ) : (
         <>
       {/* Altura ajustável (arraste a divisória logo abaixo) — sem isso, o
@@ -3594,7 +3869,235 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       </div>
         </>
       )}
+
+      {propertiesOpen && (
+        <PartPropertiesDialog
+          properties={partProperties}
+          onChange={updatePartProperties}
+          onMeasure={handleMeasurePart}
+          onClose={() => setPropertiesOpen(false)}
+        />
+      )}
     </div>
+  );
+}
+
+// "iProperties" da peça, ao estilo Inventor — o que aparece na Lista de
+// Peças de qualquer montagem que use esta peça (ver src/lib/drawing/bom.ts).
+// A densidade fica junto do material porque é dela que sai a MASSA
+// calculada na lista: massa = volume do sólido × densidade.
+function PartPropertiesDialog({
+  properties,
+  onChange,
+  onMeasure,
+  onClose,
+}: {
+  properties: PartProperties;
+  onChange: (patch: Partial<PartProperties>) => void;
+  onMeasure: () => Promise<PhysicalProperties | null>;
+  onClose: () => void;
+}) {
+  const field = "mt-0.5 w-full rounded-lg border border-primary-200 px-2 py-1 text-sm text-primary-900";
+  // Igual ao Inventor: começa vazio ("nunca calculado") e só preenche
+  // quando alguém aperta Atualizar — nada é medido ao abrir o painel.
+  const [physical, setPhysical] = useState<PhysicalProperties | null>(null);
+  const [measuring, setMeasuring] = useState(false);
+  const [measureError, setMeasureError] = useState<string | null>(null);
+  // Unidade só de apresentação — a medição em si é sempre em mm²/mm³ (ver
+  // physicalProperties.ts), então trocar aqui reformata na hora, sem
+  // precisar recalcular nada.
+  const [areaUnit, setAreaUnit] = useState<AreaUnit>(DEFAULT_AREA_UNIT);
+  const [volumeUnit, setVolumeUnit] = useState<VolumeUnit>(DEFAULT_VOLUME_UNIT);
+
+  async function handleUpdate() {
+    setMeasuring(true);
+    setMeasureError(null);
+    try {
+      const result = await onMeasure();
+      if (!result) {
+        setMeasureError("Nenhum sólido modelado ainda — crie a peça antes de calcular a massa.");
+        setPhysical(null);
+        return;
+      }
+      setPhysical(result);
+    } catch (err) {
+      setMeasureError(describeThrown(err));
+    } finally {
+      setMeasuring(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/30" onClick={onClose} />
+      <div className="fixed left-1/2 top-1/2 z-50 max-h-[85vh] w-[30rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-primary-100 bg-white p-5 shadow-2xl">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-base font-semibold text-primary-900">Propriedades da Peça</h3>
+          <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-primary-500 hover:bg-primary-50">
+            ✕
+          </button>
+        </div>
+        <p className="mb-3 text-xs text-primary-500">
+          Estes dados viajam dentro do arquivo da peça (.eks3d) e alimentam a Lista de Peças das montagens que a
+          referenciam — igual às iProperties do Inventor.
+        </p>
+
+        <div className="grid grid-cols-2 gap-3 text-xs text-primary-600">
+          <label className="col-span-1">
+            Nº da peça / código
+            <input value={properties.partNumber} onChange={(e) => onChange({ partNumber: e.target.value })} className={field} />
+          </label>
+          <label className="col-span-1">
+            Fornecedor
+            <input value={properties.vendor} onChange={(e) => onChange({ vendor: e.target.value })} className={field} />
+          </label>
+          <label className="col-span-2">
+            Descrição
+            <input value={properties.description} onChange={(e) => onChange({ description: e.target.value })} className={field} />
+          </label>
+
+          <label className="col-span-1">
+            Material
+            <input
+              list="material-presets"
+              value={properties.material}
+              onChange={(e) => {
+                const preset = MATERIAL_PRESETS.find((m) => m.name === e.target.value);
+                // Escolher um material da lista já preenche a densidade
+                // correspondente — digitar um material livre mantém a
+                // densidade que estiver lá (pode ser ajustada à mão).
+                onChange(preset ? { material: e.target.value, density: preset.density } : { material: e.target.value });
+              }}
+              className={field}
+            />
+            <datalist id="material-presets">
+              {MATERIAL_PRESETS.map((m) => (
+                <option key={m.name} value={m.name} />
+              ))}
+            </datalist>
+          </label>
+          <label className="col-span-1">
+            Densidade (kg/m³)
+            <input
+              type="number"
+              step={10}
+              value={properties.density}
+              onChange={(e) => onChange({ density: Math.max(0, Number(e.target.value)) })}
+              className={field}
+            />
+          </label>
+
+          <label className="col-span-1">
+            Desenhista
+            <input value={properties.designer} onChange={(e) => onChange({ designer: e.target.value })} className={field} />
+          </label>
+          <label className="col-span-1">
+            Engenheiro responsável
+            <input value={properties.engineer} onChange={(e) => onChange({ engineer: e.target.value })} className={field} />
+          </label>
+
+          <label className="col-span-2">
+            Observações
+            <textarea
+              rows={2}
+              value={properties.notes}
+              onChange={(e) => onChange({ notes: e.target.value })}
+              className={field}
+            />
+          </label>
+        </div>
+
+        {/* Propriedades físicas — calculadas do sólido sob demanda, ao
+            estilo do botão Update da aba Physical do Inventor. */}
+        <div className="mt-4 rounded-xl border border-primary-100 bg-primary-50/50 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <h4 className="text-sm font-semibold text-primary-900">Propriedades físicas</h4>
+            <button
+              type="button"
+              onClick={handleUpdate}
+              disabled={measuring}
+              className="rounded-lg bg-primary px-3 py-1 text-xs font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            >
+              {measuring ? "Calculando…" : "Atualizar"}
+            </button>
+          </div>
+
+          {measureError && <p className="mb-2 text-xs text-error">{measureError}</p>}
+
+          {physical ? (
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+              <div className="col-span-2 flex justify-between border-b border-primary-100 pb-1">
+                <dt className="font-semibold text-primary-700">Massa</dt>
+                <dd className="font-semibold text-primary-900">{formatMass(physical.massKg)}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-primary-600">Volume</dt>
+                <dd className="flex items-center gap-1 text-primary-900">
+                  {convertVolume(physical.volumeMm3, volumeUnit)}
+                  <select
+                    value={volumeUnit}
+                    onChange={(e) => setVolumeUnit(e.target.value as VolumeUnit)}
+                    className="rounded border border-primary-200 bg-white px-1 py-0.5 text-[11px]"
+                  >
+                    {(Object.keys(VOLUME_UNIT_LABELS) as VolumeUnit[]).map((unit) => (
+                      <option key={unit} value={unit}>
+                        {VOLUME_UNIT_LABELS[unit]}
+                      </option>
+                    ))}
+                  </select>
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-primary-600">Área</dt>
+                <dd className="flex items-center gap-1 text-primary-900">
+                  {convertArea(physical.areaMm2, areaUnit)}
+                  <select
+                    value={areaUnit}
+                    onChange={(e) => setAreaUnit(e.target.value as AreaUnit)}
+                    className="rounded border border-primary-200 bg-white px-1 py-0.5 text-[11px]"
+                  >
+                    {(Object.keys(AREA_UNIT_LABELS) as AreaUnit[]).map((unit) => (
+                      <option key={unit} value={unit}>
+                        {AREA_UNIT_LABELS[unit]}
+                      </option>
+                    ))}
+                  </select>
+                </dd>
+              </div>
+              <div className="col-span-2 flex justify-between">
+                <dt className="text-primary-600">Dimensões (C × L × A)</dt>
+                <dd className="text-primary-900">
+                  {formatNumberPtBr(physical.length, 1)} × {formatNumberPtBr(physical.width, 1)} ×{" "}
+                  {formatNumberPtBr(physical.height, 1)} mm
+                </dd>
+              </div>
+              {physical.massKg === null && (
+                <p className="col-span-2 mt-1 text-[11px] text-amber-700">
+                  Sem densidade definida — preencha o material/densidade acima para calcular a massa.
+                </p>
+              )}
+            </dl>
+          ) : (
+            !measureError && (
+              <p className="text-xs text-primary-500">
+                Clique em <strong>Atualizar</strong> para calcular massa, volume, área e dimensões a partir do modelo
+                atual.
+              </p>
+            )
+          )}
+        </div>
+
+        <div className="mt-4 text-right">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-primary-foreground hover:opacity-90"
+          >
+            Fechar
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
 

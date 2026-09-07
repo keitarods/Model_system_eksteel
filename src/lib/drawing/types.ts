@@ -1,3 +1,5 @@
+import type { BomTable, BomTemplate } from "./bom";
+
 // Folha de desenho técnico 2D — gerada a partir da peça 3D atual (mesmo
 // espírito do ambiente de Desenho do Inventor, só que dentro do mesmo
 // projeto/arquivo em vez de um .idw separado vinculado ao .ipt; ver
@@ -171,6 +173,12 @@ export type DrawingSheet = {
   name: string;
   size: SheetSize;
   orientation: SheetOrientation;
+  // Listas de Peças (BOM) colocadas nesta folha — ver src/lib/drawing/bom.ts.
+  // Só fazem sentido numa folha de MONTAGEM (a de peça única não tem o que
+  // listar), mas o campo mora na folha genérica porque é a folha que é
+  // salva/desenhada/exportada. Opcional: folhas salvas antes da lista
+  // existir não têm o campo (normalizado pra [] em loadSheets).
+  bomTables?: BomTable[];
   // Escala padrão da folha (ex.: 1 = "1:1") — usada como escala inicial de
   // toda vista NOVA colocada nela (Adicionar Vista / Inserir Vista / Seção
   // de Corte; Vista Projetada é a exceção, sempre herda a escala da vista-
@@ -194,6 +202,10 @@ export type SheetTemplate = {
   orientation: SheetOrientation;
   scale: number;
   titleBlock: TitleBlockInfo;
+  // Moldura da Lista de Peças (colunas/medidas, sem linhas) — igual ao
+  // resto do modelo, é o que se padroniza entre desenhos. Opcional:
+  // modelos salvos antes da lista existir não têm.
+  bom?: BomTemplate;
 };
 
 // Dimensões físicas de cada tamanho de folha, em mm, sempre na orientação

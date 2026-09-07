@@ -3,10 +3,35 @@
 import { useMemo, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 import { svg2pdf } from "svg2pdf.js";
-import { useFeatureStore } from "@/lib/features/store";
-import { useDrawingStore, createSheetObject, type AnnotationPatch } from "@/lib/drawing/store";
+import type { AnyShape } from "replicad";
+import type { StoreApi, UseBoundStore } from "zustand";
+import { useDrawingStore, createSheetObject, type AnnotationPatch, type DrawingState } from "@/lib/drawing/store";
+import {
+  bomTableTopLeft,
+  bomTableWidth,
+  bomTableHeight,
+  bomTemplateFrom,
+  cellKey,
+  cellValue,
+  createBomColumn,
+  createBomTable,
+  defaultColumnLabel,
+  refreshBomRows,
+  BOM_COLUMN_LABELS,
+  type BomColumn,
+  type BomColumnKey,
+  type BomSourcePart,
+  type BomTable,
+} from "@/lib/drawing/bom";
+import {
+  AREA_UNIT_LABELS,
+  DEFAULT_AREA_UNIT,
+  DEFAULT_VOLUME_UNIT,
+  VOLUME_UNIT_LABELS,
+  type AreaUnit,
+  type VolumeUnit,
+} from "@/lib/replicad/physicalProperties";
 import { loadOpenCascade } from "@/lib/replicad/opencascade";
-import { rebuildModel } from "@/lib/replicad/build-model";
 import { buildDrawingView, buildSectionView, suggestScale, scaleToLabel } from "@/lib/replicad/technicalDrawing";
 import { createId, distance } from "@/lib/sketch/render";
 import { projectOntoSegment } from "@/lib/sketch/hitTest";
@@ -108,11 +133,39 @@ type LineHit = { viewId: string; a: Point; b: Point };
 type DragState =
   | { kind: "view"; viewId: string; startClientX: number; startClientY: number; origX: number; origY: number }
   | { kind: "dimension"; dimensionId: string; nx: number; ny: number; startClientX: number; startClientY: number; startOffset: number }
-  | { kind: "annotation"; annotationId: string; startClientX: number; startClientY: number; orig: AnnotationPatch };
+  | { kind: "annotation"; annotationId: string; startClientX: number; startClientY: number; orig: AnnotationPatch }
+  | { kind: "bom"; tableId: string; startClientX: number; startClientY: number; origX: number; origY: number };
 
-function useActiveSheet(): { sheet: DrawingSheet | null; sheets: DrawingSheet[] } {
-  const sheets = useDrawingStore((s) => s.sheets);
-  const activeSheetId = useDrawingStore((s) => s.activeSheetId);
+// Store de folhas que esta instância do ambiente de Desenho manipula — o
+// Modelador passa a da peça, a Montagem passa a dela (ver createDrawingStore
+// em src/lib/drawing/store.ts). É um hook do zustand passado como prop, por
+// isso o nome `useStore`.
+type SheetStore = UseBoundStore<StoreApi<DrawingState>>;
+
+// De onde sai a geometria projetada nas vistas — a única coisa que difere
+// entre uma folha de PEÇA e uma de MONTAGEM. O ambiente de Desenho em si
+// (vistas, cotas, anotações, bloco de título, PDF) é idêntico nos dois casos.
+export type SheetShapeSource = {
+  kind: "peca" | "montagem";
+  // Constrói a shape a projetar. `flatten` só faz sentido pra peça de chapa
+  // (planificada vs. dobrada); a montagem ignora. Devolver null = nada
+  // modelado/vinculado ainda, e a mensagem de `emptyMessage` é mostrada.
+  buildShape: (options: { flatten: boolean }) => AnyShape | null;
+  // Assinatura do modelo atual — carimbada em cada vista gerada e comparada
+  // depois pra sinalizar "vista desatualizada" (ver isViewStale).
+  signature: string;
+  // Habilita o par planificada/dobrada no seletor de vista (só peça de chapa).
+  supportsFlatten: boolean;
+  emptyMessage: string;
+  // Só montagem: peças resolvidas (instância + sólido + iProperties) pra
+  // montar/atualizar a Lista de Peças. Ausente = a ferramenta de lista nem
+  // aparece na barra (uma folha de peça única não tem o que listar).
+  bomParts?: () => BomSourcePart[];
+};
+
+function useActiveSheet(useStore: SheetStore): { sheet: DrawingSheet | null; sheets: DrawingSheet[] } {
+  const sheets = useStore((s) => s.sheets);
+  const activeSheetId = useStore((s) => s.activeSheetId);
   const sheet = sheets.find((s) => s.id === activeSheetId) ?? sheets[0] ?? null;
   return { sheet, sheets };
 }
@@ -253,36 +306,44 @@ function nextSectionLetter(sheet: DrawingSheet): string {
 
 const HATCH_PATTERN_ID = "section-hatch";
 
-export function DrawingSheetWorkspace() {
-  const features = useFeatureStore((s) => s.features);
-  const { sheet: activeSheet, sheets } = useActiveSheet();
-  const addSheet = useDrawingStore((s) => s.addSheet);
-  const removeSheet = useDrawingStore((s) => s.removeSheet);
-  const setActiveSheet = useDrawingStore((s) => s.setActiveSheet);
-  const renameSheet = useDrawingStore((s) => s.renameSheet);
-  const setSheetSize = useDrawingStore((s) => s.setSheetSize);
-  const setSheetOrientation = useDrawingStore((s) => s.setSheetOrientation);
-  const setSheetScale = useDrawingStore((s) => s.setSheetScale);
-  const addView = useDrawingStore((s) => s.addView);
-  const updateView = useDrawingStore((s) => s.updateView);
-  const removeView = useDrawingStore((s) => s.removeView);
-  const moveView = useDrawingStore((s) => s.moveView);
-  const addDimension = useDrawingStore((s) => s.addDimension);
-  const updateDimension = useDrawingStore((s) => s.updateDimension);
-  const removeDimension = useDrawingStore((s) => s.removeDimension);
-  const addAnnotation = useDrawingStore((s) => s.addAnnotation);
-  const updateAnnotation = useDrawingStore((s) => s.updateAnnotation);
-  const removeAnnotation = useDrawingStore((s) => s.removeAnnotation);
-  const updateTitleBlock = useDrawingStore((s) => s.updateTitleBlock);
-  const applyTemplate = useDrawingStore((s) => s.applyTemplate);
+export function DrawingSheetWorkspace({
+  useStore = useDrawingStore,
+  source,
+}: {
+  useStore?: SheetStore;
+  source: SheetShapeSource;
+}) {
+  const { sheet: activeSheet, sheets } = useActiveSheet(useStore);
+  const addSheet = useStore((s) => s.addSheet);
+  const removeSheet = useStore((s) => s.removeSheet);
+  const setActiveSheet = useStore((s) => s.setActiveSheet);
+  const renameSheet = useStore((s) => s.renameSheet);
+  const setSheetSize = useStore((s) => s.setSheetSize);
+  const setSheetOrientation = useStore((s) => s.setSheetOrientation);
+  const setSheetScale = useStore((s) => s.setSheetScale);
+  const addView = useStore((s) => s.addView);
+  const updateView = useStore((s) => s.updateView);
+  const removeView = useStore((s) => s.removeView);
+  const moveView = useStore((s) => s.moveView);
+  const addDimension = useStore((s) => s.addDimension);
+  const updateDimension = useStore((s) => s.updateDimension);
+  const removeDimension = useStore((s) => s.removeDimension);
+  const addAnnotation = useStore((s) => s.addAnnotation);
+  const updateAnnotation = useStore((s) => s.updateAnnotation);
+  const removeAnnotation = useStore((s) => s.removeAnnotation);
+  const updateTitleBlock = useStore((s) => s.updateTitleBlock);
+  const applyTemplate = useStore((s) => s.applyTemplate);
+  const addBomTable = useStore((s) => s.addBomTable);
+  const updateBomTable = useStore((s) => s.updateBomTable);
+  const removeBomTable = useStore((s) => s.removeBomTable);
+  const setBomCell = useStore((s) => s.setBomCell);
 
-  const hasSheetMetal = features.some((f) => f.type === "sheetMetal");
-  // Assinatura da árvore de features atual — comparada com
-  // DrawingView.sourceSignature pra saber quais vistas ficaram
-  // desatualizadas (ver handleUpdateView/isViewStale). Recalcula só quando
-  // `features` muda de referência (rebuildModel já é caro o bastante sem
-  // rodar JSON.stringify a cada render à toa).
-  const featuresSignature = useMemo(() => JSON.stringify(features), [features]);
+  const hasSheetMetal = source.supportsFlatten;
+  // Assinatura do modelo atual — comparada com DrawingView.sourceSignature
+  // pra saber quais vistas ficaram desatualizadas (ver handleUpdateView/
+  // isViewStale). Quem calcula é a fonte (features da peça, ou instâncias +
+  // posições da montagem).
+  const featuresSignature = source.signature;
 
   const [pendingFlattened, setPendingFlattened] = useState(false);
   const [computing, setComputing] = useState(false);
@@ -318,6 +379,14 @@ export function DrawingSheetWorkspace() {
   const [dragPreview, setDragPreview] = useState<{ viewId: string; x: number; y: number } | null>(null);
   const [dimensionDragPreview, setDimensionDragPreview] = useState<{ dimensionId: string; offset: number } | null>(null);
   const [annotationDragPreview, setAnnotationDragPreview] = useState<{ annotationId: string; patch: AnnotationPatch } | null>(null);
+  const [bomDragPreview, setBomDragPreview] = useState<{ tableId: string; x: number; y: number } | null>(null);
+  // Célula da Lista de Peças em edição (clique numa célula abre um input
+  // por cima dela) — o valor digitado vira um `override` da linha, ver
+  // setBomCell/bom.ts.
+  const [editingCell, setEditingCell] = useState<{ tableId: string; rowId: string; key: string; value: string } | null>(null);
+  // Painel lateral: alterna entre o formulário do bloco de título e o
+  // editor de colunas da lista (o "template" da BOM).
+  const [sidePanel, setSidePanel] = useState<"titulo" | "lista">("titulo");
 
   const sheetDims = activeSheet ? sheetDimensionsMm(activeSheet) : { width: 297, height: 210 };
 
@@ -365,9 +434,9 @@ export function DrawingSheetWorkspace() {
     let solid = null;
     try {
       await loadOpenCascade();
-      solid = rebuildModel(features, { flatten: flattened });
+      solid = source.buildShape({ flatten: flattened });
       if (!solid) {
-        setErrorMessage("Nenhum sólido modelado ainda — crie a peça no Modelador antes de adicionar uma vista.");
+        setErrorMessage(source.emptyMessage);
         return null;
       }
       const raw = buildDrawingView(solid, orientation, flattened);
@@ -450,9 +519,9 @@ export function DrawingSheetWorkspace() {
     let solid = null;
     try {
       await loadOpenCascade();
-      solid = rebuildModel(features, { flatten: baseView.flattened });
+      solid = source.buildShape({ flatten: baseView.flattened });
       if (!solid) {
-        setErrorMessage("Nenhum sólido modelado ainda — crie a peça no Modelador antes de cortar uma seção.");
+        setErrorMessage(source.emptyMessage);
         return;
       }
       const raw = buildSectionView(solid, { baseViewId: baseView.id, cutLine }, baseView.orientation);
@@ -494,7 +563,7 @@ export function DrawingSheetWorkspace() {
       let solid = null;
       try {
         await loadOpenCascade();
-        solid = rebuildModel(features, { flatten: baseView.flattened });
+        solid = source.buildShape({ flatten: baseView.flattened });
         if (!solid) return;
         const raw = buildSectionView(solid, { baseViewId: baseView.id, cutLine: view.sectionInfo.cutLine }, baseView.orientation);
         if (!raw) return;
@@ -524,6 +593,55 @@ export function DrawingSheetWorkspace() {
     });
   }
 
+  // --- Lista de Peças (BOM) --------------------------------------------
+  // Só existe em folha de MONTAGEM (source.bomParts presente). Ao estilo
+  // Inventor: a lista nasce encostada em cima do bloco de título, cresce
+  // pra cima conforme ganha linhas, e as linhas são um snapshot editável —
+  // "Atualizar Lista" recalcula os valores automáticos sem apagar o que foi
+  // digitado à mão (ver refreshBomRows).
+  function handleInsertBom() {
+    if (!activeSheet || !source.bomParts) return;
+    setErrorMessage(null);
+    try {
+      const rows = refreshBomRows([], source.bomParts());
+      // Canto inferior direito da área útil, logo ACIMA do bloco de título.
+      const table = createBomTable(
+        sheetDims.width - SHEET_MARGIN_MM,
+        sheetDims.height - SHEET_MARGIN_MM - TITLE_BLOCK_HEIGHT_MM - 2,
+        rows
+      );
+      // x é o canto ESQUERDO da tabela — recua pela largura total pra ela
+      // ficar alinhada à direita, igual o bloco de título logo abaixo.
+      addBomTable(activeSheet.id, { ...table, x: table.x - bomTableWidth(table) });
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Erro ao gerar a lista de peças.");
+    }
+  }
+
+  function handleRefreshBom(table: BomTable) {
+    if (!activeSheet || !source.bomParts) return;
+    setErrorMessage(null);
+    try {
+      updateBomTable(activeSheet.id, table.id, { rows: refreshBomRows(table.rows, source.bomParts()) });
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Erro ao atualizar a lista de peças.");
+    }
+  }
+
+  function handleBomPointerDown(e: React.PointerEvent<SVGElement>, table: BomTable) {
+    if (dimensionMode || annotationMode || projectionMode || sectionMode) return;
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    dragRef.current = {
+      kind: "bom",
+      tableId: table.id,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      origX: table.x,
+      origY: table.y,
+    };
+  }
+
   // "Modelo de folha" = só tamanho/orientação/bloco de título (sem
   // vistas/cotas, que são da peça) — arquivo próprio (.eksfolha), pra
   // reaproveitar o padrão da empresa em qualquer projeto novo sem
@@ -537,6 +655,9 @@ export function DrawingSheetWorkspace() {
       orientation: activeSheet.orientation,
       scale: activeSheet.scale,
       titleBlock: activeSheet.titleBlock,
+      // Só a moldura da lista (colunas/medidas), nunca as linhas — essas
+      // são sempre da montagem específica, ver bomTemplateFrom.
+      bom: activeSheet.bomTables?.[0] ? bomTemplateFrom(activeSheet.bomTables[0]) : undefined,
     };
     const json = serializeSheetTemplate(template);
     const suggestedName = `modelo-folha${SHEET_TEMPLATE_EXTENSION}`;
@@ -660,6 +781,8 @@ export function DrawingSheetWorkspace() {
     } else if (drag.kind === "dimension") {
       const delta = dx * drag.nx + dy * drag.ny;
       setDimensionDragPreview({ dimensionId: drag.dimensionId, offset: drag.startOffset + delta });
+    } else if (drag.kind === "bom") {
+      setBomDragPreview({ tableId: drag.tableId, x: drag.origX + dx, y: drag.origY + dy });
     } else {
       const patch: AnnotationPatch =
         drag.orig.x !== undefined
@@ -682,11 +805,14 @@ export function DrawingSheetWorkspace() {
       updateDimension(activeSheet.id, drag.dimensionId, { offset: dimensionDragPreview.offset });
     } else if (drag?.kind === "annotation" && annotationDragPreview && activeSheet) {
       updateAnnotation(activeSheet.id, drag.annotationId, annotationDragPreview.patch);
+    } else if (drag?.kind === "bom" && bomDragPreview && activeSheet) {
+      updateBomTable(activeSheet.id, drag.tableId, { x: bomDragPreview.x, y: bomDragPreview.y });
     }
     dragRef.current = null;
     setDragPreview(null);
     setDimensionDragPreview(null);
     setAnnotationDragPreview(null);
+    setBomDragPreview(null);
   }
 
   // Botão direito em qualquer ponto da folha abre o menu "Inserir Vista" —
@@ -1131,6 +1257,22 @@ export function DrawingSheetWorkspace() {
 
               {pendingWeldPoint && <circle cx={pendingWeldPoint.x} cy={pendingWeldPoint.y} r={1} fill="#e53935" />}
 
+              {(activeSheet.bomTables ?? []).map((table) => (
+                <BomTableSvg
+                  key={table.id}
+                  table={table}
+                  effective={bomDragPreview?.tableId === table.id ? bomDragPreview : null}
+                  onDragStart={handleBomPointerDown}
+                  onEditCell={(rowId, key, current) =>
+                    setEditingCell({ tableId: table.id, rowId, key, value: current })
+                  }
+                  onRefresh={() => handleRefreshBom(table)}
+                  onRemove={() => {
+                    if (window.confirm("Remover a lista de peças desta folha?")) removeBomTable(activeSheet.id, table.id);
+                  }}
+                />
+              ))}
+
               <TitleBlockSvg
                 sheet={activeSheet}
                 x={sheetDims.width - SHEET_MARGIN_MM - (sheetDims.width - SHEET_MARGIN_MM * 2) * TITLE_BLOCK_WIDTH_RATIO}
@@ -1155,11 +1297,89 @@ export function DrawingSheetWorkspace() {
 
         {activeSheet && (
           <div className="w-72 shrink-0 overflow-y-auto border-l border-primary-100 bg-white p-3 text-sm">
-            <h3 className="mb-2 font-semibold text-primary-900">Bloco de Título</h3>
-            <TitleBlockForm sheet={activeSheet} onChange={(patch) => updateTitleBlock(activeSheet.id, patch)} />
+            {source.bomParts ? (
+              <div className="mb-3 flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => setSidePanel("titulo")}
+                  className={`flex-1 rounded-lg px-2 py-1 text-xs font-semibold ${
+                    sidePanel === "titulo" ? "bg-primary text-primary-foreground" : "bg-primary-50 text-primary-700"
+                  }`}
+                >
+                  Bloco de Título
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSidePanel("lista")}
+                  className={`flex-1 rounded-lg px-2 py-1 text-xs font-semibold ${
+                    sidePanel === "lista" ? "bg-primary text-primary-foreground" : "bg-primary-50 text-primary-700"
+                  }`}
+                >
+                  Lista de Peças
+                </button>
+              </div>
+            ) : (
+              <h3 className="mb-2 font-semibold text-primary-900">Bloco de Título</h3>
+            )}
+
+            {sidePanel === "lista" && source.bomParts ? (
+              <BomColumnsForm
+                tables={activeSheet.bomTables ?? []}
+                onInsert={handleInsertBom}
+                onChange={(tableId, patch) => updateBomTable(activeSheet.id, tableId, patch)}
+                onRefresh={handleRefreshBom}
+              />
+            ) : (
+              <TitleBlockForm sheet={activeSheet} onChange={(patch) => updateTitleBlock(activeSheet.id, patch)} />
+            )}
           </div>
         )}
       </div>
+
+      {/* Edição de célula da Lista de Peças — o valor digitado vira um
+          override da linha (sobrevive a "Atualizar Lista"); apagar tudo e
+          confirmar volta a célula pro valor calculado. */}
+      {editingCell && activeSheet && (
+        <>
+          <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setEditingCell(null)} />
+          <div className="fixed left-1/2 top-1/3 z-50 w-80 -translate-x-1/2 rounded-xl border border-primary-100 bg-white p-4 shadow-2xl">
+            <h4 className="mb-2 text-sm font-semibold text-primary-900">Editar célula</h4>
+            <input
+              autoFocus
+              value={editingCell.value}
+              onChange={(e) => setEditingCell({ ...editingCell, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  setBomCell(activeSheet.id, editingCell.tableId, editingCell.rowId, editingCell.key, editingCell.value);
+                  setEditingCell(null);
+                } else if (e.key === "Escape") {
+                  setEditingCell(null);
+                }
+              }}
+              className="w-full rounded-lg border border-primary-200 px-2 py-1.5 text-sm"
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditingCell(null)}
+                className="rounded-lg bg-primary-50 px-3 py-1.5 text-xs text-primary-700"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setBomCell(activeSheet.id, editingCell.tableId, editingCell.rowId, editingCell.key, editingCell.value);
+                  setEditingCell(null);
+                }}
+                className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground"
+              >
+                Aplicar
+              </button>
+            </div>
+          </div>
+        </>
+      )}
 
       {contextMenu && (
         <>
@@ -1704,6 +1924,443 @@ function LabelValue({
       <tspan fontWeight={700}>{label}: </tspan>
       <tspan fontWeight={400}>{value || "—"}</tspan>
     </text>
+  );
+}
+
+// Lista de Peças desenhada na folha — tabela simples (cabeçalho + linhas),
+// arrastável pelo título, com clique numa célula pra editar o texto dela.
+// Desenhada de baixo pra cima quando growUp (padrão): a âncora (x,y) é o
+// canto INFERIOR esquerdo, então acrescentar peças na montagem faz a lista
+// crescer PRA CIMA em vez de invadir o bloco de título logo abaixo — mesmo
+// comportamento da Parts List do Inventor ancorada no canto.
+function BomTableSvg({
+  table,
+  effective,
+  onDragStart,
+  onEditCell,
+  onRefresh,
+  onRemove,
+}: {
+  table: BomTable;
+  effective: { x: number; y: number } | null;
+  onDragStart: (e: React.PointerEvent<SVGElement>, table: BomTable) => void;
+  onEditCell: (rowId: string, key: string, current: string) => void;
+  onRefresh: () => void;
+  onRemove: () => void;
+}) {
+  const drawn: BomTable = effective ? { ...table, x: effective.x, y: effective.y } : table;
+  const { x, y } = bomTableTopLeft(drawn);
+  const width = bomTableWidth(drawn);
+  const height = bomTableHeight(drawn);
+  const titleHeight = drawn.title ? drawn.headerHeight : 0;
+  const headerY = y + titleHeight;
+
+  // Deslocamento X acumulado de cada coluna, pra desenhar as divisórias e
+  // posicionar o texto sem recalcular a soma em todo lugar.
+  const offsets: number[] = [];
+  let acc = 0;
+  for (const column of drawn.columns) {
+    offsets.push(acc);
+    acc += column.width;
+  }
+
+  function textX(column: BomColumn, index: number): number {
+    const left = x + offsets[index];
+    if (column.align === "center") return left + column.width / 2;
+    if (column.align === "right") return left + column.width - 1.2;
+    return left + 1.2;
+  }
+
+  function anchorOf(column: BomColumn): "start" | "middle" | "end" {
+    return column.align === "center" ? "middle" : column.align === "right" ? "end" : "start";
+  }
+
+  return (
+    <g>
+      {drawn.title && (
+        <g onPointerDown={(e) => onDragStart(e, table)} style={{ cursor: "move" }}>
+          <rect x={x} y={y} width={width} height={titleHeight} fill="#f5f5f5" stroke="#000" strokeWidth={0.35} />
+          <text
+            x={x + width / 2}
+            y={y + titleHeight / 2 + drawn.fontSize * 0.36}
+            textAnchor="middle"
+            fontSize={drawn.fontSize * 1.15}
+            fontWeight={700}
+            fill="#000"
+          >
+            {drawn.title}
+          </text>
+        </g>
+      )}
+
+      {/* Cabeçalho das colunas */}
+      <rect x={x} y={headerY} width={width} height={drawn.headerHeight} fill="#fafafa" stroke="#000" strokeWidth={0.35} />
+      {drawn.columns.map((column, index) => (
+        <text
+          key={`h-${index}`}
+          x={textX(column, index)}
+          y={headerY + drawn.headerHeight / 2 + drawn.fontSize * 0.36}
+          textAnchor={anchorOf(column)}
+          fontSize={drawn.fontSize}
+          fontWeight={700}
+          fill="#000"
+          textLength={fitTextLength(column.label, drawn.fontSize, column.width - 2)}
+          lengthAdjust="spacingAndGlyphs"
+        >
+          {column.label}
+        </text>
+      ))}
+
+      {/* Linhas */}
+      {drawn.rows.map((row, rowIndex) => {
+        const rowY = headerY + drawn.headerHeight + rowIndex * drawn.rowHeight;
+        return (
+          <g key={row.id}>
+            <rect x={x} y={rowY} width={width} height={drawn.rowHeight} fill="none" stroke="#000" strokeWidth={0.25} />
+            {drawn.columns.map((column, index) => {
+              const key = cellKey(column);
+              const value = cellValue(row, column);
+              return (
+                <g key={`${row.id}-${index}`}>
+                  {/* Área clicável da célula (transparente) — clicar abre a
+                      edição do texto dela. */}
+                  <rect
+                    x={x + offsets[index]}
+                    y={rowY}
+                    width={column.width}
+                    height={drawn.rowHeight}
+                    fill="transparent"
+                    style={{ cursor: "text" }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEditCell(row.id, key, value);
+                    }}
+                  />
+                  <text
+                    x={textX(column, index)}
+                    y={rowY + drawn.rowHeight / 2 + drawn.fontSize * 0.36}
+                    textAnchor={anchorOf(column)}
+                    fontSize={drawn.fontSize}
+                    fill="#000"
+                    pointerEvents="none"
+                    textLength={fitTextLength(value, drawn.fontSize, column.width - 2)}
+                    lengthAdjust="spacingAndGlyphs"
+                  >
+                    {value}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+        );
+      })}
+
+      {/* Divisórias verticais, por cima de tudo (cabeçalho + linhas juntos) */}
+      {offsets.slice(1).map((offset, index) => (
+        <line
+          key={`v-${index}`}
+          x1={x + offset}
+          y1={headerY}
+          x2={x + offset}
+          y2={y + height}
+          stroke="#000"
+          strokeWidth={0.25}
+        />
+      ))}
+      <rect x={x} y={headerY} width={width} height={height - titleHeight} fill="none" stroke="#000" strokeWidth={0.5} />
+
+      {/* Botõezinhos de ação (não vão pro PDF impresso? vão — mas ficam
+          discretos, no mesmo espírito dos botões de vista/cota já
+          existentes na folha). */}
+      <g className="opacity-0 transition-opacity hover:opacity-100" style={{ pointerEvents: "all" }}>
+        <rect x={x + width - 12} y={y - 4.6} width={12} height={4.4} rx={0.8} fill="#ffffff" stroke="#90a4ae" strokeWidth={0.2} />
+        <text
+          x={x + width - 9}
+          y={y - 1.5}
+          textAnchor="middle"
+          fontSize={2.4}
+          fill="#1565c0"
+          style={{ cursor: "pointer" }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRefresh();
+          }}
+        >
+          atualizar
+        </text>
+        <text
+          x={x + width - 2}
+          y={y - 1.5}
+          textAnchor="middle"
+          fontSize={2.4}
+          fill="#c62828"
+          style={{ cursor: "pointer" }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+        >
+          ✕
+        </text>
+      </g>
+    </g>
+  );
+}
+
+// Editor do "template" da Lista de Peças: quais colunas, em que ordem, com
+// que rótulo/largura/alinhamento. É o equivalente ao "Column Chooser" +
+// "Parts List Style" do Inventor, simplificado num painel só — as colunas
+// escolhidas aqui viajam no modelo de folha (.eksfolha, ver bomTemplateFrom),
+// então dá pra padronizar o formato da lista uma vez e reusar em todo
+// desenho novo.
+function BomColumnsForm({
+  tables,
+  onInsert,
+  onChange,
+  onRefresh,
+}: {
+  tables: BomTable[];
+  onInsert: () => void;
+  onChange: (tableId: string, patch: Partial<BomTable>) => void;
+  onRefresh: (table: BomTable) => void;
+}) {
+  const table = tables[0] ?? null;
+
+  if (!table) {
+    return (
+      <div className="space-y-3">
+        <p className="text-xs text-primary-500">
+          Nenhuma lista de peças nesta folha ainda. A lista puxa os dados de cada peça vinculada da montagem (código,
+          descrição, material) e calcula as variáveis geométricas (comprimento, largura, altura, volume, área e massa).
+        </p>
+        <button
+          type="button"
+          onClick={onInsert}
+          className="w-full rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90"
+        >
+          Inserir Lista de Peças
+        </button>
+      </div>
+    );
+  }
+
+  function patchColumn(index: number, patch: Partial<BomColumn>) {
+    const columns = table!.columns.map((c, i) => (i === index ? { ...c, ...patch } : c));
+    onChange(table!.id, { columns });
+  }
+
+  // Trocar a unidade também atualiza o cabeçalho ("ÁREA (cm²)" -> "ÁREA
+  // (m²)") — mas SÓ se o rótulo ainda for o padrão. Quem renomeou a coluna
+  // à mão não quer o texto dele sobrescrito por causa de uma troca de
+  // unidade.
+  function patchColumnUnit(index: number, patch: Partial<BomColumn>) {
+    const column = table!.columns[index];
+    const wasDefaultLabel = column.label === defaultColumnLabel(column);
+    const next = { ...column, ...patch };
+    patchColumn(index, { ...patch, ...(wasDefaultLabel ? { label: defaultColumnLabel(next) } : {}) });
+  }
+
+  function moveColumn(index: number, delta: number) {
+    const target = index + delta;
+    if (target < 0 || target >= table!.columns.length) return;
+    const columns = [...table!.columns];
+    [columns[index], columns[target]] = [columns[target], columns[index]];
+    onChange(table!.id, { columns });
+  }
+
+  const availableKeys = (Object.keys(BOM_COLUMN_LABELS) as BomColumnKey[]).filter(
+    // "custom" pode repetir à vontade (cada uma tem seu próprio customId);
+    // as demais só fazem sentido uma vez por lista.
+    (key) => key === "custom" || !table.columns.some((c) => c.key === key)
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-1">
+        <button
+          type="button"
+          onClick={() => onRefresh(table)}
+          className="flex-1 rounded-lg bg-primary px-2 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90"
+        >
+          Atualizar Lista
+        </button>
+        <button
+          type="button"
+          onClick={onInsert}
+          title="Inserir outra lista nesta folha"
+          className="rounded-lg bg-primary-50 px-2 py-1.5 text-xs text-primary-700 hover:bg-primary-100"
+        >
+          + Lista
+        </button>
+      </div>
+
+      <label className="block text-xs text-primary-600">
+        Título da lista
+        <input
+          value={table.title}
+          onChange={(e) => onChange(table.id, { title: e.target.value })}
+          className="mt-0.5 w-full rounded border border-primary-200 px-1.5 py-1 text-xs"
+        />
+      </label>
+
+      <div className="grid grid-cols-3 gap-1.5">
+        <label className="text-[11px] text-primary-600">
+          Alt. linha
+          <input
+            type="number"
+            step={0.5}
+            value={table.rowHeight}
+            onChange={(e) => onChange(table.id, { rowHeight: Math.max(2, Number(e.target.value)) })}
+            className="mt-0.5 w-full rounded border border-primary-200 px-1 py-0.5 text-xs"
+          />
+        </label>
+        <label className="text-[11px] text-primary-600">
+          Alt. cabeç.
+          <input
+            type="number"
+            step={0.5}
+            value={table.headerHeight}
+            onChange={(e) => onChange(table.id, { headerHeight: Math.max(2, Number(e.target.value)) })}
+            className="mt-0.5 w-full rounded border border-primary-200 px-1 py-0.5 text-xs"
+          />
+        </label>
+        <label className="text-[11px] text-primary-600">
+          Fonte
+          <input
+            type="number"
+            step={0.2}
+            value={table.fontSize}
+            onChange={(e) => onChange(table.id, { fontSize: Math.max(1, Number(e.target.value)) })}
+            className="mt-0.5 w-full rounded border border-primary-200 px-1 py-0.5 text-xs"
+          />
+        </label>
+      </div>
+
+      <label className="flex items-center gap-1.5 text-xs text-primary-700">
+        <input
+          type="checkbox"
+          checked={table.growUp}
+          onChange={(e) => onChange(table.id, { growUp: e.target.checked })}
+        />
+        Crescer para cima (ancorada embaixo)
+      </label>
+
+      <div>
+        <h4 className="mb-1 text-xs font-semibold text-primary-800">Colunas</h4>
+        <ul className="space-y-1.5">
+          {table.columns.map((column, index) => (
+            <li key={`${column.key}-${column.customId ?? index}`} className="rounded-lg border border-primary-100 p-1.5">
+              <div className="flex items-center gap-1">
+                <input
+                  value={column.label}
+                  onChange={(e) => patchColumn(index, { label: e.target.value })}
+                  className="min-w-0 flex-1 rounded border border-primary-200 px-1 py-0.5 text-[11px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => moveColumn(index, -1)}
+                  title="Mover para a esquerda"
+                  className="rounded bg-primary-50 px-1 text-[11px] text-primary-700 hover:bg-primary-100"
+                >
+                  ←
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveColumn(index, 1)}
+                  title="Mover para a direita"
+                  className="rounded bg-primary-50 px-1 text-[11px] text-primary-700 hover:bg-primary-100"
+                >
+                  →
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChange(table.id, { columns: table.columns.filter((_, i) => i !== index) })}
+                  title="Remover coluna"
+                  className="rounded bg-error/10 px-1 text-[11px] text-error hover:bg-error/20"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="mt-1 flex items-center gap-1">
+                <span className="truncate text-[10px] text-primary-400" title={BOM_COLUMN_LABELS[column.key]}>
+                  {BOM_COLUMN_LABELS[column.key]}
+                </span>
+                <input
+                  type="number"
+                  step={1}
+                  value={column.width}
+                  onChange={(e) => patchColumn(index, { width: Math.max(4, Number(e.target.value)) })}
+                  title="Largura (mm)"
+                  className="ml-auto w-12 rounded border border-primary-200 px-1 py-0.5 text-[11px]"
+                />
+                <select
+                  value={column.align}
+                  onChange={(e) => patchColumn(index, { align: e.target.value as BomColumn["align"] })}
+                  className="rounded border border-primary-200 px-1 py-0.5 text-[11px]"
+                >
+                  <option value="left">Esq.</option>
+                  <option value="center">Centro</option>
+                  <option value="right">Dir.</option>
+                </select>
+              </div>
+
+              {/* Unidade — só faz sentido nas colunas de área e volume; as
+                  demais já vêm com a unidade fixa no rótulo. */}
+              {column.key === "area" && (
+                <label className="mt-1 flex items-center gap-1 text-[10px] text-primary-500">
+                  Unidade
+                  <select
+                    value={column.areaUnit ?? DEFAULT_AREA_UNIT}
+                    onChange={(e) => patchColumnUnit(index, { areaUnit: e.target.value as AreaUnit })}
+                    className="ml-auto rounded border border-primary-200 px-1 py-0.5 text-[11px]"
+                  >
+                    {(Object.keys(AREA_UNIT_LABELS) as AreaUnit[]).map((unit) => (
+                      <option key={unit} value={unit}>
+                        {AREA_UNIT_LABELS[unit]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {column.key === "volume" && (
+                <label className="mt-1 flex items-center gap-1 text-[10px] text-primary-500">
+                  Unidade
+                  <select
+                    value={column.volumeUnit ?? DEFAULT_VOLUME_UNIT}
+                    onChange={(e) => patchColumnUnit(index, { volumeUnit: e.target.value as VolumeUnit })}
+                    className="ml-auto rounded border border-primary-200 px-1 py-0.5 text-[11px]"
+                  >
+                    {(Object.keys(VOLUME_UNIT_LABELS) as VolumeUnit[]).map((unit) => (
+                      <option key={unit} value={unit}>
+                        {VOLUME_UNIT_LABELS[unit]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </li>
+          ))}
+        </ul>
+
+        {availableKeys.length > 0 && (
+          <select
+            value=""
+            onChange={(e) => {
+              if (!e.target.value) return;
+              onChange(table.id, { columns: [...table.columns, createBomColumn(e.target.value as BomColumnKey)] });
+            }}
+            className="mt-2 w-full rounded-lg border border-primary-200 px-1.5 py-1 text-xs text-primary-700"
+          >
+            <option value="">+ Adicionar coluna…</option>
+            {availableKeys.map((key) => (
+              <option key={key} value={key}>
+                {BOM_COLUMN_LABELS[key]}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+    </div>
   );
 }
 

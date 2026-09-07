@@ -21,11 +21,30 @@ export function isFileSystemAccessSupported(): boolean {
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
+    // Sem 2º argumento (versão) de propósito: abre a versão ATUAL do banco,
+    // qualquer que seja — linkedFiles.ts (vínculo de peças de montagem)
+    // também abre esse mesmo banco, numa versão mais nova, pra acrescentar
+    // seu próprio object store. Fixar "1" aqui quebraria com um
+    // `VersionError` assim que o banco já tivesse subido de versão por lá.
+    const request = indexedDB.open(DB_NAME);
     request.onupgradeneeded = () => {
-      request.result.createObjectStore(STORE_NAME);
+      if (!request.result.objectStoreNames.contains(STORE_NAME)) {
+        request.result.createObjectStore(STORE_NAME);
+      }
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      // Sem isso, uma conexão aberta aqui (ex.: ao montar o Modelador) fica
+      // pendurada pra sempre — nunca chamamos db.close() depois de usar.
+      // Se o usuário navegar (client-side, sem recarregar a página — ex.
+      // clicando em "Abrir Montagem") pra outra tela que precise abrir o
+      // MESMO banco numa versão mais nova (ver linkedFiles.ts), essa
+      // conexão velha bloqueia a atualização de versão indefinidamente
+      // (nem sucesso nem erro — só trava, sem aviso nenhum). onversionchange
+      // é o evento padrão do IndexedDB pra avisar "alguém quer atualizar a
+      // versão, feche se não estiver usando" — fechar aqui desbloqueia.
+      request.result.onversionchange = () => request.result.close();
+      resolve(request.result);
+    };
     request.onerror = () => reject(request.error);
   });
 }
