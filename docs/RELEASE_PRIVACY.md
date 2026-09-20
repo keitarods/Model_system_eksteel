@@ -9,3 +9,9 @@ O frontend de uma aplicação web é entregue ao navegador. O repositório cont�
 Antes de publicar: execute typecheck, testes, build e auditoria de dependências. A ausência de padrões de segredos numa varredura não garante ausência absoluta de informação confidencial. Verifique também variáveis e arquivos configurados na hospedagem.
 
 Os testes de provisionamento são ignorados explicitamente em clones sem os scripts privados; os demais testes continuam disponíveis.
+
+## Revisão das dependências — 2026-09-20
+
+Next.js e eslint-config-next atualizados para 16.3.5, com versões fixadas. O lockfile incorpora as correções transitivas identificadas pelo npm. Após a atualização, `npm audit --json` reportou zero vulnerabilidades conhecidas na árvore completa, incluindo desenvolvimento. Isso registra o resultado dessa consulta, não uma garantia contra vulnerabilidades futuras.
+
+A revisão dos 11 commits disponíveis antes desta correção não encontrou arquivos SQL, ambientes reais, `.cad-config`, certificados ou dumps publicados. A varredura de padrões de tokens e chaves encontrou apenas um marcador incompleto de chave privada num teste de validação. Não foi necessária reescrita do histórico. O exemplo de ambiente foi padronizado para remover comentários antigos sobre a organização interna da instalação.
