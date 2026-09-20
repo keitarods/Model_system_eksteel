@@ -1,5 +1,6 @@
 "use client";
 
+import { sheetIsUnfolded } from "@/lib/features/sheetState";
 import { ApplicationFileMenu } from "./ApplicationFileMenu";
 import { HeaderIcon } from "@/components/icons/HeaderIcon";
 import { CadToolButton } from "@/components/ui/CadToolButton";
@@ -173,6 +174,8 @@ function vectorToAxisLabel(v: [number, number, number]): "x" | "y" | "z" {
 }
 
 const FEATURE_BADGE: Record<Feature["type"], { label: string; className: string }> = {
+  unfold: { label: "DES", className: "bg-sky-100 text-sky-900" },
+  refold: { label: "RED", className: "bg-sky-100 text-sky-900" },
   imported: {label:"IMP",className:"bg-primary-600 text-white"},
   loft: { label: "LF", className: "bg-primary-600 text-white" },
   shell: { label: "CS", className: "bg-primary-600 text-white" },
@@ -279,6 +282,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     start: [number, number, number];
     end: [number, number, number];
   } | null>(null);
+  const [bendRadius, setBendRadius] = useState<number | null>(null);
+  const [bendKFactor, setBendKFactor] = useState(0.5);
   const [flangeLength, setFlangeLength] = useState(20);
   const [flangeAngle, setFlangeAngle] = useState(90);
   // Alterna a visualização inteira entre dobrada (3D real) e planificada
@@ -519,7 +524,6 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     (f): f is Extract<Feature, { type: "sheetMetal" }> => f.type === "sheetMetal"
   );
   const isSheetMetal = !!sheetMetalFeature;
-  const hasFlangeFeature = features.some((f) => f.type === "flange");
   // Sketches já salvos na árvore — caminho da Varredura escolhe entre eles
   // (nunca o sketch ATIVO, que é sempre o perfil).
   const pathSketchOptions = features.filter((f): f is Extract<Feature, { type: "sketch" }> => f.type === "sketch");
@@ -1290,6 +1294,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   ]);
 
   const handleStartFlange = useCallback(() => {
+    setBendRadius(null);
+    setBendKFactor(0.5);
     setFlangePicking(true);
     setFlangeCandidate(null);
   }, []);
@@ -1314,6 +1320,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
   const handleConfirmFlange = useCallback(() => {
     if (!flangeCandidate) return;
+    if ((bendRadius !== null && (!Number.isFinite(bendRadius) || bendRadius <= 0)) || !Number.isFinite(bendKFactor) || bendKFactor < 0 || bendKFactor > 1) {
+      setErrorMessage("Informe raio interno positivo e fator K entre 0 e 1."); return;
+    }
 
     if (editingFeatureId) {
       const original = features.find((f) => f.id === editingFeatureId && f.type === "flange") as
@@ -1331,6 +1340,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         ...original,
         length: flangeLength,
         angle: flangeAngle,
+        innerRadius: bendRadius ?? undefined, kFactor: bendKFactor,
         label: `Flange ${flangeLength}mm ${flangeAngle}°`,
       });
       setEditingFeatureId(null);
@@ -1362,11 +1372,12 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       edgeEnd: flangeCandidate.end,
       length: flangeLength,
       angle: flangeAngle,
+      innerRadius: bendRadius ?? undefined, kFactor: bendKFactor,
     });
     setFlangePicking(false);
     setFlangeCandidate(null);
     showNotice("Flange criada.");
-  }, [features, flangeCandidate, flangeLength, flangeAngle, addFeature, showNotice, editingFeatureId, updateFeature]);
+  }, [features, flangeCandidate, flangeLength, flangeAngle, bendRadius, bendKFactor, addFeature, showNotice, editingFeatureId, updateFeature]);
 
   // Roteia o clique numa face do 3D conforme o que estava pedindo o clique
   // — mesmo pickMode serve pra escolher plano de esboço, escolher a face de
@@ -1755,6 +1766,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // editingFeatureId e ATUALIZA a feature original em vez de criar uma nova.
   const handleEditFeature = useCallback(
     (feature: Feature) => {
+      if (feature.type === "unfold" || feature.type === "refold") { showNotice("Operação de estado da chapa: use Desfazer ou remova a operação para retornar ao estado anterior."); return; }
       if (feature.type === "imported") { showNotice("Corpo importado sem parâmetros de criação; adicione operações ou remova-o da árvore."); return; }
       if (feature.type === "sketch") return; // esboços usam onOpenSketch
       if (feature.type === "axis") return; // derivado direto da face — nada pra reeditar, só remover e recriar
@@ -1847,6 +1859,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       }
 
       if (feature.type === "flange") {
+        setBendRadius(feature.innerRadius ?? null);
+        setBendKFactor(feature.kFactor ?? 0.5);
         setFlangeLength(feature.length);
         setFlangeAngle(feature.angle);
         setFlangeCandidate({ start: feature.edgeStart, end: feature.edgeEnd });
@@ -2675,7 +2689,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       <div
         style={{ height: toolbarHeight }}
         className="flex shrink-0 items-start gap-x-2 gap-y-1 overflow-auto border-b border-primary-100 bg-primary-50 px-2 py-1 text-sm">
-        {pickingPlane ? (
+        {features.at(-1)?.type === "unfold" ? (
+          <FeaturePanel label="Chapas — desdobrada">
+            <FeatureToolButton icon={IconFlange} label="Redobrar" title="Retorna à geometria dobrada para continuar modelando."
+              onClick={() => { addFeature({ id: createId(), type: "refold", label: "Redobrar chapa" }); setFlattenView(false); }} />
+            <span className="max-w-sm self-center px-2 text-xs">Chapa desdobrada. Redobre antes de adicionar operações. Cortes sobre dobras abertas ainda não são suportados.</span>
+          </FeaturePanel>
+        ) : pickingPlane ? (
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             <span className="shrink-0 text-primary-700">Escolha um plano:</span>
             {STANDARD_PLANES.map(({ id, label, plane }) => (
@@ -2911,7 +2931,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                   className="text-xs text-primary-500"
                   title="Dados explícitos de reconstrução são preservados; operações antigas usam raio igual à espessura e K=0,5."
                 >
-                  Raio: {(features.find(f => f.id === editingFeatureId && f.type === "flange") as Extract<Feature, { type: "flange" }> | undefined)?.innerRadius ?? sheetMetalFeature?.thickness} mm · K: {(features.find(f => f.id === editingFeatureId && f.type === "flange") as Extract<Feature, { type: "flange" }> | undefined)?.kFactor ?? 0.5}
+                  <label>Raio interno (mm) <input aria-label="Raio interno da dobra" type="number" min="0.01" step="0.1" value={bendRadius ?? ""} placeholder={String(sheetMetalFeature?.thickness ?? 1)} onChange={e => setBendRadius(e.target.value === "" ? null : Number(e.target.value))} className="w-16 rounded border px-1" /></label>
+                  <label> Fator K <input aria-label="Fator K da dobra" type="number" min="0" max="1" step="0.01" value={bendKFactor} onChange={e => setBendKFactor(Number(e.target.value))} className="w-16 rounded border px-1" /></label>
                 </span>
                 <button
                   type="button"
@@ -3621,15 +3642,6 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                       disabled={!profile}
                     />
                   )}
-                  {isSheetMetal && (
-                    <FeatureToolButton
-                      icon={IconFace}
-                      label="Face"
-                      onClick={() => setFeatureToolMode("face")}
-                      disabled={!profile}
-                      title={`Extrude/recorta na espessura da chapa (${sheetMetalFeature?.thickness}mm)`}
-                    />
-                  )}
                   {/* Revolucionar/Varredura fazem sólidos livres (perfil
                       girado/varrido), incompatíveis com uma peça que virou
                       chapa (sempre a mesma espessura constante, só Face/
@@ -3668,11 +3680,32 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                       title={!centerLine ? "Desenhe uma Linha de Centro no sketch antes de usar Espiral" : "Varre o perfil ao longo de uma hélice (mola/rosca)"}
                     />
                   )}
-                  {/* Ferramentas de chapa (ao estilo Inventor: Flange/
-                      Planificar/Virar Chapa moram dentro de "Criar", não
-                      numa aba própria) — a espessura em si só é digitada
-                      DENTRO do confirm-step de "Virar Chapa" (ver
-                      creatingSheetMetal), nunca antes de abri-lo. */}
+                </FeaturePanel>
+                <FeaturePanel label="Chapas">
+                  {isSheetMetal && <>
+                    <FeatureToolButton icon={IconFlatten} label="Desdobrar" disabled={!hasActiveSolid || !features.some(f => f.type === "flange") || features.at(-1)?.type === "unfold"}
+                      title="Abre todas as flanges nativas e registra no histórico. Redobre antes de editar a geometria."
+                      onClick={() => { try { const next = { id: createId(), type: "unfold" as const, label: "Desdobrar chapa" }; sheetIsUnfolded([...features, next]); addFeature(next); setFlattenView(false); } catch (error) { setErrorMessage(error instanceof Error ? error.message : "Falha ao desdobrar"); } }} />
+                    <FeatureToolButton icon={IconFlange} label="Redobrar" disabled={features.at(-1)?.type !== "unfold"}
+                      title="Restaura as dobras nativas e registra no histórico."
+                      onClick={() => { addFeature({ id: createId(), type: "refold", label: "Redobrar chapa" }); setFlattenView(false); }} />
+                  </>}
+
+                  {isSheetMetal && (
+                    <FeatureToolButton
+                      icon={IconFace}
+                      label="Face"
+                      onClick={() => { setFaceCut(false); setFeatureToolMode("face"); }}
+                      disabled={!profile}
+                      title={`Extrude/recorta na espessura da chapa (${sheetMetalFeature?.thickness}mm)`}
+                    />
+                  )}
+                  {isSheetMetal && <FeatureToolButton
+                    icon={IconSplit} label="Recorte"
+                    onClick={() => { setFaceCut(true); setFeatureToolMode("face"); }}
+                    disabled={!profile || !hasActiveSolid}
+                    title="Desenhe um perfil fechado na face da chapa para recortar na espessura ativa"
+                  />}
                   {isSheetMetal && (
                     <FeatureToolButton
                       icon={IconFlange}
@@ -3682,12 +3715,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                       title={!hasActiveSolid ? "Crie uma Face antes de criar uma flange" : "Cria uma dobra a partir de uma aresta reta da chapa"}
                     />
                   )}
-                  {isSheetMetal && hasFlangeFeature && (
+                  {isSheetMetal && (
                     <FeatureToolButton
                       icon={IconFlatten}
                       label={flattenView ? "Ver Dobrada" : "Planificar"}
                       onClick={() => setFlattenView((v) => !v)}
                       active={flattenView}
+                      disabled={!hasActiveSolid}
                       title="Alterna entre a peça dobrada (3D) e o padrão planificado (pra corte/DXF)"
                     />
                   )}

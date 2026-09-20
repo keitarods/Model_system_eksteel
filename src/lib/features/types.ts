@@ -324,7 +324,10 @@ export type ImportedFeature = {
   source?: { fileName: string; bodyIndex: number; nodePath?: string; millimetresPerUnit?: number };
 };
 
+export type SheetStateFeature = { id: string; type: "unfold"; label: string } | { id: string; type: "refold"; label: string };
+
 export type Feature = (
+  | SheetStateFeature
   | ImportedFeature
   | LoftFeature
   | ShellFeature

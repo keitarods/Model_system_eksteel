@@ -1,3 +1,4 @@
+import { sheetIsUnfolded } from "@/lib/features/sheetState";
 import { buildLoft, buildShell } from "./advancedFeatures";
 import { deserializeShape, isShape3D, makeCompound, drawCircle, drawRoundedRectangle, genericSweep, makeHelix } from "replicad";
 import type { Sketch, Solid } from "replicad";
@@ -227,7 +228,8 @@ function buildHelixSolid(feature: Extract<Feature, { type: "helix" }>): Solid | 
 // — que faz a versão arredondada na sombra e a versão reta (ou arredondada,
 // se flatten=false) no sólido exibido.
 export function rebuildModel(features: Feature[], options: { flatten?: boolean } = {}): Solid | null {
-  const { flatten = false } = options;
+  const unfolded = sheetIsUnfolded(features);
+  const flatten = !!options.flatten || unfolded;
   // Reconstructed bodies retain editable native operations, but their cuts only
   // operate on their own body. Existing ungrouped project semantics stay intact.
   if (features.some(feature => feature.bodyGroupId)) {
@@ -320,6 +322,7 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
       if (shadow) { const nextShadow = buildShell(shadow, feature); shadow.delete(); shadow = nextShadow; }
       continue;
     }
+    if (feature.type === "unfold" || feature.type === "refold") continue;
     if (feature.type === "sheetMetal") {
       sheetThickness = feature.thickness;
       continue;
