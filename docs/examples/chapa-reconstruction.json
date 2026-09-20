@@ -1,0 +1,18 @@
+{
+  "format": "eksteel-sheet-reconstruction",
+  "version": 1,
+  "features": [
+    { "id": "regra", "type": "sheetMetal", "label": "Chapa 2 mm", "thickness": 2 },
+    {
+      "id": "base", "type": "face", "label": "Face base 40 × 30 mm",
+      "plane": { "origin": [0, 0, 0], "normal": [0, 0, 1], "xDir": [1, 0, 0] },
+      "profile": { "kind": "rect", "x1": 0, "y1": 0, "x2": 40, "y2": 30 },
+      "direction": "normal"
+    },
+    {
+      "id": "dobra", "type": "flange", "label": "Dobra 90°",
+      "parentId": "base", "edgeStart": [0, 0, 2], "edgeEnd": [40, 0, 2],
+      "length": 12, "angle": 90, "innerRadius": 3, "kFactor": 0.42
+    }
+  ]
+}

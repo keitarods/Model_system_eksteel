@@ -23,6 +23,7 @@ export function useSketchKeyboardShortcuts() {
       if (
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
         (target instanceof HTMLElement && target.isContentEditable)
       ) {
         return;

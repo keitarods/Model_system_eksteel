@@ -13,3 +13,14 @@ npm-debug.log*
 .env*
 !.env.example
 !.env.local.example
+# Configuração da instalação via interface
+.cad-config/
+
+# Scripts de provisionamento privados (manter cópia segura fora do Git)
+*.sql
+*.sql.gz
+*.dump
+*.backup
+*.key
+*.p12
+*.pfx

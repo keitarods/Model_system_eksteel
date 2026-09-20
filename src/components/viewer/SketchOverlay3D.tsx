@@ -1,4 +1,10 @@
 "use client";
+import { resolveSnapWithEdges } from "@/lib/sketch/snap";
+import { SNAP_TOLERANCE } from "@/lib/sketch/store";
+import { layerFor, referencesGeometry } from "@/lib/sketch/layers";
+import { shapePointIds } from "@/lib/sketch/modify";
+import { sampleSpline, resolveSpline } from "@/lib/sketch/spline";
+import { regularPolygon } from "@/lib/sketch/polygon";
 
 import { useMemo, useRef, useState } from "react";
 import { Line, Html } from "@react-three/drei";
@@ -740,6 +746,7 @@ function DimensionRadiusGroup({
 }
 
 function renderableToThree(shape: RenderableShape, toWorld: (p: LocalPoint) => Vec3, color: string, dashed = false) {
+  if (shape.kind === "spline") return <Line points={sampleSpline(shape.controls).map(toWorld)} color={color} lineWidth={1.5} dashed={dashed}/>;
   if (shape.kind === "slot") {
     const pts = slotOutline(shape.c1x, shape.c1y, shape.c2x, shape.c2y, shape.r).map(toWorld);
     return <Line points={pts} color={color} lineWidth={1.5} dashed={dashed} dashSize={dashed ? 4 : undefined} gapSize={dashed ? 3 : undefined} />;
@@ -802,6 +809,11 @@ export function SketchOverlay3D({
   // diretamente no viewport 3D (além de só mostrar o esboço).
   interactive?: boolean;
 }) {
+  const layers = useSketchStore(s=>s.layers);
+  const constraints = useSketchStore((s) => s.constraints);
+  const arcPoints = useSketchStore((s) => s.arcPoints);
+  const modifyPreview = useSketchStore((s) => s.modifyPreview);
+  const polygonSides = useSketchStore((s) => s.polygonSides);
   const shapes = useSketchStore((s) => s.shapes);
   const points = useSketchStore((s) => s.points);
   const dimensions = useSketchStore((s) => s.dimensions);
@@ -866,6 +878,7 @@ export function SketchOverlay3D({
         )
       : points;
 
+  const hiddenIds=new Set(shapes.filter(s=>!layerFor(s,layers).visible).flatMap(s=>[s.id,...shapePointIds(s)]));
   const renderShapes = dragRadiusPreview
     ? shapes.map((s) =>
         s.type === "circle" && s.id === dragRadiusPreview.shapeId
@@ -893,7 +906,7 @@ export function SketchOverlay3D({
         })}
       {interactive && <InteractivePlane plane={plane} referenceGeometry={referenceGeometry} />}
 
-      {renderShapes.map((shape) => {
+      {renderShapes.filter(shape=>layerFor(shape,layers).visible).map((shape) => {
         const resolved = resolveShape(shape, renderPoints);
         if (!resolved) return null;
         // "joinPoints" (Coincidente) só destaca a forma aqui quando o 1º
@@ -975,7 +988,7 @@ export function SketchOverlay3D({
         </mesh>
       )}
 
-      {dimensions.map((dim) => {
+      {dimensions.filter(dim=>!referencesGeometry(dim,hiddenIds)).map((dim) => {
         const render = resolveDimension(dim, renderShapes, renderPoints);
         if (!render) return null;
         // Enquanto ESSA cota está sendo arrastada (ver findDimensionHit/
@@ -1050,8 +1063,8 @@ export function SketchOverlay3D({
               r={render.r}
               offset={offset}
               angle={angle}
-              label={`R${render.r.toFixed(1)}`}
-              numericValue={render.r}
+              label={`${dim.kind === "radius" && dim.isDiameter ? "Ø" : "R"}${(render.r * (dim.kind === "radius" && dim.isDiameter ? 2 : 1)).toFixed(1)}`}
+              numericValue={render.r * (dim.kind === "radius" && dim.isDiameter ? 2 : 1)}
               formulaText={formulaText}
               editing={editingDimensionId === dim.id}
               onStartEdit={onStartEdit}
@@ -1111,6 +1124,31 @@ export function SketchOverlay3D({
         </group>
       )}
 
+      {interactive && tool === "polygon" && downRaw && draftPoint && (() => {
+        const state = useSketchStore.getState();
+        const center = resolveSnapWithEdges(downRaw, points, shapes, referenceGeometry, state.gridSize, SNAP_TOLERANCE).point;
+        const vertices = regularPolygon(center, draftPoint, polygonSides);
+        return vertices.map((p, i) => {
+          const q = vertices[(i + 1) % vertices.length];
+          return <group key={i}>{renderableToThree({ kind: "line", x1: p.x, y1: p.y, x2: q.x, y2: q.y }, toWorld, DRAFT_COLOR, true)}</group>;
+        });
+      })()}
+      {interactive && renderShapes.filter(s=>s.type==="spline" && s.id===selectedShapeId && layerFor(s,layers).visible).map(s=>{
+        if(s.type!=="spline")return null;const controls=resolveSpline(s,renderPoints);if(!controls)return null;
+        return <group key={`controls-${s.id}`}><Line points={controls.map(toWorld)} color={DRAFT_COLOR} dashed lineWidth={1}/>{controls.map((p,i)=><mesh key={i} position={toWorld(p)}><sphereGeometry args={[1.5,12,12]}/><meshBasicMaterial color={DRAFT_COLOR}/></mesh>)}</group>;
+      })}
+      {interactive && constraints.map(c=>{
+        if(c.kind!=="angular" || referencesGeometry(c,hiddenIds))return null;
+        const line=shapes.find(s=>s.id===c.lineBId);if(line?.type!=="line")return null;
+        const p=renderPoints[line.p1];if(!p)return null;
+        return <Html key={c.id} position={toWorld(p)}><label className="whitespace-nowrap rounded bg-white/90 px-1 text-xs text-violet-700"><input aria-label="Cota angular em graus" type="number" min="0" max="359.999" step="0.1" key={c.degrees} defaultValue={c.degrees} className="w-16" onBlur={e=>useSketchStore.getState().makeAngle(c.lineAId,c.lineBId,Number(e.target.value))}/>°</label></Html>;
+      })}
+      {interactive && pendingConstraint?.kind==="symmetric" && [pendingConstraint.firstId,pendingConstraint.secondId].filter((id):id is string=>!!id).map(id=>renderPoints[id]?<mesh key={`symmetric-${id}`} position={toWorld(renderPoints[id])}><sphereGeometry args={[2,12,12]}/><meshBasicMaterial color={SELECTED_COLOR}/></mesh>:null)}
+      {interactive && arcPoints.map((p,i)=><mesh key={`arc-pick-${i}`} position={toWorld(p)}><sphereGeometry args={[1.5,12,12]}/><meshBasicMaterial color={DRAFT_COLOR}/></mesh>)}
+      {interactive && modifyPreview && modifyPreview.shapes.map(shape => {
+        const resolved = resolveShape(shape, {...points, ...modifyPreview.points});
+        return resolved ? <group key={shape.id}>{renderableToThree(resolved, toWorld, DRAFT_COLOR, true)}</group> : null;
+      })}
       {interactive && draftShape && <group>{renderableToThree(draftShape, toWorld, DRAFT_COLOR, true)}</group>}
 
       {interactive && pendingSlot?.kind === "centerToCenter" && renderPoints[pendingSlot.center1Id] && (

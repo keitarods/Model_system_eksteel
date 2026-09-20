@@ -1,3 +1,6 @@
+import { installation } from "@/lib/supabase/installation";
+import { InstallationProvider } from "@/lib/supabase/InstallationProvider";
+export const dynamic = "force-dynamic";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Oswald } from "next/font/google";
 import "./globals.css";
@@ -23,7 +26,7 @@ export const metadata: Metadata = {
   description: "Modelador 3D — Eksteel.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
@@ -33,7 +36,7 @@ export default function RootLayout({
       lang="pt-BR"
       className={`${geistSans.variable} ${geistMono.variable} ${oswald.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col"><InstallationProvider config={await installation()}>{children}</InstallationProvider></body>
     </html>
   );
 }

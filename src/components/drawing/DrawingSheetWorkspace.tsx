@@ -1,5 +1,8 @@
 "use client";
 
+import { CloudProjectsButton } from "@/components/modelador/CloudProjectsButton";
+import { serializeDrawing, parseDrawing, DRAWING_EXTENSION } from "@/lib/drawing/documentFormat";
+import { drawingSvgDxf } from "@/lib/drawing/svgDxf";
 import { useMemo, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 import { svg2pdf } from "svg2pdf.js";
@@ -696,18 +699,38 @@ export function DrawingSheetWorkspace({
   // opacity 0 via classe CSS; se algum aparecer indevido no PDF (o parser
   // não respeitando o estado padrão do hover), é a primeira coisa a
   // verificar.
+  async function generateDrawingDocument(kind: "pdf" | "dxf") {
+    if (!activeSheet || !svgRef.current) throw new Error("Selecione uma folha para exportar.");
+    const filename = `${activeSheet.name || "folha"}.${kind}`;
+    if (kind === "dxf") return { filename, body: new Blob([drawingSvgDxf(svgRef.current)], { type: "application/dxf" }) };
+    const orientation = sheetDims.width >= sheetDims.height ? "landscape" : "portrait";
+    const pdf = new jsPDF({ orientation, unit: "mm", format: [sheetDims.width, sheetDims.height] });
+    await svg2pdf(svgRef.current, pdf, { x: 0, y: 0, width: sheetDims.width, height: sheetDims.height });
+    return { filename, body: pdf.output("blob") };
+  }
   async function handleExportPdf() {
-    if (!activeSheet || !svgRef.current) return;
     setErrorMessage(null);
     try {
-      const orientation = sheetDims.width >= sheetDims.height ? "landscape" : "portrait";
-      const pdf = new jsPDF({ orientation, unit: "mm", format: [sheetDims.width, sheetDims.height] });
-      await svg2pdf(svgRef.current, pdf, { x: 0, y: 0, width: sheetDims.width, height: sheetDims.height });
-      const blob = pdf.output("blob");
-      await saveOrDownload(null, blob, `${activeSheet.name || "folha"}.pdf`);
+      const file = await generateDrawingDocument("pdf");
+      await saveOrDownload(null, file.body, file.filename);
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "Erro ao exportar a folha em PDF.");
+      setErrorMessage(err instanceof Error ? err.message : "Erro ao exportar PDF.");
     }
+  }
+  async function handleDrawingFile(action: "save" | "open" | "dxf") {
+    setErrorMessage(null);
+    try {
+      if (action === "save") await saveOrDownload(null, serializeDrawing(useStore.getState().sheets), `${activeSheet?.name || "desenho"}${DRAWING_EXTENSION}`);
+      else if (action === "dxf") {
+        const file = await generateDrawingDocument("dxf");
+        await saveOrDownload(null, file.body, file.filename);
+      } else {
+        const picked = await pickFileToOpen([{ description: "Desenho Eksteel", accept: { "application/json": [DRAWING_EXTENSION] } }]);
+        if (!picked) return;
+        const loaded = parseDrawing(await picked.file.text());
+        if (window.confirm("Substituir as folhas atuais pelo desenho aberto?")) useStore.getState().loadSheets(loaded);
+      }
+    } catch (err) { setErrorMessage(err instanceof Error ? err.message : "Falha ao salvar ou abrir desenho."); }
   }
 
   function handleViewPointerDown(e: React.PointerEvent<SVGRectElement>, view: DrawingView) {
@@ -955,6 +978,11 @@ export function DrawingSheetWorkspace({
           </button>
         </div>
 
+            <button type="button" className={toolButtonClass(false)} onClick={() => void handleDrawingFile("open")}>Abrir desenho</button>
+            <CloudProjectsButton documentKind="drawing" suggestedName={activeSheet?.name || "desenho"}
+              getProject={() => serializeDrawing(useStore.getState().sheets)}
+              onOpen={json => useStore.getState().loadSheets(parseDrawing(json))}
+              generateDocument={activeSheet ? generateDrawingDocument : undefined} />
         {activeSheet && (
           <>
             <div className="mx-0.5 h-6 w-px shrink-0 bg-primary-200" />
@@ -1080,6 +1108,10 @@ export function DrawingSheetWorkspace({
             </button>
 
             <div className="mx-0.5 h-6 w-px shrink-0 bg-primary-200" />
+            <button type="button" className={toolButtonClass(false)} onClick={() => void handleDrawingFile("save")} title="Salvar todas as folhas editáveis em .eksdesenho">Salvar desenho</button>
+
+            <button type="button" className={toolButtonClass(false)} onClick={() => void handleDrawingFile("dxf")} title="DXF em escala de folha; curvas aproximadas por segmentos, sem imagens">Exportar DXF</button>
+
             <button
               type="button"
               onClick={handleSaveTemplate}

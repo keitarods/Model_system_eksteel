@@ -9,6 +9,11 @@ export const SKETCH_TOOLS: { id: SketchTool; label: string; shortcut: string }[]
   { id: "line", label: "Linha", shortcut: "L" },
   { id: "centerline", label: "Linha de Centro", shortcut: "X" },
   { id: "rect", label: "Retângulo", shortcut: "R" },
+  { id: "spline", label: "Spline cúbica", shortcut: "W" },
+  { id: "arc3", label: "Arco (3 pontos)", shortcut: "A" },
+  { id: "trim", label: "Aparar", shortcut: "U" },
+  { id: "extend", label: "Estender", shortcut: "E" },
+  { id: "polygon", label: "Polígono", shortcut: "N" },
   { id: "circle", label: "Círculo", shortcut: "C" },
   { id: "measure", label: "Medir", shortcut: "M" },
   { id: "dimension", label: "Cota", shortcut: "D" },
@@ -20,6 +25,10 @@ export const SKETCH_TOOLS: { id: SketchTool; label: string; shortcut: string }[]
   { id: "joinPoints", label: "Coincidente", shortcut: "J" },
   { id: "horizontal", label: "Horizontal", shortcut: "H" },
   { id: "vertical", label: "Vertical", shortcut: "V" },
+  { id: "angular", label: "Cota angular", shortcut: "" },
+  { id: "symmetric", label: "Simétrico", shortcut: "Y" },
+  { id: "parallel", label: "Paralelo", shortcut: "O" },
+  { id: "concentric", label: "Concêntrico", shortcut: "Z" },
   { id: "perpendicular", label: "Perpendicular", shortcut: "Q" },
   { id: "tangent", label: "Tangente", shortcut: "T" },
   { id: "fillet2d", label: "Concordância", shortcut: "F" },
@@ -30,7 +39,7 @@ export const SKETCH_TOOLS: { id: SketchTool; label: string; shortcut: string }[]
 ];
 
 export const SHORTCUT_TO_TOOL: Record<string, SketchTool> = Object.fromEntries(
-  SKETCH_TOOLS.map((t) => [t.shortcut.toLowerCase(), t.id])
+  SKETCH_TOOLS.filter(t=>t.shortcut).map((t) => [t.shortcut.toLowerCase(), t.id])
 );
 
 // Seções da paleta, ao estilo dos painéis "Esboçar"/"Restringir" da ribbon
@@ -52,6 +61,8 @@ export const TOOL_SECTIONS: { label: string | null; tools: SketchTool[] }[] = [
       "line",
       "centerline",
       "rect",
+      "polygon",
+      "spline", "arc3", "trim", "extend",
       "circle",
       "point",
       "slotCenterToCenter",
@@ -63,13 +74,14 @@ export const TOOL_SECTIONS: { label: string | null; tools: SketchTool[] }[] = [
   },
   {
     label: "Restringir",
-    tools: ["joinPoints", "horizontal", "vertical", "perpendicular", "tangent", "dimension"],
+    tools: ["angular", "symmetric", "parallel", "concentric", "joinPoints", "horizontal", "vertical", "perpendicular", "tangent", "dimension"],
   },
   { label: null, tools: ["measure"] },
 ];
 
 // Ferramentas de arrasto (baixo → mover → soltar desenha/mede).
 export const DRAG_TOOLS = new Set<SketchTool>([
+  "polygon",
   "line",
   "centerline",
   "rect",
@@ -81,6 +93,11 @@ export const DRAG_TOOLS = new Set<SketchTool>([
 // Ferramentas de clique único/duplo-clique (sem arrasto) — aplicam a
 // mudança na hora, ao estilo dos constraints de um clique só do Inventor.
 export const CLICK_TOOLS = new Set<SketchTool>([
+  "angular",
+  "symmetric",
+  "spline",
+  "parallel", "concentric",
+  "arc3", "trim", "extend",
   "point",
   "horizontal",
   "vertical",

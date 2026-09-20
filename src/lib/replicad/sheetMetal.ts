@@ -55,9 +55,9 @@ const K_FACTOR = 0.5;
 // Desenvolvimento da dobra (bend allowance): quanto material o arco da
 // dobra "consome" quando planificado — soma no comprimento total da aba no
 // padrão plano.
-export function bendAllowance(angleDeg: number, innerRadius: number, thickness: number): number {
+export function bendAllowance(angleDeg: number, innerRadius: number, thickness: number, kFactor = K_FACTOR): number {
   const angleRad = (angleDeg * Math.PI) / 180;
-  return angleRad * (innerRadius + K_FACTOR * thickness);
+  return angleRad * (innerRadius + kFactor * thickness);
 }
 
 // Um "elo" da cadeia de planificação: descreve a dobra de UM ancestral
@@ -75,7 +75,7 @@ export type FlattenLink = {
   n: Vec3; // unitário, normal real da face de origem — direção da espessura no padrão plano
   vSign: 1 | -1;
   angleDeg: number;
-  radius: number; // raio interno (= espessura no momento da construção)
+  radius: number; // raio interno explícito ou espessura no formato legado
   thickness: number;
   length: number; // comprimento reto da aba (dobrada)
   allowance: number; // bendAllowance(angleDeg, radius, thickness)
@@ -308,10 +308,14 @@ export function buildFlangeSolid(
   const rawEdgeStart = feature.edgeStart;
   const rawEdgeEnd = feature.edgeEnd;
   const { length, angle } = feature;
-  // Raio interno da dobra = espessura da chapa sempre — não é escolhido
-  // por Flange, é a mesma regra da chapa inteira (raio externo = 2x).
-  const radius = thickness;
-  const allowance = bendAllowance(angle, radius, thickness);
+  // Receitas reconstruídas podem fornecer raio/K explícitos. Campos ausentes
+  // mantêm exatamente os padrões históricos dos projetos existentes.
+  const radius = feature.innerRadius ?? thickness;
+  const kFactor = feature.kFactor ?? K_FACTOR;
+  if (!Number.isFinite(radius) || radius <= 0 || !Number.isFinite(kFactor) || kFactor < 0 || kFactor > 1) {
+    throw new Error("Chapa: raio interno ou fator K inválido.");
+  }
+  const allowance = bendAllowance(angle, radius, thickness, kFactor);
 
   // Face de origem/direção "pra fora" SEMPRE contra a sombra (sempre
   // dobrada) com as coordenadas CRUAS da aresta — nunca precisa desfazer

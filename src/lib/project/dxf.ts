@@ -1,3 +1,4 @@
+import { resolveSpline } from "@/lib/sketch/spline";
 import type { SketchPoint, SketchShape } from "@/lib/sketch/types";
 import { sampleMinorArc, slotOutline } from "@/lib/sketch/render";
 
@@ -28,9 +29,9 @@ function dxfPoint(x: number, y: number, layer: string): string {
 const LAYER_GEOMETRY = "GEOMETRIA";
 const LAYER_AXIS = "EIXO";
 
-function wrapDxfDocument(entities: string[]): string {
+function wrapDxfDocument(entities: string[], spline = false): string {
   return (
-    "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n0\nENDSEC\n" +
+    `0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\n${spline ? "AC1015" : "AC1009"}\n0\nENDSEC\n` +
     "0\nSECTION\n2\nENTITIES\n" +
     entities.join("") +
     "0\nENDSEC\n0\nEOF\n"
@@ -41,6 +42,13 @@ export function buildDxf(shapes: SketchShape[], points: Record<string, SketchPoi
   const entities: string[] = [];
 
   for (const shape of shapes) {
+    if(shape.type === "spline") {
+      const controls=resolveSpline(shape,points); if(!controls)continue;
+      entities.push(["0","SPLINE","100","AcDbEntity","8",LAYER_GEOMETRY,"100","AcDbSpline","210","0","220","0","230","1","70","8","71","3","72","8","73","4","74","0",
+        ...[0,0,0,0,1,1,1,1].flatMap(k=>["40",String(k)]),
+        ...controls.flatMap(p=>["10",String(p.x),"20",String(p.y),"30","0"])].join("\n")+"\n");
+      continue;
+    }
     if (shape.type === "circle") {
       const c = points[shape.center];
       if (c) entities.push(dxfCircle(c.x, c.y, shape.radius, LAYER_GEOMETRY));
@@ -100,7 +108,7 @@ export function buildDxf(shapes: SketchShape[], points: Record<string, SketchPoi
     entities.push(dxfLine(p1.x, p1.y, p2.x, p2.y, shape.isCenterLine ? LAYER_AXIS : LAYER_GEOMETRY));
   }
 
-  return wrapDxfDocument(entities);
+  return wrapDxfDocument(entities, shapes.some(s=>s.type==="spline"));
 }
 
 // Mesmo escritor, mas a partir de segmentos de linha "crus" (x1,y1,x2,y2)

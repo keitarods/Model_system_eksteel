@@ -5,6 +5,7 @@ import type {
   SketchPlane,
   SketchPoint,
   SketchShape,
+  SketchLayer,
 } from "@/lib/sketch/types";
 import type { ExtrudeDirection, ProfileSource } from "@/lib/replicad/geometry";
 
@@ -23,6 +24,8 @@ type ProfileSources = NonNullable<ProfileSource> | NonNullable<ProfileSource>[];
 export type SketchFeature = {
   id: string;
   type: "sketch";
+  layers?: SketchLayer[];
+  activeLayerId?: string;
   label: string;
   plane: SketchPlane;
   shapes: SketchShape[];
@@ -196,10 +199,9 @@ export type FaceFeature = {
 // face: a face de origem da dobra é achada pela GEOMETRIA da própria
 // aresta (a face plana de maior área que a contém — ver findMainFaceForEdge
 // em edgeTools.ts), nunca por uma normal capturada no clique. Sem campo de
-// raio: o raio INTERNO da dobra é sempre a espessura da chapa (o externo
-// sempre espessura + espessura = 2x), calculado direto na hora de
-// construir — não é algo que o usuário escolhe por Flange, é a mesma regra
-// de dobra da chapa inteira. Sem campo de "lado invertido" também — a
+// raio no formato legado: por padrão o raio INTERNO é a espessura.
+// Receitas reconstruídas podem fornecer innerRadius/kFactor explícitos,
+// preservados na edição da operação. Sem campo de "lado invertido" também — a
 // dobra sempre sai pra fora da face de origem; pra dobrar do outro lado,
 // clica na aresta do outro lado da peça. comprimento = tamanho da aba,
 // medido no plano ANTES de dobrar. parentId = id da Face/Flange de onde a
@@ -207,6 +209,9 @@ export type FaceFeature = {
 // ancestral(is) na hora de planificar (ver FlattenLink em sheetMetal.ts),
 // senão uma Flange-sobre-Flange planifica na posição 3D dobrada original.
 export type FlangeFeature = {
+  /** Explicit manufacturing values; absent preserves legacy defaults. */
+  innerRadius?: number;
+  kFactor?: number;
   id: string;
   type: "flange";
   label: string;
@@ -296,7 +301,33 @@ export type PatternFeature =
       angle: number;
     };
 
-export type Feature =
+export type LoftFeature = {
+  id: string; type: "loft"; label: string;
+  sectionIds: string[];
+  ruled: boolean;
+  cut?: boolean;
+};
+export type ShellFeature = {
+  id: string; type: "shell"; label: string;
+  thickness: number;
+  openingPlane: SketchPlane;
+};
+
+export type ImportedFeature = {
+  id: string;
+  type: "imported";
+  label: string;
+  format: "step" | "stl" | "glb";
+  brep: string;
+  /** New imports retain individual bodies; absent preserves legacy union behavior. */
+  preserveBody?: boolean;
+  source?: { fileName: string; bodyIndex: number; nodePath?: string; millimetresPerUnit?: number };
+};
+
+export type Feature = (
+  | ImportedFeature
+  | LoftFeature
+  | ShellFeature
   | SketchFeature
   | ExtrudeFeature
   | RevolveFeature
@@ -311,4 +342,7 @@ export type Feature =
   | FlangeFeature
   | SweepFeature
   | HelixFeature
-  | PatternFeature;
+  | PatternFeature) & {
+  /** Independent reconstructed body. Its contiguous operations rebuild in isolation. */
+  bodyGroupId?: string;
+};

@@ -3,7 +3,7 @@ import { useSketchStore } from "@/lib/sketch/store";
 import { useFeatureStore } from "@/lib/features/store";
 import { useDrawingStore } from "@/lib/drawing/store";
 import { useAssemblyStore } from "@/lib/assembly/store";
-import type { DimensionAnnotation, SketchPlane, SketchPoint, SketchShape } from "@/lib/sketch/types";
+import type { DimensionAnnotation, SketchLayer, SketchConstraint, SketchPlane, SketchPoint, SketchShape } from "@/lib/sketch/types";
 import type { Feature } from "@/lib/features/types";
 import type { DrawingSheet } from "@/lib/drawing/types";
 import type { AssemblyConstraint, ComponentInstance } from "@/lib/assembly/types";
@@ -22,6 +22,11 @@ type Snapshot = {
   points: Record<string, SketchPoint>;
   dimensions: DimensionAnnotation[];
   activePlane: SketchPlane;
+  layers: SketchLayer[];
+  activeLayerId: string;
+  constraints: SketchConstraint[];
+  fixedPointIds: string[];
+  nextParamNumber: number;
   features: Feature[];
   drawingSheets: DrawingSheet[];
   assemblyInstances: ComponentInstance[];
@@ -48,6 +53,10 @@ function captureSnapshot(): Snapshot {
     points: sketch.points,
     dimensions: sketch.dimensions,
     activePlane: sketch.activePlane,
+    layers:sketch.layers,activeLayerId:sketch.activeLayerId,
+    constraints: sketch.constraints,
+    fixedPointIds: sketch.fixedPointIds,
+    nextParamNumber: sketch.nextParamNumber,
     features: useFeatureStore.getState().features,
     drawingSheets: useDrawingStore.getState().sheets,
     assemblyInstances: assembly.instances,
@@ -61,6 +70,16 @@ function applySnapshot(snapshot: Snapshot) {
     points: snapshot.points,
     dimensions: snapshot.dimensions,
     activePlane: snapshot.activePlane,
+    layers:snapshot.layers,activeLayerId:snapshot.activeLayerId,
+    constraints: snapshot.constraints,
+    fixedPointIds: snapshot.fixedPointIds,
+    nextParamNumber: snapshot.nextParamNumber,
+    modifyPreview: null, modifyError: null, arcPoints: [],
+    selectedShapeId: null, multiProfileSelection: [],
+    downRaw: null, draftPoint: null, selectDrag: null, dragPreview: {},
+    dragRadiusPreview: null, pendingConstraint: null, pendingSlot: null,
+    dimensionDrag: null, dimensionDragPreview: null, dimensionPick1: null,
+    hoverHit: null, edgeHitCandidate: null, snapIndicator: null, alignmentGuides: null,
   });
   useFeatureStore.setState({ features: snapshot.features });
   useDrawingStore.setState({ sheets: snapshot.drawingSheets });
@@ -83,20 +102,20 @@ function onStoreChange() {
   if (!batching) {
     batching = true;
     batchStart = lastSnapshot;
-    queueMicrotask(() => {
-      batching = false;
-      const finalSnapshot = captureSnapshot();
-      if (batchStart) {
-        const start = batchStart;
-        useUndoStore.setState((s) => ({
-          past: [...s.past, start].slice(-MAX_HISTORY),
-          future: [],
-        }));
-      }
-      lastSnapshot = finalSnapshot;
-      batchStart = null;
-    });
+    queueMicrotask(flushPendingHistory);
   }
+}
+
+// Flush before undo/redo too: synchronous edits must not race the queued commit.
+function flushPendingHistory() {
+  if (!batching) return;
+  batching = false;
+  const start = batchStart;
+  batchStart = null;
+  lastSnapshot = captureSnapshot();
+  if (start) useUndoStore.setState((s) => ({
+    past: [...s.past, start].slice(-MAX_HISTORY), future: [],
+  }));
 }
 
 // useSketchStore também guarda estado efêmero de interação (preview de
@@ -110,7 +129,7 @@ function onStoreChange() {
 // idêntico ao atual) até apertar várias vezes seguidas.
 function persistentSketchSlice() {
   const s = useSketchStore.getState();
-  return { shapes: s.shapes, points: s.points, dimensions: s.dimensions, activePlane: s.activePlane };
+  return { shapes: s.shapes, points: s.points, dimensions: s.dimensions, activePlane: s.activePlane,layers:s.layers,activeLayerId:s.activeLayerId, constraints: s.constraints, fixedPointIds: s.fixedPointIds, nextParamNumber: s.nextParamNumber };
 }
 
 let lastPersistentSlice = persistentSketchSlice();
@@ -121,7 +140,11 @@ function onSketchStoreChange() {
     current.shapes !== lastPersistentSlice.shapes ||
     current.points !== lastPersistentSlice.points ||
     current.dimensions !== lastPersistentSlice.dimensions ||
-    current.activePlane !== lastPersistentSlice.activePlane;
+    current.activePlane !== lastPersistentSlice.activePlane ||
+    current.layers !== lastPersistentSlice.layers || current.activeLayerId !== lastPersistentSlice.activeLayerId ||
+    current.constraints !== lastPersistentSlice.constraints ||
+    current.fixedPointIds !== lastPersistentSlice.fixedPointIds ||
+    current.nextParamNumber !== lastPersistentSlice.nextParamNumber;
   lastPersistentSlice = current;
   if (!changed) return;
   onStoreChange();
@@ -171,6 +194,7 @@ useDrawingStore.subscribe(onDrawingStoreChange);
 useAssemblyStore.subscribe(onAssemblyStoreChange);
 
 export function undoModel() {
+  flushPendingHistory();
   const { past } = useUndoStore.getState();
   if (past.length === 0) return;
 
@@ -198,6 +222,7 @@ export function undoModel() {
 }
 
 export function redoModel() {
+  flushPendingHistory();
   const { future } = useUndoStore.getState();
   if (future.length === 0) return;
 

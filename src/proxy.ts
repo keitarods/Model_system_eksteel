@@ -1,3 +1,4 @@
+import { installation } from "@/lib/supabase/installation";
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
@@ -48,16 +49,13 @@ export async function proxy(request: NextRequest) {
     request,
   });
 
-  if (
-    !process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  ) {
-    return response;
-  }
+  const config = await installation();
+  if (request.nextUrl.pathname === "/configurar" || request.nextUrl.pathname === "/api/installation" || request.nextUrl.pathname === "/api/database-destinations") return response;
+  if (!config) return response;
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    config.url,
+    config.key,
     {
       ...(cookieDomain ? { cookieOptions: { domain: cookieDomain } } : {}),
       cookies: {

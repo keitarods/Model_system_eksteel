@@ -13,6 +13,7 @@ import { planeBasisQuaternion } from "./planeBasis";
 import { planeYDir } from "@/lib/replicad/plane";
 import { useSketchStore } from "@/lib/sketch/store";
 import type { SketchPlane } from "@/lib/sketch/types";
+import { applyCameraPose, orientCamera, cubeViewDirection, type NavigationControls } from "./cameraNavigation";
 import { IconRotateCW, IconRotateCCW } from "@/components/icons/ToolIcons";
 
 // Retângulo bem transparente, sem interação — marca os planos de trabalho
@@ -78,13 +79,7 @@ export type SketchOverlayData = {
 // do modo esboço, os botões voltam ao padrão do OrbitControls.
 const SKETCH_MOUSE_BUTTONS = { MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
 
-type ViewPreset = "isometrica" | "frontal" | "superior";
-
-const VIEW_PRESETS: Record<ViewPreset, [number, number, number]> = {
-  isometrica: [180, -180, 180],
-  frontal: [0, -260, 0],
-  superior: [0, 0, 260],
-};
+const INITIAL_CAMERA_POSITION: [number, number, number] = [180, -180, 180];
 
 // Limiar de raycast (mm) contra as linhas de aresta — bem menor que a
 // tolerância antiga de clique-na-face (5mm), possível justamente porque
@@ -148,20 +143,6 @@ function LinearEdgePicker3D({
   );
 }
 
-function CameraRig({ position }: { position: [number, number, number] }) {
-  const camera = useThree((state) => state.camera);
-  const controls = useThree((state) => state.controls) as { update?: () => void } | null;
-
-  useEffect(() => {
-    camera.position.set(position[0], position[1], position[2]);
-    camera.up.set(0, 0, 1);
-    camera.lookAt(0, 0, 0);
-    controls?.update?.();
-  }, [position, camera, controls]);
-
-  return null;
-}
-
 // GizmoHelper renderiza seus filhos (o ViewCube) dentro de um Hud — uma
 // passada de render à parte, com sua PRÓPRIA câmera ortográfica virtual.
 // useThree() ali dentro devolve essa câmera pequena do gizmo, nunca a
@@ -173,7 +154,7 @@ function CameraRig({ position }: { position: [number, number, number] }) {
 // portal sem problema, ao contrário de useThree().
 type CameraApi = {
   camera: THREE.Camera;
-  controls: { enabled?: boolean; update?: () => void } | null;
+  controls: NavigationControls | null;
   size: { width: number; height: number };
 };
 
@@ -225,12 +206,11 @@ const CUBE_DRAG_SENSITIVITY = Math.PI;
 // inteiro na tela.
 function rollViewStep(api: CameraApi | null, target: [number, number, number], deltaAngle: number) {
   if (!api) return;
-  const targetVec = new THREE.Vector3(...target);
+  const targetVec = api.controls?.target.clone() ?? new THREE.Vector3(...target);
   const forward = targetVec.clone().sub(api.camera.position).normalize();
   if (forward.lengthSq() < 1e-9) return;
-  api.camera.up.applyAxisAngle(forward, deltaAngle);
-  api.camera.lookAt(targetVec);
-  api.controls?.update?.();
+  const up = api.camera.up.clone().applyAxisAngle(forward, deltaAngle);
+  applyCameraPose(api.camera, api.controls, api.camera.position, targetVec, up);
 }
 
 // 2 setas curvas de giro (sentido horário/anti-horário) coladas embaixo do
@@ -283,53 +263,73 @@ function ViewCubeRotationArrows({
 // pointerDown, só no click) — ao pressionar e arrastar (em vez de só
 // clicar), desliga o OrbitControls principal (senão os dois competem pelo
 // mesmo gesto nativo do navegador) e orbita a câmera à mão; soltar
-// reativa o OrbitControls. Clicar sem arrastar continua funcionando normal
-// (o click do GizmoViewcube dispara por baixo, intacto).
-function ViewCubeOrbitCatcher({
-  apiRef,
-  orbitTarget,
-  children,
-}: {
+// reativa o OrbitControls. Cliques aplicam uma orientação estável; arrastos
+// não disparam a troca de vista ao soltar. O tween padrão do GizmoHelper
+// não é usado: ele restaura o up inicial e pode deslocar vistas Z-up.
+function ViewCubeOrbitCatcher({ apiRef }: {
   apiRef: React.MutableRefObject<CameraApi | null>;
-  orbitTarget: [number, number, number];
-  children: React.ReactNode;
 }) {
+  const dragged = useRef(false);
+  const cleanup = useRef<(() => void) | null>(null);
+  useEffect(() => () => cleanup.current?.(), []);
+
   function handlePointerDown(event: ThreeEvent<PointerEvent>) {
     if (event.nativeEvent.button !== 0) return;
     event.stopPropagation();
+    cleanup.current?.();
     const api = apiRef.current;
     if (!api) return;
-
+    const wasEnabled = api.controls?.enabled;
+    const target = api.controls?.target.clone() ?? new THREE.Vector3();
+    applyCameraPose(api.camera, api.controls, api.camera.position, target, api.camera.up);
     if (api.controls) api.controls.enabled = false;
-    let lastX = event.nativeEvent.clientX;
-    let lastY = event.nativeEvent.clientY;
-
-    function handleMove(moveEvent: PointerEvent) {
-      const dx = moveEvent.clientX - lastX;
-      const dy = moveEvent.clientY - lastY;
-      lastX = moveEvent.clientX;
-      lastY = moveEvent.clientY;
+    dragged.current = false;
+    const { clientX: startX, clientY: startY, pointerId } = event.nativeEvent;
+    let lastX = startX;
+    let lastY = startY;
+    function handleMove(e: PointerEvent) {
+      if (e.pointerId !== pointerId) return;
+      if (!dragged.current && Math.hypot(e.clientX - startX, e.clientY - startY) < 4) return;
+      dragged.current = true;
       const h = api!.size.height || 1;
-      orbitCameraAround(
-        api!.camera,
-        new THREE.Vector3(...orbitTarget),
-        (dx / h) * CUBE_DRAG_SENSITIVITY,
-        (dy / h) * CUBE_DRAG_SENSITIVITY
-      );
-      api!.controls?.update?.();
+      orbitCameraAround(api!.camera, target,
+        ((e.clientX - lastX) / h) * CUBE_DRAG_SENSITIVITY,
+        ((e.clientY - lastY) / h) * CUBE_DRAG_SENSITIVITY);
+      lastX = e.clientX;
+      lastY = e.clientY;
+      api!.controls?.update();
     }
-
-    function handleUp() {
+    function finish() {
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
-      if (api!.controls) api!.controls.enabled = true;
+      window.removeEventListener("pointercancel", handleCancel);
+      window.removeEventListener("blur", handleCancel);
+      if (api!.controls) api!.controls.enabled = wasEnabled ?? true;
+      cleanup.current = null;
     }
-
+    function handleUp(e: PointerEvent) { if (e.pointerId === pointerId) finish(); }
+    function handleCancel() { dragged.current = true; finish(); }
+    cleanup.current = finish;
     window.addEventListener("pointermove", handleMove);
     window.addEventListener("pointerup", handleUp);
+    window.addEventListener("pointercancel", handleCancel);
+    window.addEventListener("blur", handleCancel);
   }
 
-  return <group onPointerDown={handlePointerDown}>{children}</group>;
+  return <group onPointerDown={handlePointerDown}>
+    <GizmoViewcube
+      faces={["DIREITA", "ESQUERDA", "TRÁS", "FRENTE", "CIMA", "BAIXO"]}
+      color="#eceff1" hoverColor="#546E7A" textColor="#263238" strokeColor="#90a4ae"
+      onClick={(event) => {
+        event.stopPropagation();
+        const api = apiRef.current;
+        if (!api || dragged.current) return null;
+        const direction = cubeViewDirection(event.object.position, event.face?.normal);
+        if (direction) orientCamera(api.camera, api.controls, direction);
+        return null;
+      }}
+    />
+  </group>;
 }
 
 // Centro da caixa delimitadora do sólido (fallback (0,0,0) sem sólido
@@ -377,7 +377,7 @@ function PlaneFocusCameraRig({
   onTargetChange: (target: [number, number, number]) => void;
 }) {
   const camera = useThree((state) => state.camera);
-  const controls = useThree((state) => state.controls) as { update?: () => void } | null;
+  const controls = useThree((state) => state.controls) as NavigationControls | null;
 
   useEffect(() => {
     if (!plane || token === 0) return;
@@ -395,11 +395,8 @@ function PlaneFocusCameraRig({
       target.z + plane.normal[2] * PLANE_FOCUS_DISTANCE,
     ];
 
-    camera.up.set(yDir[0], yDir[1], yDir[2]);
-    camera.position.set(position[0], position[1], position[2]);
-    camera.lookAt(target.x, target.y, target.z);
+    applyCameraPose(camera, controls, new THREE.Vector3(...position), target, new THREE.Vector3(...yDir));
     onTargetChange([target.x, target.y, target.z]);
-    controls?.update?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
@@ -427,7 +424,7 @@ function HomeKeyHandler({
   onTargetChange: (target: [number, number, number]) => void;
 }) {
   const camera = useThree((state) => state.camera);
-  const controls = useThree((state) => state.controls) as { update?: () => void } | null;
+  const controls = useThree((state) => state.controls) as NavigationControls | null;
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -459,15 +456,13 @@ function HomeKeyHandler({
       const fovRad = (fov * Math.PI) / 180;
       const distance = (radius / Math.sin(fovRad / 2)) * HOME_FIT_MARGIN;
 
-      const previousTarget = new THREE.Vector3(orbitTarget[0], orbitTarget[1], orbitTarget[2]);
+      const previousTarget = controls?.target.clone() ?? new THREE.Vector3(...orbitTarget);
       const rawDir = camera.position.clone().sub(previousTarget);
       const dir = rawDir.lengthSq() > 1e-6 ? rawDir.normalize() : new THREE.Vector3(1, -1, 1).normalize();
 
       const newPosition = center.clone().addScaledVector(dir, distance);
-      camera.position.copy(newPosition);
-      camera.lookAt(center);
+      applyCameraPose(camera, controls, newPosition, center, camera.up);
       onTargetChange([center.x, center.y, center.z]);
-      controls?.update?.();
     }
 
     window.addEventListener("keydown", handleKeyDown);
@@ -491,6 +486,7 @@ export function Viewer3D({
   workAxes = [],
   planeOffsetDrag = null,
   onExportFaceDxf,
+  onReconstructFace,
   edgeHighlights = [],
   linearEdges = [],
   onPickLinearEdge,
@@ -527,6 +523,7 @@ export function Viewer3D({
   planeOffsetDrag?: { basePlane: SketchPlane; offset: number; onOffsetChange: (offset: number) => void } | null;
   // Presente = habilita o menu de contexto (botão direito numa face) com a
   // opção "Exportar face em DXF", ao estilo Inventor.
+  onReconstructFace?: (origin: [number, number, number], normal: [number, number, number]) => void;
   onExportFaceDxf?: (origin: [number, number, number], normal: [number, number, number]) => void;
   // Marca visualmente as arestas já escolhidas nas ferramentas 3D de
   // Arredondar/Chanfrar, enquanto o usuário ainda está selecionando mais.
@@ -539,7 +536,6 @@ export function Viewer3D({
   onPickLinearEdge?: (start: [number, number, number], end: [number, number, number]) => void;
 }) {
   const [wireframe, setWireframe] = useState(false);
-  const [view, setView] = useState<ViewPreset>("isometrica");
   const [orbitTarget, setOrbitTarget] = useState<[number, number, number]>([0, 0, 0]);
   const cameraApiRef = useRef<CameraApi | null>(null);
   const pendingConstraint = useSketchStore((s) => s.pendingConstraint);
@@ -565,24 +561,7 @@ export function Viewer3D({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b border-primary-100 bg-primary-50 px-3 py-2 text-sm">
-        {(Object.keys(VIEW_PRESETS) as ViewPreset[]).map((preset) => (
-          <button
-            key={preset}
-            type="button"
-            onClick={() => {
-              setView(preset);
-              setOrbitTarget([0, 0, 0]);
-            }}
-            className={`rounded-lg px-3 py-1.5 capitalize transition ${
-              view === preset
-                ? "bg-primary text-primary-foreground"
-                : "bg-white text-primary-700 hover:bg-primary-100"
-            }`}
-          >
-            {preset}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-2 border-b border-primary-100 bg-primary-50 px-3 py-1 text-sm">
         {sketchOverlay?.interactive && (
           <div className="ml-auto flex items-center gap-2">
             {selectedIsRect && (
@@ -644,13 +623,12 @@ export function Viewer3D({
 
       <div className={`relative flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
         <Canvas
-          camera={{ position: VIEW_PRESETS.isometrica, fov: 45, up: [0, 0, 1], near: 0.1, far: 10000 }}
+          camera={{ position: INITIAL_CAMERA_POSITION, fov: 45, up: [0, 0, 1], near: 0.1, far: 10000 }}
           shadows="basic"
         >
           <color attach="background" args={["#ffffff"]} />
           <ambientLight intensity={0.7} />
           <directionalLight position={[120, -150, 220]} intensity={1} castShadow />
-          <CameraRig position={VIEW_PRESETS[view]} />
           <PlaneFocusCameraRig plane={focusPlane} mesh={mesh} token={focusToken} onTargetChange={setOrbitTarget} />
           <HomeKeyHandler mesh={mesh} orbitTarget={orbitTarget} onTargetChange={setOrbitTarget} />
           {mesh && (
@@ -702,9 +680,7 @@ export function Viewer3D({
           <axesHelper args={[60]} />
           <CameraApiCapture apiRef={cameraApiRef} />
           {/* ViewCube ao estilo Inventor/SolidWorks: clique numa face, aresta
-              ou canto do cubo pra ir direto pra aquela vista (a câmera anima
-              suavemente) — mesma ideia dos botões isométrica/frontal/
-              superior, só que com todas as 26 vistas (6 faces + 12 arestas +
+              ou canto do cubo pra ir direto pra uma das 26 vistas (6 faces + 12 arestas +
               8 cantos) num widget só, no canto do viewport. Ordem do array
               `faces` é a mesma do agrupamento de material do BoxGeometry do
               three.js (+X,-X,+Y,-Y,+Z,-Z); como o mundo aqui é Z-up (não
@@ -715,17 +691,9 @@ export function Viewer3D({
           <GizmoHelper
             alignment="top-right"
             margin={[70, 70]}
-            onTarget={() => new THREE.Vector3(...orbitTarget)}
+            onTarget={() => cameraApiRef.current?.controls?.target.clone() ?? new THREE.Vector3(...orbitTarget)}
           >
-            <ViewCubeOrbitCatcher apiRef={cameraApiRef} orbitTarget={orbitTarget}>
-              <GizmoViewcube
-                faces={["DIREITA", "ESQUERDA", "TRÁS", "FRENTE", "CIMA", "BAIXO"]}
-                color="#eceff1"
-                hoverColor="#546E7A"
-                textColor="#263238"
-                strokeColor="#90a4ae"
-              />
-            </ViewCubeOrbitCatcher>
+            <ViewCubeOrbitCatcher apiRef={cameraApiRef} />
           </GizmoHelper>
           <OrbitControls
             makeDefault
@@ -752,9 +720,17 @@ export function Viewer3D({
           </div>
         )}
         {sketchOverlay?.interactive && (
-          <div className="pointer-events-none absolute right-2 top-2 rounded-full bg-primary-900/95 px-4 py-2 text-sm font-semibold text-white shadow-lg">
+          <div className="pointer-events-none absolute bottom-3 left-1/2 w-max max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-xl bg-primary-900/95 px-4 py-2 text-center text-sm font-semibold text-white shadow-lg">
             {pendingConstraint
-              ? pendingConstraint.kind === "perpendicular"
+              ? pendingConstraint.kind === "angular"
+                ? "Selecione a linha dependente da cota angular"
+                : pendingConstraint.kind === "symmetric"
+                ? (pendingConstraint.secondId ? "Selecione a linha de simetria" : "Selecione o ponto dependente")
+                : pendingConstraint.kind === "parallel"
+                ? "Selecione a 2ª linha (paralela à 1ª)"
+                : pendingConstraint.kind === "concentric"
+                ? "Selecione o círculo cujo centro será movido"
+                : pendingConstraint.kind === "perpendicular"
                 ? "Selecione a 2ª linha (perpendicular à 1ª)"
                 : pendingConstraint.kind === "tangent"
                   ? `Selecione ${pendingConstraint.firstShapeKind === "circle" ? "a linha" : "o círculo"} tangente`
@@ -763,7 +739,7 @@ export function Viewer3D({
           </div>
         )}
         {sketchOverlay && !sketchOverlay.interactive && (
-          <div className="pointer-events-none absolute right-2 top-2 rounded-full bg-primary-900/95 px-4 py-2 text-sm font-semibold text-white shadow-lg">
+          <div className="pointer-events-none absolute bottom-3 left-1/2 w-max max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-xl bg-primary-900/95 px-4 py-2 text-center text-sm font-semibold text-white shadow-lg">
             Esboço ainda não usado numa operação · clique em "Editar Esboço" pra continuar
           </div>
         )}
@@ -781,7 +757,7 @@ export function Viewer3D({
             />
             <div
               className="fixed z-50 min-w-[180px] rounded-lg border border-primary-100 bg-white py-1 text-sm shadow-lg"
-              style={{ left: faceMenu.x, top: faceMenu.y }}
+              style={{ left: Math.max(8, Math.min(faceMenu.x, window.innerWidth - 280)), top: Math.max(8, Math.min(faceMenu.y, window.innerHeight - 110)), maxWidth: "calc(100vw - 16px)" }}
             >
               <button
                 type="button"
@@ -793,6 +769,12 @@ export function Viewer3D({
               >
                 Exportar face em DXF
               </button>
+              {onReconstructFace && <button type="button" onClick={() => {
+                onReconstructFace(faceMenu.origin, faceMenu.normal);
+                setFaceMenu(null);
+              }} className="block w-full px-3 py-1.5 text-left text-primary-700 hover:bg-primary-100">
+                Reconstruir esboço desta face
+              </button>}
             </div>
           </>
         )}

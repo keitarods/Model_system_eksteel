@@ -1,3 +1,4 @@
+import { installation } from "@/lib/supabase/installation";
 import { type EmailOtpType } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
@@ -16,16 +17,16 @@ export async function GET(request: NextRequest) {
 
   const redirectUrl = new URL(next, origin);
 
+  const config = await installation();
   if (
     (code || (token_hash && type)) &&
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    config
   ) {
     const response = NextResponse.redirect(redirectUrl);
 
     const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+      config.url,
+      config.key,
       {
         cookies: {
           getAll() {

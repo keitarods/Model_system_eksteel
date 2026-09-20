@@ -1,5 +1,8 @@
 "use client";
 
+import { CadToolButton } from "@/components/ui/CadToolButton";
+import { SketchLayersPanel } from "./SketchLayersPanel";
+import { SketchModifyPanel } from "./SketchModifyPanel";
 import { useState, type ComponentType } from "react";
 import { pointIdsOfShape, useSketchStore } from "@/lib/sketch/store";
 import { SKETCH_TOOLS, TOOL_SECTIONS } from "@/lib/sketch/tools";
@@ -33,6 +36,11 @@ const ICONS: Record<SketchTool, ComponentType<{ className?: string }>> = {
   line: IconLine,
   centerline: IconCenterline,
   rect: IconRect,
+  polygon: IconPatternCircular,
+  arc3: IconFillet,
+  spline: IconFillet,
+  trim: IconChamfer,
+  extend: IconLine,
   circle: IconCircle,
   measure: IconMeasure,
   dimension: IconDimension,
@@ -41,6 +49,10 @@ const ICONS: Record<SketchTool, ComponentType<{ className?: string }>> = {
   horizontal: IconHorizontal,
   vertical: IconVertical,
   perpendicular: IconPerpendicular,
+  parallel: IconHorizontal,
+  symmetric: IconJoinPoints,
+  angular: IconDimension,
+  concentric: IconCircle,
   tangent: IconTangent,
   fillet2d: IconFillet,
   chamfer2d: IconChamfer,
@@ -138,6 +150,19 @@ export function SketchToolPalette({ className = "" }: { className?: string }) {
         </div>
       )}
 
+      {tool === "polygon" && (
+        <label className="flex items-center gap-2 text-xs">
+          Lados (centro → vértice)
+          <input aria-label="Lados do polígono" type="number" min={3} max={128} step={1}
+            defaultValue={useSketchStore.getState().polygonSides}
+            onChange={(e) => { const n = Number(e.target.value); if (Number.isInteger(n) && n >= 3 && n <= 128) useSketchStore.setState({ polygonSides: n }); }}
+            className="w-16 rounded border px-1" />
+        </label>
+      )}
+      <div className="flex flex-wrap items-start gap-2">
+        <SketchLayersPanel />
+        <SketchModifyPanel />
+      </div>
       {/* Painéis em "quadrantes", ao estilo dos painéis da ribbon do
           Inventor (Esboçar/Restringir/Padrão...): cada categoria vira uma
           caixa própria com um grid de 2 linhas de ícones e o nome do
@@ -154,19 +179,8 @@ export function SketchToolPalette({ className = "" }: { className?: string }) {
                 const Icon = ICONS[id];
                 if (!meta) return null;
                 return (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setTool(id)}
-                    title={`${meta.label} (${meta.shortcut})`}
-                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition ${
-                      tool === id
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-white text-primary-700 hover:bg-primary-100"
-                    }`}
-                  >
-                    <Icon className="shrink-0" />
-                  </button>
+                  <CadToolButton key={id} icon={Icon} label={meta.label} shortcut={meta.shortcut}
+                    active={tool === id} onClick={() => setTool(id)} />
                 );
               })}
             </div>

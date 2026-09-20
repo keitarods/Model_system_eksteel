@@ -1,9 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { ApplicationFileMenu } from "./ApplicationFileMenu";
+import { HeaderIcon } from "@/components/icons/HeaderIcon";
+import { CadToolButton } from "@/components/ui/CadToolButton";
+
+import { exportSolidStl } from "@/lib/replicad/stlExport";
+
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import type { ShapeMesh, Solid } from "replicad";
 import { createClient } from "@/lib/supabase/client";
+import { DEFAULT_LAYERS } from "@/lib/sketch/layers";
+import { CloudProjectsButton } from "./CloudProjectsButton";
+import { ReconstructionButton } from "./ReconstructionButton";
+import { ImportBodyButton } from "./ImportBodyButton";
+import { AdvancedFeaturePanel } from "./AdvancedFeaturePanel";
+import type { LoftFeature, ShellFeature } from "@/lib/features/types";
 import { SketchToolPalette } from "@/components/sketch/SketchToolPalette";
 import { useSketchKeyboardShortcuts } from "@/lib/sketch/useSketchKeyboardShortcuts";
 import { Viewer3D } from "@/components/viewer/Viewer3D";
@@ -62,6 +74,7 @@ import type { ExtrudeDirection } from "@/lib/replicad/geometry";
 import { redoModel, undoModel, useUndoStore } from "@/lib/history/store";
 import { NATIVE_FILE_EXTENSION, parseProject, serializeProject } from "@/lib/project/nativeFormat";
 import { buildDxf } from "@/lib/project/dxf";
+import { reconstructFaceSketch } from "@/lib/replicad/reconstructSketch";
 import { exportFaceToDxf } from "@/lib/replicad/faceExport";
 import { findClickedAxis } from "@/lib/replicad/axisTools";
 import { findClickedEdge, listLinearEdges } from "@/lib/replicad/edgeTools";
@@ -129,41 +142,7 @@ function FeaturePanel({ label, children }: { label: string; children: ReactNode 
   );
 }
 
-// Botão "grande" da ribbon (ícone em cima, nome embaixo) — ao contrário dos
-// botões compactos (ícone ao lado do texto) usados em painéis contextuais
-// de parâmetro; Extrudar/Revolucionar/Furo/etc. são comandos PRINCIPAIS, e
-// no Inventor esses continuam com o nome sempre visível embaixo do ícone,
-// nunca escondido.
-function FeatureToolButton({
-  icon: Icon,
-  label,
-  onClick,
-  disabled,
-  active,
-  title,
-}: {
-  icon?: ComponentType<{ className?: string }>;
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  active?: boolean;
-  title?: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title ?? label}
-      className={`flex w-16 shrink-0 flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 text-center text-[11px] font-semibold leading-tight transition disabled:cursor-not-allowed disabled:opacity-40 ${
-        active ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
-      }`}
-    >
-      {Icon && <Icon className="shrink-0" />}
-      <span>{label}</span>
-    </button>
-  );
-}
+const FeatureToolButton = CadToolButton;
 
 function isBasePlane(plane: SketchPlane) {
   return (
@@ -194,6 +173,9 @@ function vectorToAxisLabel(v: [number, number, number]): "x" | "y" | "z" {
 }
 
 const FEATURE_BADGE: Record<Feature["type"], { label: string; className: string }> = {
+  imported: {label:"IMP",className:"bg-primary-600 text-white"},
+  loft: { label: "LF", className: "bg-primary-600 text-white" },
+  shell: { label: "CS", className: "bg-primary-600 text-white" },
   sketch: { label: "SK", className: "bg-primary-100 text-primary-700" },
   extrude: { label: "EX", className: "bg-primary-600 text-white" },
   revolve: { label: "RV", className: "bg-primary-400 text-primary-900" },
@@ -221,6 +203,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const shapes = useSketchStore((s) => s.shapes);
   const points = useSketchStore((s) => s.points);
   const dimensions = useSketchStore((s) => s.dimensions);
+  const layers=useSketchStore(s=>s.layers),activeLayerId=useSketchStore(s=>s.activeLayerId);
   const constraints = useSketchStore((s) => s.constraints);
   const fixedPointIds = useSketchStore((s) => s.fixedPointIds);
   const activePlane = useSketchStore((s) => s.activePlane);
@@ -315,6 +298,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // lado, um de cada vez via mobileTab) — por isso o style inline com essa
   // largura só é aplicado quando isDesktop, senão atropelaria o layout
   // empilhado (largura cheia) do mobile.
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [historyPanelWidth, setHistoryPanelWidth] = useState(220);
   const [isDesktop, setIsDesktop] = useState(false);
 
@@ -349,7 +333,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // Altura da barra de ferramentas principal, ajustável arrastando a
   // divisória logo abaixo dela — mesma ideia da largura da árvore de
   // histórico. 96 = altura inicial (equivalente ao antigo max-h-24 fixo).
-  const [toolbarHeight, setToolbarHeight] = useState(96);
+  const [toolbarHeight, setToolbarHeight] = useState(76);
 
   const handleToolbarResizeStart = useCallback(
     (e: React.PointerEvent) => {
@@ -384,6 +368,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // Pasta local do projeto (File System Access — só Chrome/Edge por
   // enquanto). null não bloqueia salvar/exportar, só faz cair pro download
   // comum do navegador em vez de gravar direto na pasta.
+  const [cloudDocumentEpoch, setCloudDocumentEpoch] = useState(0);
   const [projectFolder, setProjectFolder] = useState<FileSystemDirectoryHandle | null>(null);
   const [currentFileHandle, setCurrentFileHandle] = useState<FileSystemFileHandle | null>(null);
   const [currentFileName, setCurrentFileName] = useState<string | null>(null);
@@ -463,6 +448,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // (updateFeature, preservando profile/plane/edgePoints/etc. originais) em
   // vez de criar uma nova (ver handleEditFeature). Substitui os prompts
   // sequenciais que só cobriam campo por campo.
+  const [advancedDraft, setAdvancedDraft] = useState<LoftFeature | ShellFeature | null>(null);
+  const [advancedEditing, setAdvancedEditing] = useState<LoftFeature | ShellFeature | null>(null);
   const [editingFeatureId, setEditingFeatureId] = useState<string | null>(null);
 
   const [mesh, setMesh] = useState<ShapeMesh | null>(null);
@@ -527,7 +514,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // sketch — sem ela, o eixo não está definido e só Extrudar fica disponível.
   const centerLine = findCenterLine(shapes, points);
   const hasActiveSolid = mesh !== null;
-  const hasFinishedSketch = shapes.length > 0 || Object.keys(points).length > 0;
+  const hasFinishedSketch = shapes.length > 0 || Object.keys(points).some(id => id !== ORIGIN_POINT_ID);
   const sheetMetalFeature = features.find(
     (f): f is Extract<Feature, { type: "sheetMetal" }> => f.type === "sheetMetal"
   );
@@ -717,12 +704,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // substituindo a original (editando) ou somada no fim (criando) — nunca
   // commitado em features/useFeatureStore, só existe pra essa reconstrução.
   const effectiveFeatures = useMemo(() => {
+    if (advancedDraft) return advancedEditing ? features.map(f=>f.id===advancedEditing.id?advancedDraft:f) : [...features,advancedDraft];
     if (!debouncedDraftFeature) return features;
     if (editingFeatureId) {
       return features.map((f) => (f.id === editingFeatureId ? debouncedDraftFeature : f));
     }
     return [...features, debouncedDraftFeature];
-  }, [features, debouncedDraftFeature, editingFeatureId]);
+  }, [features, debouncedDraftFeature, editingFeatureId, advancedDraft, advancedEditing]);
 
   const showNotice = useCallback((message: string) => {
     setNoticeMessage(message);
@@ -743,6 +731,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // chegar aqui.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      if (e.target instanceof Element && e.target.closest("dialog[open]")) return;
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
       if (isTextEntryTarget(e.target)) return;
@@ -958,6 +947,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // nesse caso (useSketchKeyboardShortcuts cuida dele à parte).
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      if (e.target instanceof Element && e.target.closest("dialog[open]")) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key.toLowerCase() !== "s") return;
 
@@ -1490,6 +1480,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         // Projetos salvos antes desse campo existir não têm constraints/
         // fixedPointIds no JSON — cai pra lista vazia.
         constraints: feature.constraints ?? [],
+        layers:feature.layers??DEFAULT_LAYERS,activeLayerId:feature.activeLayerId??"0",
         fixedPointIds: feature.fixedPointIds ?? [],
         activePlane: feature.plane,
       });
@@ -1501,6 +1492,20 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     },
     [showNotice]
   );
+
+  const handleReconstructFace = useCallback((origin: [number, number, number], normal: [number, number, number]) => {
+    if (!solidRef.current) return;
+    try {
+      const sketch = reconstructFaceSketch(solidRef.current, origin, normal, createId);
+      clearSketch();
+      addFeature(sketch);
+      useSketchStore.getState().setTool("select");
+      handleOpenSketch(sketch);
+      showNotice("Contorno reconstruído com cotas de referência. O corpo STEP foi preservado.");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Não foi possível reconstruir o esboço desta face.");
+    }
+  }, [addFeature, clearSketch, handleOpenSketch, showNotice]);
 
   const handleFinishSketch = useCallback(() => {
     const sketchCount = features.filter((f) => f.type === "sketch").length;
@@ -1516,6 +1521,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         points,
         dimensions,
         constraints,
+        layers, activeLayerId,
         fixedPointIds,
       });
     } else {
@@ -1529,13 +1535,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         points,
         dimensions,
         constraints,
+        layers, activeLayerId,
         fixedPointIds,
       });
       setEditingSketchId(id);
     }
 
     setSketching(false);
-  }, [features, editingSketchId, activePlane, shapes, points, dimensions, constraints, fixedPointIds, addFeature, updateFeature]);
+  }, [features, editingSketchId, activePlane, shapes, points, dimensions, constraints, fixedPointIds, layers, activeLayerId, addFeature, updateFeature]);
 
   const handleEditSketch = useCallback(() => {
     setSketching(true);
@@ -1748,6 +1755,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // editingFeatureId e ATUALIZA a feature original em vez de criar uma nova.
   const handleEditFeature = useCallback(
     (feature: Feature) => {
+      if (feature.type === "imported") { showNotice("Corpo importado sem parâmetros de criação; adicione operações ou remova-o da árvore."); return; }
       if (feature.type === "sketch") return; // esboços usam onOpenSketch
       if (feature.type === "axis") return; // derivado direto da face — nada pra reeditar, só remover e recriar
 
@@ -1766,6 +1774,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       setPlaneBase(null);
       setPickingPlane(false);
       setPickingAxisFace(false);
+      setAdvancedEditing(null);
+      if (feature.type === "loft" || feature.type === "shell") { setEditingFeatureId(null); setAdvancedEditing(feature); return; }
 
       if (feature.type === "extrude") {
         setExtrudeDepth(feature.depth);
@@ -2229,7 +2239,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     setEditingInContext(null);
     rememberCurrentFileHandle("modelador", null);
     showNotice(result === "folder" ? "Projeto salvo na pasta selecionada." : "Projeto baixado.");
-  }, [features, drawingSheets, currentFileName, projectFolder, showNotice]);
+  }, [features, drawingSheets, partProperties, currentFileName, projectFolder, showNotice]);
 
   // "Salvar": grava direto no arquivo já aberto/salvo, sem perguntar nada —
   // é o que permite ir salvando à vontade enquanto edita sem risco de
@@ -2251,7 +2261,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       setCurrentFileHandle(null);
       await handleSaveProjectAs();
     }
-  }, [features, drawingSheets, currentFileHandle, handleSaveProjectAs, showNotice]);
+  }, [features, drawingSheets, partProperties, currentFileHandle, handleSaveProjectAs, showNotice]);
 
   // Fecha a peça atual (ao estilo Inventor: descarta o documento aberto,
   // volta pra um Modelador vazio) — sem isso, a única forma de "largar" uma
@@ -2269,6 +2279,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     ) {
       return;
     }
+    setCloudDocumentEpoch(value => value + 1);
     useFeatureStore.setState({ features: [] });
     useDrawingStore.getState().loadSheets([]);
     usePartPropertiesStore.getState().clear();
@@ -2309,13 +2320,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     requestReturnSelection(editingInContext.instanceId);
     setEditingInContext(null);
     router.push("/montagem");
-  }, [editingInContext, currentFileHandle, features, drawingSheets, router]);
+  }, [editingInContext, currentFileHandle, features, drawingSheets, partProperties, router]);
 
   // Ctrl+S salva no arquivo já aberto (ou pede onde salvar, na primeira
   // vez); Ctrl+Shift+S é "Salvar Como" — convenção padrão (Word, VSCode
   // etc). Ambos evitam cair no "salvar página" padrão do navegador.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      if (e.target instanceof Element && e.target.closest("dialog[open]")) return;
       const isMac = navigator.platform.toLowerCase().includes("mac");
       const mod = isMac ? e.metaKey : e.ctrlKey;
       if (!mod || e.key.toLowerCase() !== "s") return;
@@ -2338,6 +2350,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
     try {
       const loaded = parseProject(await picked.file.text());
+      setCloudDocumentEpoch(value => value + 1);
       useFeatureStore.setState({ features: loaded.features });
       useDrawingStore.getState().loadSheets(loaded.drawingSheets);
       usePartPropertiesStore.getState().load(loaded.properties);
@@ -2358,11 +2371,39 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     }
   }, [clearSketch, showNotice]);
 
+  const handleOpenCloudProject = useCallback((json: string, name: string) => {
+    const loaded = parseProject(json);
+    useFeatureStore.setState({ features: loaded.features });
+    useDrawingStore.getState().loadSheets(loaded.drawingSheets);
+    usePartPropertiesStore.getState().load(loaded.properties);
+    useUndoStore.setState({ past: [], future: [] });
+    clearSketch();
+    setEditingSketchId(null);
+    setSketching(false);
+    setPickingPlane(false);
+    setCurrentFileHandle(null);
+    setCurrentFileName(name);
+    setEditingInContext(null);
+    rememberCurrentFileHandle("modelador", null);
+    showNotice(`Versão de "${name}" aberta da nuvem.`);
+  }, [clearSketch, showNotice]);
+
   const handleExportStep = useCallback(async () => {
     if (!solidRef.current) return;
     const blob = solidRef.current.blobSTEP();
     const result = await saveOrDownload(projectFolder, blob, "modelo.step");
     showNotice(result === "folder" ? "STEP salvo na pasta selecionada." : "STEP baixado.");
+  }, [projectFolder, showNotice]);
+
+  const handleExportStl = useCallback(async () => {
+    if (!solidRef.current) return;
+    try {
+      const blob = exportSolidStl(solidRef.current);
+      const result = await saveOrDownload(projectFolder, blob, "modelo.stl");
+      showNotice(result === "folder" ? "STL salvo na pasta selecionada (mm)." : "STL baixado (mm).");
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Erro ao exportar STL.");
+    }
   }, [projectFolder, showNotice]);
 
   const handleExportDxf = useCallback(async () => {
@@ -2409,20 +2450,95 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
   return (
     <div className="flex h-dvh flex-col bg-background text-foreground">
-      <header className="flex flex-wrap items-center gap-3 border-b border-chrome-border bg-chrome-bg px-4 py-2 text-chrome-text">
+      <header className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-chrome-border bg-chrome-bg px-3 py-1.5 text-chrome-text">
         <div className="flex items-center gap-3">
-          {/* eslint-disable-next-line @next/next/no-img-element -- next/image
-              trava em runtime nesta página (conflito com o Canvas do
-              react-three-fiber) — img simples resolve, e o arquivo já é
-              pequeno o bastante pra não precisar da otimização do Next. */}
-          <img
-            src="/images/Eksteel-logo.png"
-            alt="Eksteel"
-            className="h-9 w-auto object-contain"
+          <ApplicationFileMenu>
+          <button
+            type="button"
+            onClick={handleSelectFolder}
+            title={projectFolder ? `Pasta do projeto: "${projectFolder.name}" (clique pra trocar)` : "Selecionar pasta do projeto (Chrome/Edge)"}
+            className="max-w-[9rem] truncate rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            <HeaderIcon kind="folder" /><span className="">Selecionar pasta do projeto</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleCloseProject}
+            title="Fechar a peça atual (volta pro Modelador vazio)"
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            <HeaderIcon kind="close" /><span className="">Fechar</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleOpenProject}
+            title="Abrir projeto (.eks3d)"
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            <HeaderIcon kind="open" /><span className="">Abrir</span>
+          </button>
+          <CloudProjectsButton
+            documentEpoch={cloudDocumentEpoch}
+            getProject={() => serializeProject(features, drawingSheets, partProperties)}
+            onOpen={handleOpenCloudProject}
+            suggestedName={currentFileName ?? "projeto.eks3d"}
+            disabled={sketching || pickingPlane || !!featureToolMode || !!editingInContext}
           />
+          {mode === "modelar" && !sketching && !pickingPlane && !featureToolMode && <><ImportBodyButton /><ReconstructionButton /></>}
+          <div aria-hidden="true" className="my-1 h-px w-full bg-chrome-border" />
+          <button
+            type="button"
+            onClick={handleSaveProject}
+            title={
+              currentFileHandle
+                ? `Salvar em "${currentFileHandle.name}" (Ctrl+S)`
+                : "Salvar projeto no formato nativo (.eks3d) (Ctrl+S)"
+            }
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            <HeaderIcon kind="save" /><span className="">Salvar</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleSaveProjectAs}
+            title="Salvar como um novo arquivo (Ctrl+Shift+S)"
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
+          >
+            <HeaderIcon kind="saveAs" /><span className="">Salvar Como</span>
+          </button>
+          <div aria-hidden="true" className="my-1 h-px w-full bg-chrome-border" />
+          <button
+            type="button"
+            onClick={handleExportStep}
+            disabled={!hasActiveSolid}
+            title={hasActiveSolid ? "Exportar o modelo como STEP" : "Crie um sólido antes de exportar"}
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <HeaderIcon kind="step" /><span className="">STEP</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleExportStl}
+            disabled={!hasActiveSolid}
+            title={hasActiveSolid ? "Exportar STL binário em milímetros" : "Crie um sólido antes de exportar"}
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <HeaderIcon kind="stl" /><span className="">STL</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleExportDxf}
+            disabled={!hasFinishedSketch}
+            title={hasFinishedSketch ? "Exportar o esboço atual como DXF" : "Desenhe um esboço antes de exportar"}
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <HeaderIcon kind="dxf" /><span className="">DXF</span>
+          </button>
+          <div aria-hidden="true" className="my-1 h-px w-full bg-chrome-border" />
+          </ApplicationFileMenu>
           <div className="hidden h-7 w-px bg-chrome-border sm:block" />
           <span
-            className="hidden text-sm font-semibold uppercase tracking-wide text-chrome-text-muted sm:inline"
+            className="hidden text-sm font-semibold uppercase tracking-wide text-chrome-text-muted 2xl:inline"
             style={{ fontFamily: "var(--font-oswald)" }}
           >
             Modelador 3D
@@ -2448,16 +2564,16 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             editando da Montagem
           </span>
         )}
-        <span className="text-xs text-chrome-text-subtle">
+        <span className="hidden text-xs text-chrome-text-subtle 2xl:inline">
           {sketching
             ? `Modo esboço — ${isBasePlane(activePlane) ? "plano XY" : "face selecionada"}`
             : "Modo modelo"}
         </span>
         {status === "loading" && (
-          <span className="text-xs text-chrome-text-subtle">Gerando…</span>
+          <span className="hidden text-xs text-chrome-text-subtle 2xl:inline">Gerando…</span>
         )}
 
-        <div className="ml-auto flex flex-wrap items-center gap-1">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
           {editingInContext ? (
             <button
               type="button"
@@ -2477,69 +2593,6 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               Abrir Montagem
             </button>
           )}
-          <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
-          <button
-            type="button"
-            onClick={handleSelectFolder}
-            title={projectFolder ? `Pasta do projeto: "${projectFolder.name}" (clique pra trocar)` : "Selecionar pasta do projeto (Chrome/Edge)"}
-            className="max-w-[9rem] truncate rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            {projectFolder ? projectFolder.name : "Selecionar Pasta"}
-          </button>
-          <button
-            type="button"
-            onClick={handleCloseProject}
-            title="Fechar a peça atual (volta pro Modelador vazio)"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Fechar
-          </button>
-          <button
-            type="button"
-            onClick={handleOpenProject}
-            title="Abrir projeto (.eks3d)"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Abrir
-          </button>
-          <button
-            type="button"
-            onClick={handleSaveProject}
-            title={
-              currentFileHandle
-                ? `Salvar em "${currentFileHandle.name}" (Ctrl+S)`
-                : "Salvar projeto no formato nativo (.eks3d) (Ctrl+S)"
-            }
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Salvar
-          </button>
-          <button
-            type="button"
-            onClick={handleSaveProjectAs}
-            title="Salvar como um novo arquivo (Ctrl+Shift+S)"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Salvar Como
-          </button>
-          <button
-            type="button"
-            onClick={handleExportStep}
-            disabled={!hasActiveSolid}
-            title={hasActiveSolid ? "Exportar o modelo como STEP" : "Crie um sólido antes de exportar"}
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            STEP
-          </button>
-          <button
-            type="button"
-            onClick={handleExportDxf}
-            disabled={!hasFinishedSketch}
-            title={hasFinishedSketch ? "Exportar o esboço atual como DXF" : "Desenhe um esboço antes de exportar"}
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            DXF
-          </button>
           <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
           <div className="flex items-center gap-0.5 rounded-lg bg-chrome-surface-alt p-0.5">
             <button
@@ -2567,7 +2620,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             title="Propriedades da peça (código, material, massa, responsáveis) — alimentam a Lista de Peças das montagens"
             className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
           >
-            Propriedades
+            <HeaderIcon kind="properties" /><span className="sr-only">Propriedades</span>
           </button>
           <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
           <button
@@ -2589,10 +2642,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             <IconRedo />
           </button>
           {userEmail && (
-            <div className="ml-1 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 py-1 pl-3 pr-1 backdrop-blur-sm">
-              <span className="max-w-[10rem] truncate text-xs font-semibold text-chrome-text-muted">
-                {userEmail}
-              </span>
+            <div className="ml-1 flex shrink-0 items-center gap-2 rounded-xl border border-chrome-border bg-chrome-surface-alt px-2 py-1">
+              <div className="flex flex-col whitespace-nowrap text-xs leading-tight">
+                <span className="text-chrome-text-subtle">Bem-vindo! Conectado como</span>
+                <span className="font-semibold text-chrome-text">{userEmail}</span>
+              </div>
               <button
                 type="button"
                 onClick={handleLogout}
@@ -2600,7 +2654,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 className="flex items-center gap-1.5 rounded-xl border border-chrome-border bg-chrome-surface-alt px-2.5 py-1.5 text-xs font-semibold text-chrome-text-muted transition hover:bg-chrome-border"
               >
                 <IconLogout />
-                Sair
+                <span>Sair</span>
               </button>
             </div>
           )}
@@ -2620,7 +2674,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           arestas etc.) já são compactos e raramente chegam perto do limite. */}
       <div
         style={{ height: toolbarHeight }}
-        className="flex flex-wrap items-start gap-x-4 gap-y-1.5 overflow-y-auto border-b border-primary-100 bg-primary-50 px-4 py-1.5 text-sm">
+        className="flex shrink-0 items-start gap-x-2 gap-y-1 overflow-auto border-b border-primary-100 bg-primary-50 px-2 py-1 text-sm">
         {pickingPlane ? (
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             <span className="shrink-0 text-primary-700">Escolha um plano:</span>
@@ -2855,9 +2909,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 </label>
                 <span
                   className="text-xs text-primary-500"
-                  title="Raio interno = espessura da chapa, externo = 2x — calculado automático, não é escolhido por Flange"
+                  title="Dados explícitos de reconstrução são preservados; operações antigas usam raio igual à espessura e K=0,5."
                 >
-                  Raio: {sheetMetalFeature?.thickness}mm (auto)
+                  Raio: {(features.find(f => f.id === editingFeatureId && f.type === "flange") as Extract<Feature, { type: "flange" }> | undefined)?.innerRadius ?? sheetMetalFeature?.thickness} mm · K: {(features.find(f => f.id === editingFeatureId && f.type === "flange") as Extract<Feature, { type: "flange" }> | undefined)?.kFactor ?? 0.5}
                 </span>
                 <button
                   type="button"
@@ -3552,6 +3606,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                   </span>
                 )}
                 <FeaturePanel label="Criar">
+                  <AdvancedFeaturePanel
+                    key={advancedEditing?.id ?? "new-advanced"}
+                    activePlane={activePlane}
+                    editing={advancedEditing}
+                    onPreview={setAdvancedDraft}
+                    onClose={() => setAdvancedEditing(null)}
+                  />
                   {!isSheetMetal && (
                     <FeatureToolButton
                       icon={IconExtrude}
@@ -3786,9 +3847,15 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         ))}
       </div>
 
+      <div className="hidden shrink-0 items-center border-b border-primary-100 bg-white px-2 md:flex">
+        <button type="button" onClick={() => setHistoryCollapsed(value => !value)} aria-expanded={!historyCollapsed}
+          className="rounded px-2 py-1 text-xs text-primary-700 hover:bg-primary-50">
+          {historyCollapsed ? "› Mostrar histórico" : "‹ Recolher histórico"}
+        </button>
+      </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
         <div
-          className={`min-h-0 flex-1 md:order-1 md:!block ${mobileTab === "history" ? "" : "hidden"}`}
+          className={`min-h-0 flex-1 md:order-1 ${historyCollapsed ? "md:!hidden" : "md:!block"} ${mobileTab === "history" ? "" : "hidden"}`}
           style={isDesktop ? { width: historyPanelWidth, flex: "0 0 auto" } : undefined}
         >
           <FeatureHistoryPanel
@@ -3804,7 +3871,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         <div
           onPointerDown={handleHistoryResizeStart}
           title="Arraste para redimensionar"
-          className="hidden w-1.5 shrink-0 cursor-col-resize bg-primary-100 transition hover:bg-primary-300 active:bg-primary-400 md:order-2 md:block"
+          className={`hidden w-1.5 shrink-0 cursor-col-resize bg-primary-100 transition hover:bg-primary-300 active:bg-primary-400 md:order-2 ${historyCollapsed ? "" : "md:block"}`}
         />
         <div className={`min-h-0 flex-1 md:order-3 md:!block ${mobileTab === "viewer" ? "" : "hidden"}`}>
           <Viewer3D
@@ -3837,6 +3904,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                       : "Clique num dos 3 planos ou numa face do sólido para esboçar nela"
             }
             onExportFaceDxf={handleExportFaceDxf}
+            onReconstructFace={!sketching && !pickingPlane && !featureToolMode && !edgeToolMode && !creatingPlane && !flangePicking && !pickingAxisFace && features.some(f => f.type === "imported" && f.format === "step") ? handleReconstructFace : undefined}
             edgeHighlights={
               flangeCandidate
                 ? [

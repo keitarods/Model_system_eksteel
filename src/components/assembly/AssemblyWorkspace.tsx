@@ -29,7 +29,10 @@ import {
   type AssemblyPhysicalProperties,
   type VolumeUnit,
 } from "@/lib/replicad/physicalProperties";
-import { pickAndLinkFile, resolveLinkedFile } from "@/lib/project/linkedFiles";
+import { CloudProjectsButton } from "@/components/modelador/CloudProjectsButton";
+import { portableAssembly } from "@/lib/project/portableAssembly";
+import { parseProject } from "@/lib/project/nativeFormat";
+import { pickAndLinkFile, resolveLinkedFile, loadLinkedFileHandle, ensureReadPermission } from "@/lib/project/linkedFiles";
 import { ASSEMBLY_FILE_EXTENSION, parseAssembly, serializeAssembly } from "@/lib/project/assemblyFormat";
 import {
   isFileSystemAccessSupported,
@@ -261,7 +264,9 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
         if (cancelled || generation !== generationRef.current) break;
         if (instance.suppressed) continue;
 
-        const resolution = await resolveLinkedFile(instance.linkKey);
+        const resolution = instance.embeddedPart
+          ? { ok: true as const, ...parseProject(instance.embeddedPart), fileName: instance.sourceFileName }
+          : await resolveLinkedFile(instance.linkKey);
         if (!resolution.ok) {
           nextLinkStatus[instance.id] = false;
           continue;
@@ -401,7 +406,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
       try {
         const result = await pickAndLinkFile(instance.linkKey);
         if (!result) return;
-        updateInstance(id, { sourceFileName: result.fileName });
+        updateInstance(id, { sourceFileName: result.fileName, embeddedPart: undefined });
         setRefreshToken((t) => t + 1);
         showNotice(`"${result.fileName}" religada.`);
       } catch (err) {
@@ -421,6 +426,10 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
       if (constraintMode) return; // duplo clique durante escolha de face não deveria abrir nada
       const instance = instances.find((i) => i.id === id);
       if (!instance) return;
+      if (instance.embeddedPart) {
+        showNotice("Esta peça é uma cópia incorporada. Religue um arquivo local antes de editar em contexto.");
+        return;
+      }
       if (!linkStatus[id]) {
         showNotice(`"${instance.label}" não está vinculada — religue o arquivo antes de editar.`);
         return;
@@ -759,6 +768,20 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
             Abrir Modelador
           </button>
           <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
+          <CloudProjectsButton documentKind="assembly" suggestedName={currentFileName ?? "montagem.eks3dasm"}
+            disabled={constraintMode || !!constraintDraft}
+            getProject={() => portableAssembly(instances, constraints, assemblySheets, async instance => {
+              const handle = await loadLinkedFileHandle(instance.linkKey);
+              if (!handle || !(await ensureReadPermission(handle))) throw new Error(`Religue a peça "${instance.label}" antes de salvar a montagem portátil.`);
+              return await (await handle.getFile()).text();
+            })}
+            onOpen={(json,name) => {
+              const loaded = parseAssembly(json);
+              loadAssembly(loaded); useAssemblyDrawingStore.getState().loadSheets(loaded.drawingSheets);
+              useUndoStore.setState({past:[],future:[]});setSelectedInstanceId(null);setConstraintMode(false);setPendingFace(null);setConstraintDraft(null);
+              setCurrentFileHandle(null);setCurrentFileName(name);rememberCurrentFileHandle("montagem",null);setRefreshToken(t=>t+1);
+              showNotice("Montagem da nuvem aberta com cópias das peças incorporadas.");
+            }} />
           <button
             type="button"
             onClick={handleCloseAssembly}

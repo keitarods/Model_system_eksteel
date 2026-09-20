@@ -1,5 +1,6 @@
 "use client";
 
+import { useInstallation } from "@/lib/supabase/InstallationProvider";
 import Image from "next/image";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -23,13 +24,6 @@ const TEMPO_BLOQUEIO_MS = 5 * 60 * 1000;
 
 function normalizarEmail(email: string) {
   return email.trim().toLowerCase();
-}
-
-function temSupabaseConfig() {
-  return Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  );
 }
 
 function gerarChaveTentativas(email: string) {
@@ -123,6 +117,7 @@ export default function LoginPage() {
     return localStorage.getItem("modelador_email_login") ?? "";
   });
   const [senhaLogin, setSenhaLogin] = useState("");
+  const config = useInstallation();
   const [manterConectado, setManterConectado] = useState(() => {
     if (typeof window === "undefined") return true;
     const manterSalvo = localStorage.getItem("modelador_manter_conectado");
@@ -133,7 +128,7 @@ export default function LoginPage() {
   const [erro, setErro] = useState("");
 
   useEffect(() => {
-    if (!temSupabaseConfig()) return;
+    if (!config) return;
 
     let montado = true;
     const supabase = createClient();
@@ -154,9 +149,9 @@ export default function LoginPage() {
     e.preventDefault();
     setErro("");
 
-    if (!temSupabaseConfig()) {
+    if (!config) {
       setErro(
-        "Configure NEXT_PUBLIC_SUPABASE_URL e NEXT_PUBLIC_SUPABASE_ANON_KEY no .env.local para habilitar o login."
+        "Abra /configurar para informar a URL e a chave pública pelo software."
       );
       return;
     }
@@ -247,6 +242,7 @@ export default function LoginPage() {
     router.refresh();
   }
 
+  if (!config) return <main className="m-auto p-8"><h1>Configuração inicial necessária</h1><a className="underline" href="/configurar">Configurar acesso ao software</a></main>;
   return (
     <main className="relative min-h-screen overflow-hidden bg-[#1e1e1e] text-white">
       <div className="absolute inset-0 bg-gradient-to-br from-[#1e1e1e] via-[#1e1e1e] to-[#263238]" />

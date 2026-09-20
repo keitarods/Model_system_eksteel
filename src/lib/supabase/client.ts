@@ -1,3 +1,4 @@
+import { getBrowserConfig } from "./InstallationProvider";
 import { createBrowserClient } from "@supabase/ssr";
 
 // Em produção, NEXT_PUBLIC_COOKIE_DOMAIN = ".eksteelsolucoes.com.br" faz o
@@ -7,9 +8,10 @@ import { createBrowserClient } from "@supabase/ssr";
 const cookieDomain = process.env.NEXT_PUBLIC_COOKIE_DOMAIN || undefined;
 
 export function createClient() {
+  const config = getBrowserConfig();
   return createBrowserClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    config?.url ?? process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    config?.key ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     cookieDomain ? { cookieOptions: { domain: cookieDomain } } : undefined
   );
 }

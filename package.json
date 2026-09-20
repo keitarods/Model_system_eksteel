@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --require ./scripts/register-tests.cjs --test tests/*.test.cjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",
@@ -14,7 +16,10 @@
     "@supabase/ssr": "^0.10.3",
     "@supabase/supabase-js": "^2.106.1",
     "jspdf": "^4.2.1",
+    "mssql": "^12.7.2",
+    "mysql2": "^3.24.4",
     "next": "16.2.6",
+    "pg": "^8.23.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "replicad": "^0.23.1",
@@ -25,7 +30,9 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/mssql": "^12.3.0",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/three": "^0.185.1",

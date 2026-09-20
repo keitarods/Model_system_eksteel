@@ -39,6 +39,8 @@ export type MateFrame = {
 };
 
 export type ComponentInstance = {
+  /** Snapshot portátil opcional. Ao religar um arquivo local, remova este campo. */
+  embeddedPart?: string;
   id: string;
   label: string;
   // Chave usada em linkedFiles.ts pra achar o FileSystemFileHandle

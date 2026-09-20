@@ -1,4 +1,5 @@
-import { drawCircle, drawRoundedRectangle, genericSweep, makeHelix } from "replicad";
+import { buildLoft, buildShell } from "./advancedFeatures";
+import { deserializeShape, isShape3D, makeCompound, drawCircle, drawRoundedRectangle, genericSweep, makeHelix } from "replicad";
 import type { Sketch, Solid } from "replicad";
 import type { Feature, SketchFeature } from "@/lib/features/types";
 import type { SketchPlane } from "@/lib/sketch/types";
@@ -227,6 +228,30 @@ function buildHelixSolid(feature: Extract<Feature, { type: "helix" }>): Solid | 
 // se flatten=false) no sólido exibido.
 export function rebuildModel(features: Feature[], options: { flatten?: boolean } = {}): Solid | null {
   const { flatten = false } = options;
+  // Reconstructed bodies retain editable native operations, but their cuts only
+  // operate on their own body. Existing ungrouped project semantics stay intact.
+  if (features.some(feature => feature.bodyGroupId)) {
+    const prepared: Feature[] = [];
+    const seen = new Set<string>();
+    for (let index = 0; index < features.length;) {
+      const feature = features[index];
+      if (!feature.bodyGroupId) { prepared.push(feature); index++; continue; }
+      const group = feature.bodyGroupId;
+      if (seen.has(group)) throw new Error("Operações de um corpo reconstruído devem permanecer consecutivas na árvore.");
+      seen.add(group);
+      const members: Feature[] = [];
+      while (index < features.length && features[index].bodyGroupId === group) {
+        const { bodyGroupId: _group, ...member } = features[index++];
+        void _group;
+        members.push(member as Feature);
+      }
+      const body = rebuildModel(members, options);
+      if (!body) continue;
+      try { prepared.push({ id: group, type: "imported", label: feature.label, format: "step", preserveBody: true, brep: body.serialize() }); }
+      finally { body.delete(); }
+    }
+    return rebuildModel(prepared, options);
+  }
   let active: Solid | null = null;
   let shadow: Solid | null = null;
   // Espessura da chapa ativa — "Sheet Metal Rule" única compartilhada por
@@ -266,7 +291,35 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
     built.delete();
   }
 
+  try {
   for (const feature of features) {
+    if(feature.type==="imported"){
+      const body=deserializeShape(feature.brep);
+      if(!isShape3D(body)){body.delete();throw new Error("Corpo importado inválido.");}
+      if (feature.preserveBody && active) {
+        try {
+          const combined = makeCompound([active.clone(), body.clone()]) as Solid;
+          active.delete(); active = combined;
+          if (shadow) {
+            const combinedShadow = makeCompound([shadow.clone(), body.clone()]) as Solid;
+            shadow.delete(); shadow = combinedShadow;
+          }
+        } finally { body.delete(); }
+        continue;
+      }
+      mergeInto(body as Solid,false);continue;
+    }
+    if (feature.type === "loft") {
+      mergeInto(buildLoft(feature, features.slice(0, features.indexOf(feature))), !!feature.cut);
+      continue;
+    }
+    if (feature.type === "shell") {
+      if (!active) throw new Error("Casca requer um sólido anterior.");
+      const next = buildShell(active, feature);
+      active.delete(); active = next;
+      if (shadow) { const nextShadow = buildShell(shadow, feature); shadow.delete(); shadow = nextShadow; }
+      continue;
+    }
     if (feature.type === "sheetMetal") {
       sheetThickness = feature.thickness;
       continue;
@@ -394,6 +447,11 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
     mergeInto(built, !!feature.cut);
   }
 
+  } catch (error) {
+    active?.delete();
+    shadow?.delete();
+    throw error;
+  }
   shadow?.delete();
   return active;
 }

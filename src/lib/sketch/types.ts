@@ -4,6 +4,11 @@ export type SketchTool =
   | "select"
   | "line"
   | "centerline"
+  | "spline"
+  | "arc3"
+  | "trim"
+  | "extend"
+  | "polygon"
   | "rect"
   | "circle"
   | "point"
@@ -12,6 +17,10 @@ export type SketchTool =
   | "joinPoints"
   | "horizontal"
   | "vertical"
+  | "angular"
+  | "symmetric"
+  | "parallel"
+  | "concentric"
   | "perpendicular"
   | "tangent"
   | "fillet2d"
@@ -92,10 +101,10 @@ export type PointShape = {
   pointId: string;
 };
 
-// Arco de concordância (fillet) entre duas linhas — sempre o arco MENOR
+// Arco circular (fillet ou parte de um arco livre) — sempre o arco MENOR
 // (curto, <180°) entre p1 e p2, é assim que um canto arredondado sempre é
 // geometricamente. Nasce só da ferramenta Fillet (substitui um canto vivo),
-// não é uma ferramenta de desenho livre.
+// a ferramenta livre de três pontos divide arcos maiores em partes compatíveis.
 export type ArcShape = {
   id: string;
   type: "arc";
@@ -117,7 +126,12 @@ export type SlotShape = {
   radius: number;
 };
 
-export type SketchShape = LineShape | RectShape | CircleShape | PointShape | ArcShape | SlotShape;
+export type SplineShape = {
+  id: string; type: "spline"; p1: string; p2: string; control1: string; control2: string;
+};
+
+export type SketchLayer = {id:string;name:string;visible:boolean;locked:boolean};
+export type SketchShape = (SplineShape | LineShape | RectShape | CircleShape | PointShape | ArcShape | SlotShape) & {layerId?:string};
 
 // Restrição relacional PERSISTENTE (ao estilo Inventor: o ícone da
 // restrição fica "vivo" depois de aplicado, reforçando o resultado sempre
@@ -133,6 +147,9 @@ export type SketchShape = LineShape | RectShape | CircleShape | PointShape | Arc
 // ter NO MÁXIMO uma restrição deste tipo agindo sobre ele por vez — ver
 // upsertConstraint em store.ts.
 export type SketchConstraint =
+  | {id:string;kind:"angular";lineAId:string;lineBId:string;degrees:number}
+  | { id:string; kind:"symmetric"; sourcePointId:string; pointId:string; lineId:string }
+  | { id: string; kind: "parallel"; lineAId: string; lineBId: string }
   | { id: string; kind: "perpendicular"; lineAId: string; lineBId: string }
   | { id: string; kind: "tangent"; lineId: string; circleId: string }
   | { id: string; kind: "pointOnLine"; pointId: string; lineId: string }
@@ -216,6 +233,8 @@ export type EdgeRef =
 //   os 45° de sempre (compatibilidade com cotas de projetos salvos antes
 //   disso existir).
 type DimensionCommon = {
+  /** Radius geometry displayed/edited as a circle diameter. */
+  isDiameter?: boolean;
   offset?: number;
   isReference?: boolean;
   paramName?: string;

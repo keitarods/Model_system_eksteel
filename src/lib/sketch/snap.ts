@@ -2,6 +2,7 @@ import type { Point, SketchPoint, SketchShape } from "./types";
 import { findNearestPointOnShapes, findNearestPointOnSegments, findNearbyLineMidpoint } from "./hitTest";
 
 export function snapToGrid(point: Point, gridSize: number): Point {
+  if (!Number.isFinite(gridSize) || gridSize <= 0) return { ...point };
   return {
     x: Math.round(point.x / gridSize) * gridSize,
     y: Math.round(point.y / gridSize) * gridSize,

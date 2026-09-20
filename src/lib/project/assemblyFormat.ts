@@ -1,3 +1,4 @@
+import { parseProject } from "./nativeFormat";
 import type { AssemblyConstraint, ComponentInstance } from "@/lib/assembly/types";
 import type { DrawingSheet } from "@/lib/drawing/types";
 
@@ -67,6 +68,13 @@ export function parseAssembly(json: string): ParsedAssembly {
   }
 
   const file = data as AssemblyFile;
+  for (const instance of file.instances) {
+    if (!instance || typeof instance !== "object") throw new Error("Componente inválido na montagem.");
+    if (instance.embeddedPart !== undefined) {
+      if (typeof instance.embeddedPart !== "string") throw new Error("Peça incorporada inválida.");
+      parseProject(instance.embeddedPart);
+    }
+  }
   return {
     instances: file.instances,
     constraints: Array.isArray(file.constraints) ? file.constraints : [],

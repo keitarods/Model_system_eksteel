@@ -1,3 +1,4 @@
+import { resolveSpline, nearestSplinePoint } from "./spline";
 import type { CircleShape, Point, RectShape, SketchPoint, SketchShape } from "./types";
 
 export function projectOntoSegment(p: Point, a: Point, b: Point): { t: number; distance: number } {
@@ -46,6 +47,7 @@ function distanceToArc(p: Point, center: Point, r: number, from: Point, to: Poin
 // fluxo de cota relacional (linha a linha) — precisa saber que são
 // fisicamente diferentes pra calcular a distância entre elas.
 export type EdgeHit =
+  | {kind:"spline"; shapeId:string}
   | { kind: "line"; shapeId: string }
   | { kind: "rectWidth"; shapeId: string; edge: "p1" | "p2" }
   | { kind: "rectHeight"; shapeId: string; edge: "p1" | "p2" }
@@ -78,6 +80,11 @@ export function findEdgeHit(
   for (let i = shapes.length - 1; i >= 0; i--) {
     const shape = shapes[i];
 
+    if (shape.type === "spline") {
+      const controls=resolveSpline(shape,points);if(!controls)continue;
+      const nearest=nearestSplinePoint(raw,controls), d=Math.hypot(raw.x-nearest.x,raw.y-nearest.y);
+      if(d<bestDist){bestDist=d;best={kind:"spline",shapeId:shape.id};}continue;
+    }
     if (shape.type === "line") {
       const p1 = points[shape.p1];
       const p2 = points[shape.p2];
@@ -404,6 +411,11 @@ export function findNearestPointOnShapes(
   let bestDist = tolerance;
 
   for (const shape of shapes) {
+    if(shape.type==="spline"){
+      const controls=resolveSpline(shape,points);if(!controls)continue;
+      const nearest=nearestSplinePoint(raw,controls),distance=Math.hypot(raw.x-nearest.x,raw.y-nearest.y);
+      if(distance<bestDist){bestDist=distance;best=nearest;}continue;
+    }
     // Rasgo fica de fora por ora (mesmo espírito do círculo: "encostar" numa
     // aresta reta faz sentido, num arco/rasgo não tão direto).
     if (shape.type === "circle" || shape.type === "point" || shape.type === "arc" || shape.type === "slot")

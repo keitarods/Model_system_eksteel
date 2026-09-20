@@ -2,6 +2,7 @@ import { draw, drawCircle, drawRoundedRectangle } from "replicad";
 import type { Drawing, Solid } from "replicad";
 import type {
   ArcShape,
+  SplineShape,
   LineShape,
   Point,
   SketchPlane,
@@ -23,16 +24,16 @@ export type ExtrudeDirection = "normal" | "flipped" | "symmetric";
 // com wraparound pro último voltar ao início) — null nessa posição quando
 // o segmento é reto.
 function findClosedLoop(
-  edges: (LineShape | ArcShape)[],
+  edges: (LineShape | ArcShape | SplineShape)[],
   points: Record<string, SketchPoint>
-): { points: Point[]; arcCenters: (Point | null)[] } | null {
-  if (edges.length < 3) return null;
+): { points: Point[]; arcCenters: (Point | null)[]; splineControls: ([Point, Point] | null)[] } | null {
+  if (edges.length < 2) return null;
 
   const remaining = edges.slice(1);
   const first = edges[0];
   const startId = first.p1;
   let currentId = first.p2;
-  const orderedEdges: (LineShape | ArcShape)[] = [first];
+  const orderedEdges: (LineShape | ArcShape | SplineShape)[] = [first];
 
   while (remaining.length > 0) {
     const idx = remaining.findIndex(
@@ -47,14 +48,20 @@ function findClosedLoop(
   }
 
   if (currentId !== startId) return null;
-  if (orderedEdges.length < 3) return null;
+  if (orderedEdges.length < 2) return null;
 
   const vertexIds: string[] = [startId];
   const arcCenterIds: (string | null)[] = [];
+  const splineControls: ([Point, Point] | null)[] = [];
   let walkId = startId;
   for (const edge of orderedEdges) {
     const nextId = edge.p1 === walkId ? edge.p2 : edge.p1;
     arcCenterIds.push(edge.type === "arc" ? edge.center : null);
+    if (edge.type === "spline") {
+      const controls = edge.p1 === walkId ? [points[edge.control1],points[edge.control2]] : [points[edge.control2],points[edge.control1]];
+      if(controls.some(p=>!p)) return null;
+      splineControls.push(controls.map(p=>({x:p.x,y:p.y})) as [Point,Point]);
+    } else splineControls.push(null);
     if (nextId !== startId) vertexIds.push(nextId);
     walkId = nextId;
   }
@@ -67,6 +74,7 @@ function findClosedLoop(
 
   return {
     points: resolvedPoints.map((p) => ({ x: p.x, y: p.y })),
+    splineControls,
     arcCenters: resolvedArcCenters.map((p) => (p ? { x: p.x, y: p.y } : null)),
   };
 }
@@ -84,14 +92,14 @@ export function findClosedLoopContaining(
   shapes: SketchShape[],
   points: Record<string, SketchPoint>,
   startShapeId: string
-): { shapeIds: string[]; points: Point[]; arcCenters: (Point | null)[] } | null {
+): { shapeIds: string[]; points: Point[]; arcCenters: (Point | null)[]; splineControls: ([Point, Point] | null)[] } | null {
   const edges = shapes.filter(
-    (s): s is LineShape | ArcShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc"
+    (s): s is LineShape | ArcShape | SplineShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc" || s.type === "spline"
   );
   const start = edges.find((e) => e.id === startShapeId);
   if (!start) return null;
 
-  const touching = new Map<string, (LineShape | ArcShape)[]>();
+  const touching = new Map<string, (LineShape | ArcShape | SplineShape)[]>();
   for (const e of edges) {
     if (!touching.has(e.p1)) touching.set(e.p1, []);
     if (!touching.has(e.p2)) touching.set(e.p2, []);
@@ -101,7 +109,7 @@ export function findClosedLoopContaining(
 
   const startId = start.p1;
   let currentId = start.p2;
-  const orderedEdges: (LineShape | ArcShape)[] = [start];
+  const orderedEdges: (LineShape | ArcShape | SplineShape)[] = [start];
   const usedIds = new Set<string>([start.id]);
 
   while (currentId !== startId) {
@@ -114,14 +122,20 @@ export function findClosedLoopContaining(
     if (orderedEdges.length > edges.length) return null; // guarda contra loop mal formado
   }
 
-  if (orderedEdges.length < 3) return null;
+  if (orderedEdges.length < 2) return null;
 
   const vertexIds: string[] = [startId];
   const arcCenterIds: (string | null)[] = [];
+  const splineControls: ([Point, Point] | null)[] = [];
   let walkId = startId;
   for (const edge of orderedEdges) {
     const nextId = edge.p1 === walkId ? edge.p2 : edge.p1;
     arcCenterIds.push(edge.type === "arc" ? edge.center : null);
+    if (edge.type === "spline") {
+      const controls = edge.p1 === walkId ? [points[edge.control1],points[edge.control2]] : [points[edge.control2],points[edge.control1]];
+      if(controls.some(p=>!p)) return null;
+      splineControls.push(controls.map(p=>({x:p.x,y:p.y})) as [Point,Point]);
+    } else splineControls.push(null);
     if (nextId !== startId) vertexIds.push(nextId);
     walkId = nextId;
   }
@@ -133,6 +147,7 @@ export function findClosedLoopContaining(
   return {
     shapeIds: orderedEdges.map((e) => e.id),
     points: resolvedPoints.map((p) => ({ x: p.x, y: p.y })),
+    splineControls,
     arcCenters: resolvedArcCenters.map((p) => (p ? { x: p.x, y: p.y } : null)),
   };
 }
@@ -146,7 +161,7 @@ export type ProfileSource =
   | { kind: "rect"; x1: number; y1: number; x2: number; y2: number }
   | { kind: "circle"; cx: number; cy: number; r: number }
   | { kind: "slot"; c1: Point; c2: Point; r: number }
-  | { kind: "loop"; points: Point[]; arcCenters?: (Point | null)[] }
+  | { kind: "loop"; points: Point[]; arcCenters?: (Point | null)[]; splineControls?: ([Point, Point] | null)[] }
   | null;
 
 // Escolhe o perfil a extrudar/revolucionar: o retângulo/círculo mais
@@ -182,10 +197,10 @@ export function findProfileSource(
 
   // linhas de centro não são contorno de perfil, só referência de eixo
   const edges = shapes.filter(
-    (s): s is LineShape | ArcShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc"
+    (s): s is LineShape | ArcShape | SplineShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc" || s.type === "spline"
   );
   const loop = findClosedLoop(edges, points);
-  return loop ? { kind: "loop", points: loop.points, arcCenters: loop.arcCenters } : null;
+  return loop ? { kind: "loop", points: loop.points, arcCenters: loop.arcCenters, splineControls: loop.splineControls } : null;
 }
 
 // Perfil de UMA forma específica — só rect/circle/slot; LINHA é tratada à
@@ -243,13 +258,13 @@ export function findProfileSources(
   for (const id of selectedIds) {
     const shape = byId.get(id);
     if (!shape) continue;
-    if (shape.type === "line") {
+    if (shape.type === "line" || shape.type === "spline" || shape.type === "arc") {
       const loop = findClosedLoopContaining(shapes, points, id);
       if (!loop) continue;
       const loopKey = [...loop.shapeIds].sort().join(",");
       if (seenLoopKeys.has(loopKey)) continue;
       seenLoopKeys.add(loopKey);
-      results.push({ kind: "loop", points: loop.points, arcCenters: loop.arcCenters });
+      results.push({ kind: "loop", points: loop.points, arcCenters: loop.arcCenters, splineControls: loop.splineControls });
       continue;
     }
     const profile = profileSourceForShape(shape, points);
@@ -332,9 +347,9 @@ export function findCenterLine(
 function findPathChain(
   shapes: SketchShape[],
   points: Record<string, SketchPoint>
-): { points: Point[]; arcCenters: (Point | null)[] } | null {
+): { points: Point[]; arcCenters: (Point | null)[]; splineControls: ([Point, Point] | null)[] } | null {
   const edges = shapes.filter(
-    (s): s is LineShape | ArcShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc"
+    (s): s is LineShape | ArcShape | SplineShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc" || s.type === "spline"
   );
   if (edges.length === 0) return null;
 
@@ -347,7 +362,7 @@ function findPathChain(
 
   const remaining = edges.slice();
   let startId: string;
-  let first: LineShape | ArcShape;
+  let first: LineShape | ArcShape | SplineShape;
   if (freeEnd !== undefined) {
     const idx = remaining.findIndex((e) => e.p1 === freeEnd || e.p2 === freeEnd);
     [first] = remaining.splice(idx, 1);
@@ -358,7 +373,7 @@ function findPathChain(
   }
 
   let currentId = first.p1 === startId ? first.p2 : first.p1;
-  const orderedEdges: (LineShape | ArcShape)[] = [first];
+  const orderedEdges: (LineShape | ArcShape | SplineShape)[] = [first];
   while (remaining.length > 0) {
     const idx = remaining.findIndex((e) => e.p1 === currentId || e.p2 === currentId);
     if (idx === -1) break; // pedaços soltos além da cadeia principal são ignorados
@@ -369,10 +384,16 @@ function findPathChain(
 
   const vertexIds: string[] = [startId];
   const arcCenterIds: (string | null)[] = [];
+  const splineControls: ([Point, Point] | null)[] = [];
   let walkId = startId;
   for (const edge of orderedEdges) {
     const nextId = edge.p1 === walkId ? edge.p2 : edge.p1;
     arcCenterIds.push(edge.type === "arc" ? edge.center : null);
+    if (edge.type === "spline") {
+      const controls = edge.p1 === walkId ? [points[edge.control1],points[edge.control2]] : [points[edge.control2],points[edge.control1]];
+      if(controls.some(p=>!p)) return null;
+      splineControls.push(controls.map(p=>({x:p.x,y:p.y})) as [Point,Point]);
+    } else splineControls.push(null);
     vertexIds.push(nextId);
     walkId = nextId;
   }
@@ -384,6 +405,7 @@ function findPathChain(
 
   return {
     points: resolvedPoints.map((p) => ({ x: p.x, y: p.y })),
+    splineControls,
     arcCenters: resolvedArcCenters.map((p) => (p ? { x: p.x, y: p.y } : null)),
   };
 }
@@ -395,14 +417,17 @@ export function pathToDrawing(shapes: SketchShape[], points: Record<string, Sket
   const chain = findPathChain(shapes, points);
   if (!chain || chain.points.length < 2) return null;
 
-  const { points: pts, arcCenters } = chain;
+  const { points: pts, arcCenters, splineControls } = chain;
   const [firstPoint, ...rest] = pts;
   let pen = draw([firstPoint.x, firstPoint.y]);
   let current = firstPoint;
 
   rest.forEach((point, i) => {
     const center = arcCenters[i];
-    if (center) {
+    const bezier = splineControls?.[i];
+    if (bezier) {
+      pen = pen.bezierCurveTo([point.x,point.y],bezier.map(p=>[p.x,p.y] as [number,number]));
+    } else if (center) {
       const radius = Math.hypot(current.x - center.x, current.y - center.y);
       const inner = arcInnerPoint(center, current, point, radius);
       pen = pen.threePointsArcTo([point.x, point.y], [inner.x, inner.y]);
@@ -502,14 +527,17 @@ export function profileToDrawing(profile: ProfileSource): Drawing | null {
       .close();
   }
 
-  const { points: pts, arcCenters } = profile;
+  const { points: pts, arcCenters, splineControls } = profile;
   const [firstPoint, ...rest] = pts;
   let pen = draw([firstPoint.x, firstPoint.y]);
   let current = firstPoint;
 
   rest.forEach((point, i) => {
     const center = arcCenters?.[i];
-    if (center) {
+    const bezier = splineControls?.[i];
+    if (bezier) {
+      pen = pen.bezierCurveTo([point.x,point.y],bezier.map(p=>[p.x,p.y] as [number,number]));
+    } else if (center) {
       const radius = Math.hypot(current.x - center.x, current.y - center.y);
       const inner = arcInnerPoint(center, current, point, radius);
       pen = pen.threePointsArcTo([point.x, point.y], [inner.x, inner.y]);
@@ -524,7 +552,10 @@ export function profileToDrawing(profile: ProfileSource): Drawing | null {
   // aqui; close() então só finaliza, já que o pen já estará de volta no
   // ponto inicial).
   const closingCenter = arcCenters?.[pts.length - 1];
-  if (closingCenter) {
+  const closingSpline = splineControls?.[pts.length - 1];
+  if (closingSpline) {
+    pen = pen.bezierCurveTo([firstPoint.x,firstPoint.y],closingSpline.map(p=>[p.x,p.y] as [number,number]));
+  } else if (closingCenter) {
     const radius = Math.hypot(current.x - closingCenter.x, current.y - closingCenter.y);
     const inner = arcInnerPoint(closingCenter, current, firstPoint, radius);
     pen = pen.threePointsArcTo([firstPoint.x, firstPoint.y], [inner.x, inner.y]);

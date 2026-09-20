@@ -1,10 +1,11 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
 import { Line, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import type { ShapeMesh } from "replicad";
+import { orientCamera, type NavigationControls } from "@/components/viewer/cameraNavigation";
 import { SolidMesh } from "@/components/viewer/SolidMesh";
 import type { ComponentPlacement } from "@/lib/assembly/types";
 
@@ -59,18 +60,15 @@ function PickMarker3D({ marker }: { marker: PickMarker }) {
   );
 }
 
-function CameraRig({ position }: { position: [number, number, number] }) {
+function CameraRig({ position, token }: { position: [number, number, number]; token: number }) {
   const camera = useThree((s) => s.camera);
-  const controls = useThree((s) => s.controls) as { update?: () => void } | null;
-  const applied = useRef<string | null>(null);
-  const key = position.join(",");
-  if (applied.current !== key) {
-    applied.current = key;
-    camera.position.set(position[0], position[1], position[2]);
-    camera.up.set(0, 0, 1);
-    camera.lookAt(0, 0, 0);
-    controls?.update?.();
-  }
+  const controls = useThree((s) => s.controls) as NavigationControls | null;
+  const applied = useRef(0);
+  useEffect(() => {
+    if (!controls || applied.current === token) return;
+    applied.current = token;
+    orientCamera(camera, controls, new THREE.Vector3(...position));
+  }, [camera, controls, position, token]);
   return null;
 }
 
@@ -162,6 +160,7 @@ export function AssemblyViewer3D({
 }) {
   const [wireframe, setWireframe] = useState(false);
   const [view, setView] = useState<ViewPreset>("isometrica");
+  const [viewToken, setViewToken] = useState(0);
 
   return (
     <div className="flex h-full flex-col">
@@ -170,7 +169,7 @@ export function AssemblyViewer3D({
           <button
             key={preset}
             type="button"
-            onClick={() => setView(preset)}
+            onClick={() => { setView(preset); setViewToken((token) => token + 1); }}
             className={`rounded-lg px-3 py-1.5 capitalize transition ${
               view === preset ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
             }`}
@@ -189,7 +188,7 @@ export function AssemblyViewer3D({
           <color attach="background" args={["#ffffff"]} />
           <ambientLight intensity={0.7} />
           <directionalLight position={[1200, -1500, 2200]} intensity={1} />
-          <CameraRig position={VIEW_PRESETS[view]} />
+          <CameraRig position={VIEW_PRESETS[view]} token={viewToken} />
           <AssemblyBodies
             bodies={bodies}
             wireframe={wireframe}

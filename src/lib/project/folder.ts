@@ -1,4 +1,5 @@
 "use client";
+import { useExportQueue } from "./exportQueue";
 
 // Integração com a pasta local do projeto, via File System Access API —
 // só Chrome/Edge (Chromium) suportam por enquanto; Firefox/Safari não têm
@@ -135,6 +136,9 @@ export async function saveOrDownload(
   content: Blob | string,
   filename: string
 ): Promise<"folder" | "download"> {
+  if (typeof window !== "undefined" && /\.(pdf|dxf)$/i.test(filename)) {
+    useExportQueue.getState().add(filename, content instanceof Blob ? content : new Blob([content]));
+  }
   if (folder && (await ensureWritePermission(folder))) {
     await writeFileToFolder(folder, filename, content);
     return "folder";

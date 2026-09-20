@@ -1,3 +1,8 @@
+import { DEFAULT_LAYERS, referencesGeometry, layerFor, layerGeometry, lockedLayerPoints } from "./layers";
+import { angularTarget } from "./angular";
+import { reflectPoint } from "./symmetry";
+import { trimExtend, threePointArc, cubicSplineEdit, shapePointIds, type SketchEdit } from "./modify";
+import { regularPolygon } from "./polygon";
 import { create } from "zustand";
 import { BASE_SKETCH_PLANE, ORIGIN_POINT, ORIGIN_POINT_ID } from "./types";
 import type {
@@ -12,6 +17,8 @@ import type {
   SketchPlane,
   SketchPoint,
   SketchShape,
+  SketchLayer,
+  SplineShape,
   SketchTool,
 } from "./types";
 import { findNearbyPoint, resolveSnapWithEdges } from "./snap";
@@ -36,7 +43,7 @@ import { evaluateFormula, extractParamNames } from "./formula";
 // Tolerâncias em mm (unidades de mundo do plano do sketch) — as mesmas,
 // independente de quem gerou o "raw" (SVG 2D via CTM, ou raycast num plano
 // 3D via worldToLocalPoint), por isso moraram aqui e não numa view.
-const SNAP_TOLERANCE = 6;
+export const SNAP_TOLERANCE = 6;
 const EDGE_SELECT_TOLERANCE = 8;
 const SELECT_POINT_TOLERANCE = 8;
 const CLICK_VS_DRAG_THRESHOLD = 4;
@@ -93,6 +100,8 @@ export function pointIdsOfShape(shape: SketchShape): string[] {
   switch (shape.type) {
     case "line":
       return [shape.p1, shape.p2];
+    case "spline":
+      return [shape.p1, shape.p2, shape.control1, shape.control2];
     case "rect":
       return [shape.p1, shape.p2];
     case "circle":
@@ -112,6 +121,8 @@ export function pointIdsOfShape(shape: SketchShape): string[] {
 function remapShapePoints(shape: SketchShape, newId: string, idMap: Map<string, string>): SketchShape {
   const remap = (pointId: string) => idMap.get(pointId) ?? pointId;
   switch (shape.type) {
+    case "spline":
+      return {...shape, id:newId, p1:remap(shape.p1), p2:remap(shape.p2), control1:remap(shape.control1), control2:remap(shape.control2)};
     case "line":
       return { ...shape, id: newId, p1: remap(shape.p1), p2: remap(shape.p2) };
     case "rect":
@@ -142,12 +153,12 @@ function remapShapePoints(shape: SketchShape, newId: string, idMap: Map<string, 
 // duplicada (menor, só ids) em vez de compartilhada.
 function findLoopShapeIds(shapes: SketchShape[], startShapeId: string): string[] | null {
   const edges = shapes.filter(
-    (s): s is LineShape | ArcShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc"
+    (s): s is LineShape | ArcShape | SplineShape => (s.type === "line" && !s.isCenterLine) || s.type === "arc" || s.type === "spline"
   );
   const start = edges.find((e) => e.id === startShapeId);
   if (!start) return null;
 
-  const touching = new Map<string, (LineShape | ArcShape)[]>();
+  const touching = new Map<string, (LineShape | ArcShape | SplineShape)[]>();
   for (const e of edges) {
     if (!touching.has(e.p1)) touching.set(e.p1, []);
     if (!touching.has(e.p2)) touching.set(e.p2, []);
@@ -170,7 +181,7 @@ function findLoopShapeIds(shapes: SketchShape[], startShapeId: string): string[]
     if (orderedIds.length > edges.length) return null; // guarda contra loop mal formado
   }
 
-  return orderedIds.length >= 3 ? orderedIds : null;
+  return orderedIds.length >= 2 ? orderedIds : null;
 }
 
 // Expande um conjunto de movimentos de ponto em cascata: qualquer LineShape
@@ -267,7 +278,8 @@ function propagateAxisLocks(
 function computePerpendicularTarget(
   lineA: LineShape,
   lineB: LineShape,
-  points: Record<string, SketchPoint>
+  points: Record<string, SketchPoint>,
+  angleOffset = Math.PI / 2
 ): { movingId: string; pos: Point } | null {
   const pA1 = points[lineA.p1];
   const pA2 = points[lineA.p2];
@@ -289,8 +301,8 @@ function computePerpendicularTarget(
   if (length < 1e-6) return null;
 
   const currentAngle = Math.atan2(moving.y - pivot.y, moving.x - pivot.x);
-  const target1 = angleA + Math.PI / 2;
-  const target2 = angleA - Math.PI / 2;
+  const target1 = angleA + angleOffset;
+  const target2 = target1 - Math.PI;
   const normalize = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
   const targetAngle =
     Math.abs(normalize(target1 - currentAngle)) <= Math.abs(normalize(target2 - currentAngle))
@@ -397,10 +409,13 @@ function computeLineMidpointOnPointTarget(
 // tempo — o resultado não seria previsível).
 function constraintDependentId(c: NewSketchConstraint): string {
   switch (c.kind) {
+    case "angular":
+    case "parallel":
     case "perpendicular":
       return c.lineBId;
     case "tangent":
       return c.lineId;
+    case "symmetric":
     case "pointOnLine":
       return c.pointId;
     case "lineMidpointOnPoint":
@@ -443,11 +458,20 @@ function reapplyConstraints(
   };
 
   for (const c of constraints) {
-    if (c.kind === "perpendicular") {
+    if(c.kind==="angular") {
+      const a=shapes.find(s=>s.id===c.lineAId),b=shapes.find(s=>s.id===c.lineBId);
+      if(a?.type!=="line"||b?.type!=="line")continue;
+      const target=angularTarget(a,b,current,c.degrees);if(target)applyPointUpdates({[b.p2]:target});
+    } else if (c.kind === "symmetric") {
+      const source=current[c.sourcePointId],line=shapes.find(s=>s.id===c.lineId);
+      if(!source||line?.type!=="line"||!current[line.p1]||!current[line.p2])continue;
+      const target=reflectPoint(source,current[line.p1],current[line.p2]);
+      if(target)applyPointUpdates({[c.pointId]:target});
+    } else if (c.kind === "perpendicular" || c.kind === "parallel") {
       const lineA = shapes.find((sh) => sh.id === c.lineAId);
       const lineB = shapes.find((sh) => sh.id === c.lineBId);
       if (!lineA || lineA.type !== "line" || !lineB || lineB.type !== "line") continue;
-      const target = computePerpendicularTarget(lineA, lineB, current);
+      const target = computePerpendicularTarget(lineA, lineB, current, c.kind === "parallel" ? 0 : Math.PI / 2);
       if (target) applyPointUpdates({ [target.movingId]: target.pos });
     } else if (c.kind === "tangent") {
       const line = shapes.find((sh) => sh.id === c.lineId);
@@ -626,7 +650,7 @@ function dimensionCurrentValue(
 ): number | null {
   const render = resolveDimension(dim, shapes, points);
   if (!render) return null;
-  return render.kind === "radius" ? render.r : Math.hypot(render.x2 - render.x1, render.y2 - render.y1);
+  return render.kind === "radius" ? render.r * (dim.kind === "radius" && dim.isDiameter ? 2 : 1) : Math.hypot(render.x2 - render.x1, render.y2 - render.y1);
 }
 
 // Cota clicada perto o bastante da sua PRÓPRIA linha de cota (já deslocada
@@ -837,6 +861,10 @@ export type SelectDrag =
 //   (makeLineMidpointCoincidentWithPoint) — é o que deixa "pegar o centro
 //   do lado de um retângulo e unir com a origem" mover o retângulo até lá.
 export type PendingConstraint =
+  | {kind:"angular";firstId:string}
+  | {kind:"symmetric";firstId:string;secondId?:string}
+  | { kind: "parallel"; firstId: string }
+  | { kind: "concentric"; firstId: string }
   | { kind: "perpendicular"; firstId: string }
   | { kind: "tangent"; firstId: string; firstShapeKind: "line" | "circle" }
   | { kind: "joinPoints"; firstId: string; firstKind: "point" | "line" | "lineMidpoint" };
@@ -854,6 +882,15 @@ export type PendingSlot =
 type SketchState = {
   tool: SketchTool;
   gridSize: number;
+  polygonSides: number;
+  angleValue: number;
+  layers: SketchLayer[];
+  activeLayerId: string;
+  makeAngle: (lineAId:string,lineBId:string,degrees:number)=>void;
+  modifyPreview: SketchEdit | null;
+  modifyError: string | null;
+  arcPoints: Point[];
+  applySketchEdit: (edit: SketchEdit) => void;
   activePlane: SketchPlane;
   points: Record<string, SketchPoint>;
   shapes: SketchShape[];
@@ -1037,6 +1074,7 @@ type SketchState = {
   // de verdade — ver o comentário de reapplyConstraints pras limitações.
   makeLineHorizontal: (lineId: string) => void;
   makeLineVertical: (lineId: string) => void;
+  makeParallel: (lineAId: string, lineBId: string) => void;
   makePerpendicular: (lineAId: string, lineBId: string) => void;
   makeTangent: (lineId: string, circleId: string) => void;
   // Insere (ou substitui, se já houver uma pro MESMO dependente — ver
@@ -1123,7 +1161,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
   // cascadeFormulaDependents (reavaliação em cadeia), pra não duplicar
   // esse switch nos dois lugares.
   function applyDimensionValueByKind(kind: DimensionAnnotation["kind"], id: string, value: number) {
-    if (kind === "radius") get().updateRadiusDimension(id, value);
+    if (kind === "radius") get().updateRadiusDimension(id, value / (get().dimensions.find(d=>d.id===id)?.isDiameter ? 2 : 1));
     else if (kind === "arcRadius") get().updateArcRadiusDimension(id, value);
     else if (kind === "slotRadius") get().updateSlotRadiusDimension(id, value);
     else if (kind === "width") get().updateWidthDimension(id, value);
@@ -1187,7 +1225,8 @@ export const useSketchStore = create<SketchState>((set, get) => {
   }
 
   function previewSnap(raw: Point, referenceGeometry: ReferenceSegment[]): Point {
-    const { points, shapes, gridSize } = get();
+    const {gridSize}=get();
+    const {points,shapes}=layerGeometry(get());
     const resolved = resolveSnapWithEdges(raw, points, shapes, referenceGeometry, gridSize, SNAP_TOLERANCE);
     // Efeito colateral de propósito: todo chamador já está dentro de um
     // handler de ponteiro, então é seguro atualizar o indicador visual
@@ -1200,7 +1239,26 @@ export const useSketchStore = create<SketchState>((set, get) => {
   // passam pela máquina de arrasto (downRaw/draftPoint) usada pelas
   // ferramentas de desenho.
   function handleConstraintClick(tool: SketchTool, raw: Point, referenceGeometry: ReferenceSegment[]) {
-    const { shapes, points, pendingConstraint } = get();
+    const {pendingConstraint}=get();
+    const {shapes,points}=layerGeometry(get(),true);
+
+    if (tool === "arc3" || tool === "spline") {
+      const next = previewSnap(raw, referenceGeometry);
+      const picks = [...get().arcPoints, next];
+      if (picks.length < (tool === "spline" ? 4 : 3)) set({ arcPoints: picks, modifyError: null });
+      else {
+        try { get().applySketchEdit(tool === "spline" ? cubicSplineEdit(picks) : threePointArc(picks[0], picks[1], picks[2])); }
+        catch (error) { set({ modifyError: (error as Error).message }); }
+      }
+      return;
+    }
+    if (tool === "trim" || tool === "extend") {
+      const hit = findLineRegion(raw, shapes, points, EDGE_SELECT_TOLERANCE);
+      if (!hit) return;
+      try { get().applySketchEdit(trimExtend(shapes, points, hit.shapeId, raw, tool === "extend")); }
+      catch (error) { set({ modifyError: (error as Error).message, modifyPreview: null }); }
+      return;
+    }
 
     if (tool === "point") {
       const id = get().resolvePointAt(raw, SNAP_TOLERANCE, referenceGeometry);
@@ -1235,6 +1293,72 @@ export const useSketchStore = create<SketchState>((set, get) => {
       if (!lineHit) return;
       if (tool === "horizontal") get().makeLineHorizontal(lineHit.shapeId);
       else get().makeLineVertical(lineHit.shapeId);
+      return;
+    }
+
+    if (tool === "angular") {
+      const lineHit = findLineRegion(raw, shapes, points, EDGE_SELECT_TOLERANCE);
+      if (!lineHit) return;
+      if (!pendingConstraint || pendingConstraint.kind !== "angular") {
+        set({ pendingConstraint: { kind: "angular", firstId: lineHit.shapeId } });
+        return;
+      }
+      if (pendingConstraint.firstId === lineHit.shapeId) return;
+      get().makeAngle(pendingConstraint.firstId, lineHit.shapeId, get().angleValue);
+      set({ pendingConstraint: null });
+      return;
+    }
+
+    if (tool === "parallel") {
+      const lineHit = findLineRegion(raw, shapes, points, EDGE_SELECT_TOLERANCE);
+      if (!lineHit) return;
+      if (!pendingConstraint || pendingConstraint.kind !== "parallel") {
+        set({ pendingConstraint: { kind: "parallel", firstId: lineHit.shapeId } });
+        return;
+      }
+      if (pendingConstraint.firstId === lineHit.shapeId) return;
+      get().makeParallel(pendingConstraint.firstId, lineHit.shapeId);
+      set({ pendingConstraint: null });
+      return;
+    }
+
+    if (tool === "symmetric") {
+      if(pendingConstraint?.kind!=="symmetric" || !pendingConstraint.secondId){
+        const point=findNearbyPoint(raw,Object.values(points),SELECT_POINT_TOLERANCE);if(!point)return;
+        if(pendingConstraint?.kind!=="symmetric")set({pendingConstraint:{kind:"symmetric",firstId:point.id}});
+        else if(point.id!==pendingConstraint.firstId)set({pendingConstraint:{...pendingConstraint,secondId:point.id}});
+        return;
+      }
+      const hit=findLineRegion(raw,shapes,points,EDGE_SELECT_TOLERANCE);if(!hit)return;
+      const axis=shapes.find(s=>s.id===hit.shapeId);if(axis?.type!=="line")return;
+      const dependent=pendingConstraint.secondId;
+      if(dependent===ORIGIN_POINT_ID || dependent===axis.p1 || dependent===axis.p2 || get().fixedPointIds.includes(dependent) ||
+        isPointDrivenByDimension(dependent,get().dimensions,shapes) || shapes.some(s=>s.type==="line" && s.axisLock && (s.p1===dependent||s.p2===dependent)) ||
+        get().constraints.some(c=>constraintDependentId(c)===dependent)){
+        set({modifyError:"O ponto dependente está preso ao eixo ou a outra restrição."});return;
+      }
+      const target=reflectPoint(points[pendingConstraint.firstId],points[axis.p1],points[axis.p2]);
+      if(!target){set({modifyError:"Eixo de simetria sem comprimento."});return;}
+      get().movePoints({[dependent]:target});
+      get().upsertConstraint({kind:"symmetric",sourcePointId:pendingConstraint.firstId,pointId:dependent,lineId:axis.id});
+      set({pendingConstraint:null,modifyError:null});return;
+    }
+
+    if (tool === "concentric") {
+      const hit = findEdgeHit(raw, shapes, points, EDGE_SELECT_TOLERANCE);
+      if (hit?.kind !== "circleRadius") return;
+      const circle = shapes.find(s => s.id === hit.shapeId);
+      if (!circle || circle.type !== "circle") return;
+      if (pendingConstraint?.kind !== "concentric") {
+        set({pendingConstraint:{kind:"concentric",firstId:circle.id}}); return;
+      }
+      const first = shapes.find(s=>s.id===pendingConstraint.firstId);
+      if (!first || first.type !== "circle" || first.id === circle.id) return;
+      if (circle.center === ORIGIN_POINT_ID || get().fixedPointIds.includes(circle.center)) {
+        set({modifyError:"O centro dependente está fixo; selecione-o primeiro."}); return;
+      }
+      get().joinPoints(first.center, circle.center);
+      set({pendingConstraint:null, modifyError:null});
       return;
     }
 
@@ -1519,6 +1643,54 @@ export const useSketchStore = create<SketchState>((set, get) => {
   return {
     tool: "rect",
     gridSize: 10,
+    polygonSides: 6,
+    angleValue: 90,
+    layers: DEFAULT_LAYERS,
+    activeLayerId: "0",
+    modifyPreview: null,
+    modifyError: null,
+    arcPoints: [],
+    applySketchEdit: (edit) => {
+      const state = get();
+      if(state.layers.find(l=>l.id===state.activeLayerId)?.locked){set({modifyError:"Camada ativa bloqueada."});return;}
+      const removed = state.shapes.filter(s => edit.removeIds.includes(s.id));
+      const protectedIds = new Set(removed.flatMap(s => [s.id, ...shapePointIds(s)]));
+      const references = (value: unknown): boolean => {
+        if (typeof value === "string") return protectedIds.has(value);
+        if (value && typeof value === "object") return Object.values(value).some(references);
+        return false;
+      };
+      if (removed.some(s=>layerFor(s,state.layers).locked) || removed.some(s => shapePointIds(s).some(id => state.fixedPointIds.includes(id))) ||
+          state.dimensions.some(references) || state.constraints.some(references)) {
+        set({ modifyError: "Remova as cotas/restrições da geometria afetada antes de aparar ou estender.", modifyPreview: null });
+        return;
+      }
+      // New constructions can share exact existing endpoints without snapping
+      // computed centers/intersections away from their analytic position.
+      const remap = new Map<string, string>();
+      const additions: Record<string, SketchPoint> = {};
+      const bins = new Map<string, SketchPoint[]>();
+      const cell = (value: number) => Math.floor(value / 1e-8);
+      const index = (p: SketchPoint) => {
+        const key = `${cell(p.x)},${cell(p.y)}`;
+        const bucket = bins.get(key) ?? [];
+        bucket.push(p); bins.set(key, bucket);
+      };
+      Object.values(state.points).forEach(index);
+      for (const p of Object.values(edit.points)) {
+        let existing: SketchPoint | undefined;
+        const x = cell(p.x), y = cell(p.y);
+        for (let dx = -1; dx <= 1 && !existing; dx++) for (let dy = -1; dy <= 1 && !existing; dy++) {
+          existing = bins.get(`${x+dx},${y+dy}`)?.find(q=>Math.hypot(q.x-p.x,q.y-p.y)<1e-8);
+        }
+        if (existing) remap.set(p.id, existing.id);
+        else { additions[p.id] = p; index(p); }
+      }
+      set({ points: {...state.points,...additions},
+        shapes: [...state.shapes.filter(s=>!edit.removeIds.includes(s.id)), ...edit.shapes.map(s=>({...remapShapePoints(s,s.id,remap),layerId:s.layerId??state.activeLayerId}))],
+        modifyPreview:null, modifyError:null, arcPoints:[], selectedShapeId:null,
+      });
+    },
     activePlane: BASE_SKETCH_PLANE,
     points: { [ORIGIN_POINT_ID]: ORIGIN_POINT },
     shapes: [],
@@ -1551,6 +1723,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
     setTool: (tool) =>
       set((s) => ({
         tool,
+        modifyPreview: null, modifyError: null, arcPoints: [],
         measurement: tool === "measure" ? s.measurement : null,
         hoverHit: tool === "dimension" ? s.hoverHit : null,
         dimensionPick1: tool === "dimension" ? s.dimensionPick1 : null,
@@ -1565,11 +1738,12 @@ export const useSketchStore = create<SketchState>((set, get) => {
         alignmentGuides: null,
       })),
     setActivePlane: (plane) => set({ activePlane: plane }),
-    setFilletRadius: (radius) => set({ filletRadius: Math.max(radius, 0.1) }),
-    setChamferDistance: (distance) => set({ chamferDistance: Math.max(distance, 0.1) }),
+    setFilletRadius: (radius) => { if (Number.isFinite(radius)) set({ filletRadius: Math.max(radius, 0.1) }); },
+    setChamferDistance: (distance) => { if (Number.isFinite(distance)) set({ chamferDistance: Math.max(distance, 0.1) }); },
 
     resolvePointAt: (raw, toleranceWorld, referenceGeometry = []) => {
-      const { points, gridSize, shapes } = get();
+      const {gridSize}=get();
+      const {points,shapes}=layerGeometry(get());
       const resolved = resolveSnapWithEdges(
         raw,
         points,
@@ -1606,7 +1780,9 @@ export const useSketchStore = create<SketchState>((set, get) => {
     // H/V normal de qualquer retângulo cotado.
     movePoints: (updates, cascadeBlocked) =>
       set((s) => {
-        const expanded = propagateAxisLocks(updates, s.shapes, s.points, EMPTY_FIXED_SET, cascadeBlocked);
+        const locked=lockedLayerPoints(s.shapes,s.layers);
+        const allowed=Object.fromEntries(Object.entries(updates).filter(([id])=>!locked.has(id)));
+        const expanded = propagateAxisLocks(allowed, s.shapes, s.points, locked, cascadeBlocked);
         let nextPoints = { ...s.points };
         for (const [id, pos] of Object.entries(expanded)) {
           if (!nextPoints[id] || id === ORIGIN_POINT_ID) continue; // origem é fixa, nunca arrasta
@@ -1617,7 +1793,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
         // acima — é isso que faz essas ferramentas continuarem "de pé"
         // depois de editar a geometria de novo, em vez de só valerem no
         // instante em que foram usadas.
-        nextPoints = reapplyConstraints(s.constraints, s.shapes, nextPoints, EMPTY_FIXED_SET, cascadeBlocked);
+        nextPoints = reapplyConstraints(s.constraints, s.shapes, nextPoints, locked, cascadeBlocked);
         return { points: nextPoints };
       }),
 
@@ -1630,10 +1806,11 @@ export const useSketchStore = create<SketchState>((set, get) => {
         ),
       })),
 
-    addShape: (shape) => set((s) => ({ shapes: [...s.shapes, shape] })),
+    addShape: (shape) => set((s) => s.layers.find(l=>l.id===s.activeLayerId)?.locked ? {modifyError:"Camada ativa bloqueada."} : ({ shapes: [...s.shapes, {...shape,layerId:shape.layerId??s.activeLayerId}] })),
 
     removeShape: (id) =>
       set((s) => {
+        const removed=s.shapes.find(shape=>shape.id===id);if(removed&&layerFor(removed,s.layers).locked)return s;
         const survivors = s.dimensions.filter((d) => {
           if (d.kind === "radius") return d.circleId !== id;
           if (d.kind === "arcRadius") return d.arcId !== id;
@@ -1649,7 +1826,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
         // reapplyConstraints ficaria tentando reforçar contra uma forma que
         // não existe mais.
         const remainingConstraints = s.constraints.filter((c) => {
-          if (c.kind === "perpendicular") return c.lineAId !== id && c.lineBId !== id;
+          if (c.kind === "perpendicular" || c.kind === "parallel" || c.kind === "angular") return c.lineAId !== id && c.lineBId !== id;
           if (c.kind === "tangent") return c.lineId !== id && c.circleId !== id;
           if (c.kind === "pointOnLine") return c.lineId !== id;
           return c.lineId !== id; // lineMidpointOnPoint
@@ -1939,6 +2116,8 @@ export const useSketchStore = create<SketchState>((set, get) => {
       // Cota de referência só relata a medida (derivada da geometria) —
       // nunca aceita um valor digitado.
       if (dimension.isReference) return;
+      const locked=get().shapes.filter(shape=>layerFor(shape,get().layers).locked);
+      if(referencesGeometry(dimension,new Set(locked.flatMap(shape=>[shape.id,...pointIdsOfShape(shape)]))))return;
 
       const plain = Number(rawText.trim().replace(",", "."));
       const paramNames = extractParamNames(rawText);
@@ -1994,7 +2173,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
     toggleProfileSelection: (id) =>
       set((s) => {
         const shape = s.shapes.find((sh) => sh.id === id);
-        const idsToToggle = shape?.type === "line" ? (findLoopShapeIds(s.shapes, id) ?? [id]) : [id];
+        const idsToToggle = (shape?.type === "line" || shape?.type === "spline" || shape?.type === "arc") ? (findLoopShapeIds(s.shapes, id) ?? [id]) : [id];
         const anySelected = idsToToggle.some((i) => s.multiProfileSelection.includes(i));
         return {
           multiProfileSelection: anySelected
@@ -2043,6 +2222,36 @@ export const useSketchStore = create<SketchState>((set, get) => {
     // não "virar" a linha do avesso sem necessidade. Registra uma restrição
     // persistente (ver upsertConstraint) — se A girar depois, B é
     // reorientado de novo automaticamente (ver reapplyConstraints).
+    makeAngle: (lineAId,lineBId,degrees) => {
+      const state=get(),a=state.shapes.find(s=>s.id===lineAId),b=state.shapes.find(s=>s.id===lineBId);
+      if(a?.type!=="line"||b?.type!=="line")return;
+      if(a.id===b.id||b.axisLock||b.p2===ORIGIN_POINT_ID||b.p2===a.p1||b.p2===a.p2||state.fixedPointIds.includes(b.p2)||
+        isPointDrivenByDimension(b.p2,state.dimensions,state.shapes)||state.constraints.some(c=>constraintDependentId(c)===b.id&&c.kind!=="angular")){
+        set({modifyError:"A linha dependente está presa a outra referência/cota."});return;
+      }
+      const target=angularTarget(a,b,state.points,degrees);
+      if(!target){set({modifyError:"Ângulo deve estar entre 0 (inclusive) e 360 graus; as linhas precisam ter comprimento."});return;}
+      const existing=state.constraints.find(c=>c.kind==="angular"&&c.lineAId===lineAId&&c.lineBId===lineBId);
+      if(existing?.kind==="angular"&&existing.degrees===degrees&&Math.hypot(state.points[b.p2].x-target.x,state.points[b.p2].y-target.y)<1e-9)return;
+      get().movePoints({[b.p2]:target});
+      get().upsertConstraint({kind:"angular",lineAId,lineBId,degrees});set({modifyError:null});
+    },
+    makeParallel: (lineAId, lineBId) => {
+      const { shapes, points } = get();
+      const lineA = shapes.find((sh) => sh.id === lineAId);
+      const lineB = shapes.find((sh) => sh.id === lineBId);
+      if (!lineA || lineA.type !== "line" || !lineB || lineB.type !== "line") return;
+
+      if (lineAId === lineBId || lineB.axisLock ||
+          pointIdsOfShape(lineB).some(id=>get().fixedPointIds.includes(id)) ||
+          get().constraints.some(c=>constraintDependentId(c)===lineBId && c.kind!=="parallel")) {
+        set({modifyError:"A linha dependente possui uma restrição incompatível; remova-a antes de aplicar Paralelo."});return;
+      }
+      const target = computePerpendicularTarget(lineA, lineB, points, 0);
+      if (target) get().movePoints({ [target.movingId]: target.pos });
+      get().upsertConstraint({ kind: "parallel", lineAId, lineBId });
+    },
+
     makePerpendicular: (lineAId, lineBId) => {
       const { shapes, points } = get();
       const lineA = shapes.find((sh) => sh.id === lineAId);
@@ -2111,18 +2320,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
 
         const remap = (id: string) => (id === removeId ? keepId : id);
 
-        const shapes = s.shapes.map((shape) => {
-          if (shape.type === "circle") {
-            return shape.center === removeId ? { ...shape, center: keepId } : shape;
-          }
-          if (shape.type === "point") {
-            return shape.pointId === removeId ? { ...shape, pointId: keepId } : shape;
-          }
-          if (shape.type === "slot") {
-            return { ...shape, center1: remap(shape.center1), center2: remap(shape.center2) };
-          }
-          return { ...shape, p1: remap(shape.p1), p2: remap(shape.p2) };
-        });
+        const shapes = s.shapes.map(shape=>remapShapePoints(shape,shape.id,new Map([[removeId,keepId]])));
 
         const dimensions = s.dimensions.map((dim) =>
           dim.kind === "distance" ? { ...dim, p1: remap(dim.p1), p2: remap(dim.p2) } : dim
@@ -2131,7 +2329,12 @@ export const useSketchStore = create<SketchState>((set, get) => {
         const points = { ...s.points };
         delete points[removeId];
 
-        return { shapes, dimensions, points };
+        const constraints=s.constraints.map(c=> {
+          if(c.kind==="symmetric")return {...c,pointId:remap(c.pointId),sourcePointId:remap(c.sourcePointId)};
+          if(c.kind==="pointOnLine"||c.kind==="lineMidpointOnPoint")return {...c,pointId:remap(c.pointId)};
+          return c;
+        });
+        return { shapes, dimensions, points, constraints, fixedPointIds:[...new Set(s.fixedPointIds.map(remap))] };
       }),
 
     makePointCoincidentWithLine: (pointId, lineId) => {
@@ -2208,6 +2411,8 @@ export const useSketchStore = create<SketchState>((set, get) => {
         shapes: [],
         dimensions: [],
         constraints: [],
+        layers: DEFAULT_LAYERS, activeLayerId:"0",
+        modifyPreview: null, modifyError: null, arcPoints: [],
         fixedPointIds: [],
         nextParamNumber: 1,
         // Ponto de origem sempre presente num sketch novo/limpo — não {}
@@ -2227,7 +2432,10 @@ export const useSketchStore = create<SketchState>((set, get) => {
       }),
 
     handleRawDown: (raw, referenceGeometry = [], ctrlKey = false) => {
-      const { tool, shapes, points, dimensions, fixedPointIds } = get();
+      const {tool,dimensions}=get();
+      const {shapes,points}=layerGeometry(get(),true);
+      const fixedPointIds=[...get().fixedPointIds,...lockedLayerPoints(get().shapes,get().layers)];
+      if(tool!=="select" && get().layers.find(l=>l.id===get().activeLayerId)?.locked){set({modifyError:"Desbloqueie a camada ativa antes de editar."});return;}
 
       if (CLICK_TOOLS.has(tool)) {
         handleConstraintClick(tool, raw, referenceGeometry);
@@ -2247,7 +2455,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
         if (ctrlKey) {
           const hit = findEdgeHit(raw, shapes, points, EDGE_SELECT_TOLERANCE);
           const PROFILE_HIT_KINDS = new Set(["circleRadius", "rectWidth", "rectHeight", "slotLength", "slotRadius"]);
-          if (hit?.kind === "line") {
+          if (hit?.kind === "line" || hit?.kind === "spline") {
             // Só perfilável se fechar um contorno de verdade (ex.: um dos 4
             // lados de um retângulo desenhado como 4 linhas, ver
             // handleRawUp) — uma linha solta/aberta não vira perfil, então
@@ -2427,6 +2635,15 @@ export const useSketchStore = create<SketchState>((set, get) => {
           return;
         }
 
+        const splineHit = findEdgeHit(raw, shapes.filter(s=>s.type==="spline"), points, EDGE_SELECT_TOLERANCE);
+        if (splineHit?.kind === "spline") {
+          const spline = shapes.find(s=>s.id===splineHit.shapeId)!;
+          const pointIds = pointIdsOfShape(spline);
+          set({selectedShapeId:spline.id, downRaw:raw, selectDrag:{mode:"translate", pointIds,
+            startPositions:Object.fromEntries(pointIds.map(id=>[id,{x:points[id].x,y:points[id].y}]))}});
+          return;
+        }
+
         // Nada bateu (nem borda de círculo, nem ponto, nem retângulo, nem
         // linha) — clique em espaço vazio, desseleciona.
         set({ selectedShapeId: null });
@@ -2445,6 +2662,18 @@ export const useSketchStore = create<SketchState>((set, get) => {
 
     handleRawMove: (raw, referenceGeometry = []) => {
       const { selectDrag, downRaw, tool, shapes, points, dimensionDrag, constraints, fixedPointIds } = get();
+      if (tool === "arc3" || tool === "spline" || tool === "trim" || tool === "extend") {
+        try {
+          if (tool === "arc3" || tool === "spline") {
+            const next = previewSnap(raw, referenceGeometry), picks = get().arcPoints;
+            set({ draftPoint: next, modifyPreview: tool === "spline" ? (picks.length === 3 ? cubicSplineEdit([...picks,next]) : null) : (picks.length === 2 ? threePointArc(picks[0], picks[1], next) : null), modifyError: null });
+          } else {
+            const hit = findLineRegion(raw, shapes, points, EDGE_SELECT_TOLERANCE);
+            set({ modifyPreview: hit ? trimExtend(shapes, points, hit.shapeId, raw, tool === "extend") : null, modifyError: null });
+          }
+        } catch { set({ modifyPreview: null }); }
+        return;
+      }
       const fixedSet = new Set(fixedPointIds);
 
       if (dimensionDrag) {
@@ -2686,7 +2915,8 @@ export const useSketchStore = create<SketchState>((set, get) => {
           // nada perto), o que criava cota "no vazio" a cada arrasto sobre
           // área em branco. "snapped" é exatamente esse sinal: true só
           // quando colou em algo real, não quando só caiu no grid.
-          const { points: pts, shapes: shs, gridSize } = get();
+          const {gridSize}=get();
+          const {points:pts,shapes:shs}=layerGeometry(get());
           // Círculo/arco/rasgo: reconhece o CENTRO com o mesmo critério
           // relativo (perto do centro X perto da borda) que o clique
           // único já usa em findEdgeHit — resolveSnapWithEdges sozinho usa
@@ -2745,8 +2975,22 @@ export const useSketchStore = create<SketchState>((set, get) => {
               }
             }
           }
+        } else if (tool === "polygon") {
+          const { points, shapes, gridSize, polygonSides } = get();
+          const snapGeometry=layerGeometry(get());
+          const center = resolveSnapWithEdges(downRaw, snapGeometry.points, snapGeometry.shapes, referenceGeometry, gridSize, SNAP_TOLERANCE).point;
+          const vertex = resolveSnapWithEdges(rawEnd, snapGeometry.points, snapGeometry.shapes, referenceGeometry, gridSize, SNAP_TOLERANCE).point;
+          const vertices = regularPolygon(center, vertex, polygonSides);
+          if (vertices.length) {
+            const additions = vertices.map((p) => ({ ...p, id: createId() }));
+            const edges: SketchShape[] = additions.map((p, i) => ({
+              id: createId(), type: "line", p1: p.id, p2: additions[(i + 1) % additions.length].id, layerId:get().activeLayerId,
+            }));
+            set({ points: { ...points, ...Object.fromEntries(additions.map((p) => [p.id, p])) }, shapes: [...shapes, ...edges] });
+          }
         } else if (tool === "measure") {
-          const { points: pts, shapes: shs, gridSize } = get();
+          const {gridSize}=get();
+          const {points:pts,shapes:shs}=layerGeometry(get());
           const start = resolveSnapWithEdges(downRaw, pts, shs, referenceGeometry, gridSize, SNAP_TOLERANCE).point;
           const end = resolveSnapWithEdges(rawEnd, pts, shs, referenceGeometry, gridSize, SNAP_TOLERANCE).point;
           set({ measurement: { x1: start.x, y1: start.y, x2: end.x, y2: end.y } });
@@ -2783,8 +3027,17 @@ export const useSketchStore = create<SketchState>((set, get) => {
             const p1 = get().points[startId];
             const p2 = get().points[endId];
             if (p1 && p2 && Math.abs(p2.x - p1.x) > 1e-6 && Math.abs(p2.y - p1.y) > 1e-6) {
-              const cornerBId = get().resolvePointAt({ x: p2.x, y: p1.y }, SNAP_TOLERANCE, referenceGeometry);
-              const cornerDId = get().resolvePointAt({ x: p1.x, y: p2.y }, SNAP_TOLERANCE, referenceGeometry);
+              // Derived corners must stay exact: a second proximity snap can
+              // pull them onto unrelated geometry and violate the H/V locks.
+              const exactCorner = (x: number, y: number) => {
+                const existing = Object.values(get().points).find((p) => Math.hypot(p.x - x, p.y - y) < 1e-9);
+                if (existing) return existing.id;
+                const id = createId();
+                set((s) => ({ points: { ...s.points, [id]: { id, x, y } } }));
+                return id;
+              };
+              const cornerBId = exactCorner(p2.x, p1.y);
+              const cornerDId = exactCorner(p1.x, p2.y);
               get().addShape({ id: createId(), type: "line", p1: startId, p2: cornerBId, axisLock: "horizontal" });
               get().addShape({ id: createId(), type: "line", p1: cornerBId, p2: endId, axisLock: "vertical" });
               get().addShape({ id: createId(), type: "line", p1: endId, p2: cornerDId, axisLock: "horizontal" });
@@ -2797,7 +3050,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
       set({ downRaw: null, draftPoint: null, edgeHitCandidate: null });
     },
 
-    clearHover: () => set({ hoverHit: null, snapIndicator: null }),
+    clearHover: () => set({ hoverHit: null, snapIndicator: null, modifyPreview: null }),
 
     deleteSelectedShape: () => {
       const { selectedShapeId } = get();

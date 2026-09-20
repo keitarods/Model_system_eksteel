@@ -1,3 +1,4 @@
+import { resolveSpline, type CubicControls } from "./spline";
 import type { EdgeHit } from "./hitTest";
 import type {
   ArcShape,
@@ -331,6 +332,7 @@ export function computeRadiusDimensionGeometry(
 // (que nunca vira ponto/shape de fato se for cancelado). Descrição pura de
 // geometria — cada view (SVG 2D, Three.js 3D) decide como desenhar isso.
 export type RenderableShape =
+  | {kind:"spline"; controls:CubicControls}
   | { kind: "line"; x1: number; y1: number; x2: number; y2: number }
   | { kind: "centerline"; x1: number; y1: number; x2: number; y2: number }
   | { kind: "rect"; x1: number; y1: number; x2: number; y2: number }
@@ -343,6 +345,7 @@ export function resolveShape(
   shape: SketchShape,
   points: Record<string, SketchPoint>
 ): RenderableShape | null {
+  if (shape.type === "spline") { const controls=resolveSpline(shape,points); return controls ? {kind:"spline",controls} : null; }
   if (shape.type === "circle") {
     const center = points[shape.center];
     if (!center) return null;
