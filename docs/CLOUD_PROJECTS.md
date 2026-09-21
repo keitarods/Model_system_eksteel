@@ -150,3 +150,9 @@ Selecione a pasta e a peça em **Peça existente**. O software consulta o token 
 - **Fechar desenho**: na barra do ambiente Desenho, volta ao modelo 3D. Como as folhas fazem parte do projeto da peça/montagem, elas são preservadas, não excluídas. Reabra a aba Desenho para continuar; use Salvar desenho para gravar o arquivo separado.
 
 Fechar uma peça cancela suas ferramentas ativas e desvincula o destino anterior de Salvar na nuvem. Não encerra a conexão com o Storage.
+
+### Uso em celular e tablet
+
+As barras superiores rolam horizontalmente em telas pequenas. Na peça, use **Recolher ferramentas** para ampliar o 3D e alterne entre **3D** e **Histórico**. Na montagem, alterne entre **Modelo 3D** e **Componentes**; iniciar uma restrição retorna ao modelo para selecionar as referências. No desenho, **Propriedades da folha** abre o painel e **Voltar à folha** recupera a área de desenho.
+
+Os controles têm alvos maiores em dispositivos de toque. No modelo, um dedo gira a câmera e dois dedos permitem zoom/deslocamento. Durante a edição do esboço, os gestos ficam reservados ao desenho; finalize o esboço para retomar a navegação por toque. As alterações de interface não mudam os formatos de arquivo. Modelos complexos ainda dependem da memória e capacidade gráfica do aparelho.

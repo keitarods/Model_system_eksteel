@@ -127,6 +127,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
   // ambiente de Desenho do Modelador, com a montagem inteira como fonte de
   // geometria e a Lista de Peças habilitada) — mesma divisão de modos que o
   // ModeladorWorkspace já usa pra peça.
+  const [mobilePanel, setMobilePanel] = useState<"viewer" | "tree">("viewer");
   const [mode, setMode] = useState<"modelo" | "desenho">("modelo");
   const [propertiesOpen, setPropertiesOpen] = useState(false);
   const [placements, setPlacements] = useState<Record<string, ComponentPlacement>>({});
@@ -442,6 +443,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
   );
 
   const handleStartConstraint = useCallback(() => {
+    setMobilePanel("viewer");
     setConstraintMode(true);
     setPendingFace(null);
     setConstraintDraft(null);
@@ -719,8 +721,8 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
   }, [handleSaveAssembly, handleSaveAssemblyAs]);
 
   return (
-    <div className="flex h-dvh flex-col bg-background text-foreground">
-      <header className="flex flex-wrap items-center gap-3 border-b border-chrome-border bg-chrome-bg px-4 py-2 text-chrome-text">
+    <div className="cad-workspace flex h-dvh min-w-0 flex-col overflow-hidden bg-background text-foreground">
+      <header className="cad-header flex flex-wrap items-center gap-3 border-b border-chrome-border bg-chrome-bg px-4 py-2 text-chrome-text">
         <div className="flex items-center gap-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/images/Eksteel-logo.png" alt="Eksteel" className="h-9 w-auto object-contain" />
@@ -904,8 +906,16 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
       {mode === "desenho" ? (
         <DrawingSheetWorkspace useStore={useAssemblyDrawingStore} source={assemblySheetSource} onClose={() => setMode("modelo")} />
       ) : (
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="flex shrink-0 border-b border-primary-100 bg-white md:hidden">
+          {(["viewer", "tree"] as const).map(panel => <button key={panel} type="button"
+            aria-pressed={mobilePanel === panel} onClick={() => setMobilePanel(panel)}
+            className={`flex-1 px-3 py-2 text-sm ${mobilePanel === panel ? "bg-primary-800 text-white" : "text-primary-700"}`}>
+            {panel === "viewer" ? "Modelo 3D" : "Componentes"}
+          </button>)}
+        </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
-        <div className="min-h-0 flex-1 md:order-1">
+        <div className={`min-h-0 min-w-0 flex-1 md:order-1 md:block ${mobilePanel === "viewer" ? "" : "hidden"}`}>
           <AssemblyViewer3D
             bodies={bodies}
             pickMode={constraintMode}
@@ -923,7 +933,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
             onEditInstance={handleEditInstance}
           />
         </div>
-        <div className="min-h-0 w-full shrink-0 md:order-2 md:w-72" style={{ flex: "0 0 auto" }}>
+        <div className={`min-h-0 w-full flex-1 overflow-y-auto md:flex-none md:order-2 md:w-72 md:block ${mobilePanel === "tree" ? "" : "hidden"}`}>
           <AssemblyTree
             instances={instances}
             constraints={constraints}
@@ -956,6 +966,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
             </div>
           )}
         </div>
+      </div>
       </div>
       )}
 

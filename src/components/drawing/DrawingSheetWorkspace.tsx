@@ -318,6 +318,7 @@ export function DrawingSheetWorkspace({
   useStore?: SheetStore;
   source: SheetShapeSource;
 }) {
+  const [mobileProperties, setMobileProperties] = useState(false);
   const { sheet: activeSheet, sheets } = useActiveSheet(useStore);
   const addSheet = useStore((s) => s.addSheet);
   const removeSheet = useStore((s) => s.removeSheet);
@@ -968,7 +969,7 @@ export function DrawingSheetWorkspace({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="flex flex-wrap items-center gap-1 border-b border-primary-100 bg-primary-50 px-3 py-2 text-sm">
+      <div className="cad-drawing-tools flex flex-wrap items-center gap-1 border-b border-primary-100 bg-primary-50 px-3 py-2 text-sm">
         <div className="flex items-center gap-1 overflow-x-auto">
           {sheets.map((s) => (
             <button
@@ -1170,13 +1171,17 @@ export function DrawingSheetWorkspace({
         <p className="border-b border-error/20 bg-error/10 px-3 py-2 text-sm text-error">{errorMessage}</p>
       )}
 
+      <button type="button" className="shrink-0 border-b bg-white px-3 py-2 text-sm text-primary-700 md:hidden"
+        disabled={!activeSheet} aria-expanded={mobileProperties} onClick={() => setMobileProperties(value => !value)}>
+        {mobileProperties ? "Voltar à folha" : "Propriedades da folha"}
+      </button>
       <div className="flex min-h-0 flex-1">
-        <div className="min-h-0 flex-1 overflow-auto bg-primary-100/40 p-6">
+        <div className={`min-h-0 min-w-0 flex-1 overflow-auto bg-primary-100/40 p-2 md:p-6 md:block ${mobileProperties && activeSheet ? "hidden" : ""}`}>
           {activeSheet ? (
             <svg
               ref={svgRef}
               viewBox={`0 0 ${sheetDims.width} ${sheetDims.height}`}
-              className="mx-auto block bg-white shadow-lg"
+              className="mx-auto block touch-none bg-white shadow-lg"
               style={{ width: "100%", maxWidth: sheetDims.width * 3.5 }}
               onPointerMove={handleSheetPointerMove}
               onPointerUp={handleSheetPointerUp}
@@ -1344,7 +1349,7 @@ export function DrawingSheetWorkspace({
         </div>
 
         {activeSheet && (
-          <div className="w-72 shrink-0 overflow-y-auto border-l border-primary-100 bg-white p-3 text-sm">
+          <div className={`w-full md:w-72 shrink-0 overflow-y-auto border-l border-primary-100 bg-white p-3 text-sm md:block ${mobileProperties ? "" : "hidden"}`}>
             {source.bomParts ? (
               <div className="mb-3 flex gap-1">
                 <button

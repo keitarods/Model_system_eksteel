@@ -631,7 +631,7 @@ export function Viewer3D({
         </button>
       </div>
 
-      <div className={`relative flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
+      <div className={`relative min-h-0 flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
         <Canvas
           camera={{ position: INITIAL_CAMERA_POSITION, fov: 45, up: [0, 0, 1], near: 0.1, far: 10000 }}
           shadows="basic"
@@ -709,6 +709,10 @@ export function Viewer3D({
             makeDefault
             target={orbitTarget}
             mouseButtons={sketchOverlay?.interactive || planeOffsetDrag ? SKETCH_MOUSE_BUTTONS : undefined}
+            // Sketch gestures belong to the sketch; navigation resumes after finishing it.
+            touches={sketchOverlay?.interactive
+              ? { ONE: undefined, TWO: undefined }
+              : { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }}
             enableZoom
             zoomToCursor
             zoomSpeed={1.2}

@@ -364,6 +364,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // Altura da barra de ferramentas principal, ajustável arrastando a
   // divisória logo abaixo dela — mesma ideia da largura da árvore de
   // histórico. 96 = altura inicial (equivalente ao antigo max-h-24 fixo).
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(true);
   const [toolbarHeight, setToolbarHeight] = useState(76);
 
   const handleToolbarResizeStart = useCallback(
@@ -2625,8 +2626,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   }, [mode, sketching, measuring3d, pickingPlane, creatingPlane, pickingAxisFace, edgeToolMode, flangePicking, creatingSheetMetal, featureToolMode, advancedEditing, features, profile, isSheetMetal, centerLine, hasActiveSolid, holeCircles, handleCreateSketch, handleFinishSketch, handleStartFillet, showNotice]);
 
   return (
-    <div className="flex h-dvh flex-col bg-background text-foreground">
-      <header className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-chrome-border bg-chrome-bg px-3 py-1.5 text-chrome-text">
+    <div className="cad-workspace flex h-dvh min-w-0 flex-col overflow-hidden bg-background text-foreground">
+      <header className="cad-header flex shrink-0 items-center gap-2 overflow-x-auto border-b border-chrome-border bg-chrome-bg px-3 py-1.5 text-chrome-text">
         <div className="flex items-center gap-3">
           <ApplicationFileMenu>
           <button
@@ -2853,8 +2854,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           altura ajustada — os outros modos (escolher plano, esboçando,
           arestas etc.) já são compactos e raramente chegam perto do limite. */}
       <div
+        id="model-tools"
+        data-mobile-open={mobileToolsOpen}
         style={{ height: toolbarHeight }}
-        className="flex shrink-0 items-start gap-x-2 gap-y-1 overflow-auto border-b border-primary-100 bg-primary-50 px-2 py-1 text-sm">
+        className="cad-model-tools flex shrink-0 items-start gap-x-2 gap-y-1 overflow-auto border-b border-primary-100 bg-primary-50 px-2 py-1 text-sm">
         {enabledFeatures.at(-1)?.type === "unfold" ? (
           <FeaturePanel label="Chapas — desdobrada">
             <FeatureToolButton icon={IconFlange} label="Redobrar" title="Retorna à geometria dobrada para continuar modelando."
@@ -4027,7 +4030,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       <div
         onPointerDown={handleToolbarResizeStart}
         title="Arraste para redimensionar a barra de ferramentas"
-        className="h-1.5 shrink-0 cursor-row-resize bg-primary-100 transition hover:bg-primary-300 active:bg-primary-400"
+        className="hidden md:block h-1.5 shrink-0 cursor-row-resize bg-primary-100 transition hover:bg-primary-300 active:bg-primary-400"
       />
 
       {fsAccessSupported === false && (
@@ -4098,6 +4101,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           (desenha/seleciona/mede direto nele), então só sobrou Histórico
           como aba separada. */}
       <div className="flex shrink-0 border-b border-primary-100 bg-white text-xs md:hidden">
+        <button type="button" aria-expanded={mobileToolsOpen} aria-controls="model-tools"
+          onClick={() => setMobileToolsOpen(value => !value)} className="border-r border-primary-100 px-3 font-semibold">
+          {mobileToolsOpen ? "Recolher ferramentas" : "Ferramentas"}
+        </button>
         {(
           [
             { id: "viewer" as const, label: "3D" },
