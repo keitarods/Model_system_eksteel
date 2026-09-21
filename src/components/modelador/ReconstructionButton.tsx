@@ -9,7 +9,7 @@ import type { Feature, ImportedFeature } from "@/lib/features/types";
 import { useFeatureStore } from "@/lib/features/store";
 import { loadOpenCascade } from "@/lib/replicad/opencascade";
 import { automaticallyRecognize } from "@/lib/replicad/automaticRecognition";
-import { recognizeOperations, recognizeSheetRecipe, type Recognition, type RecognitionMode } from "@/lib/replicad/recognizeOperations";
+import { recognizeBentSheet, recognizeOperations, recognizeSheetRecipe, type Recognition, type RecognitionMode } from "@/lib/replicad/recognizeOperations";
 import { createId } from "@/lib/sketch/render";
 import { serializeProject, NATIVE_MIME_TYPE } from "@/lib/project/nativeFormat";
 import { downloadBlob } from "@/lib/project/folder";
@@ -20,11 +20,13 @@ type Proposal = Recognition & {
     mesh: ShapeMesh;
     keptSolid?: boolean;
 };
-export function ReconstructionButton({ compact = false }: { compact?: boolean }) {
+export function ReconstructionButton({ compact = false, initialMode = "auto" }: { compact?: boolean; initialMode?: "auto" | "bentSheet" }) {
     const features = useFeatureStore(s => s.features);
     const sources = features.filter((f): f is ImportedFeature => f.type === 'imported' && f.format === 'step');
     const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
-    const [sourceId, setSourceId] = useState(''), [mode, setMode] = useState<RecognitionMode | "auto">("auto");
+    const [sourceId, setSourceId] = useState(''), [mode, setMode] = useState<RecognitionMode | "auto" | "bentSheet">(initialMode);
+    const [estimateK, setEstimateK] = useState(false);
+    const [bendK, setBendK] = useState("");
     const [recipe, setRecipe] = useState<string | null>(null), [proposal, setProposal] = useState<Proposal | null>(null);
     const dialog = useRef<HTMLDialogElement>(null), trigger = useRef<HTMLButtonElement>(null), title = useId();
     useEffect(() => { if (open)
@@ -43,7 +45,11 @@ export function ReconstructionButton({ compact = false }: { compact?: boolean })
             await new Promise(resolve => setTimeout(resolve, 0));
             const automatic = mode === 'auto' ? automaticallyRecognize(source, createId) : null;
             const keptSolid = automatic?.status === 'solid';
-            const result = automatic ? { features: automatic.features, differenceVolume: automatic.validation?.differenceVolume ?? 0, toleranceVolume: automatic.validation?.toleranceVolume ?? 0, notes: keptSolid ? ['Não foi possível reconstruir este corpo. O sólido original foi mantido sem alterações.', ...automatic.attempts] : ['Operações reconhecidas automaticamente e verificadas contra o STEP.'] } : mode === 'sheetMetal'  && recipe ? recognizeSheetRecipe(source, recipe, createId) : recognizeOperations(source, mode === "auto" ? "extrude" : mode, createId);
+            const result = mode === 'bentSheet' ? recognizeBentSheet(source, estimateK ? 0.5 : bendK.trim() ? Number(bendK) : NaN, createId) : automatic ? { features: automatic.features, differenceVolume: automatic.validation?.differenceVolume ?? 0, toleranceVolume: automatic.validation?.toleranceVolume ?? 0, notes: keptSolid ? ['Não foi possível reconstruir este corpo. O sólido original foi mantido sem alterações.', ...automatic.attempts] : ['Operações reconhecidas automaticamente e verificadas contra o STEP.'] } : mode === 'sheetMetal'  && recipe ? recognizeSheetRecipe(source, recipe, createId) : recognizeOperations(source, mode === "auto" ? "extrude" : mode, createId);
+            if (mode === 'bentSheet') {
+                result.features = result.features.map(f => f.type === 'flange' ? { ...f, kFactorSource: estimateK ? 'estimated' as const : 'user' as const, label: estimateK ? `${f.label} · K estimado` : f.label } : f);
+                if (estimateK) result.notes = result.notes.filter(n => !n.includes('informado pelo usuário')).concat('K = 0,5 é uma hipótese de linha neutra no meio da espessura, não um valor identificado no STEP. Desenvolvimento estimado: ajuste pela regra de fabricação.');
+            }
             const model = rebuildModel(result.features);
             if (!model)
                 throw new Error("Reconstrução sem geometria de prévia.");
@@ -62,13 +68,19 @@ export function ReconstructionButton({ compact = false }: { compact?: boolean })
         }
     }
     return <>
-    <button ref={trigger} type="button" disabled={!sources.length} onClick={() => setOpen(true)} className="shrink-0 rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:opacity-40" title="Reconstruir operações de um corpo STEP">{compact ? <><HeaderIcon kind="reconstruct" /><span className="sr-only">Reconstruir STEP</span></> : "Reconstruir STEP"}</button>
+    <button ref={trigger} type="button" disabled={!sources.length} onClick={() => setOpen(true)} className="shrink-0 rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:opacity-40" title="Reconstruir operações de um corpo STEP">{compact ? <><HeaderIcon kind="reconstruct" /><span className="sr-only">Reconstruir STEP</span></> : initialMode === "bentSheet" ? "Reconhecer dobras STEP" : "Reconstruir STEP"}</button>
     {open && createPortal(<dialog ref={dialog} aria-labelledby={title} onCancel={e => { e.preventDefault(); close(); }} onClose={() => setOpen(false)} onKeyDown={e => e.stopPropagation()} className="fixed inset-0 m-auto max-h-[calc(100dvh-2rem)] w-[min(38rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-chrome-border bg-chrome-surface p-5 text-sm text-chrome-text shadow-xl backdrop:bg-black/50">
       <div className="flex items-center justify-between gap-3"><h2 id={title} className="font-semibold">Reconstruir operações do STEP</h2><button autoFocus onClick={close} className="rounded border px-3 py-1">Fechar</button></div>
       <div className="mt-4 space-y-3 [&_select]:w-full [&_select]:rounded [&_select]:border [&_select]:border-chrome-border [&_select]:bg-chrome-surface [&_select]:p-2">
         <p>Gera uma nova sequência e verifica o volume da diferença geométrica contra o corpo original. O histórico original não é recuperado.</p>
         <label className="block">Corpo<select disabled={busy} value={source?.id ?? ''} onChange={e => { setSourceId(e.target.value); setProposal(null); }}>{sources.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}</select></label>
-        <label className="block">Reconhecimento<select disabled={busy} value={mode} onChange={e => { setMode(e.target.value as RecognitionMode | "auto"); setProposal(null); setError(''); }}><option value="auto">Automático — manter sólido se não reconhecer</option><option value="extrude">Extrusão, recortes e furos cilíndricos</option><option value="revolve">Revolução de 360°</option><option value="sheetMetal">Chapa — dados estritos</option></select></label>
+        <label className="block">Reconhecimento<select disabled={busy} value={mode} onChange={e => { setMode(e.target.value as RecognitionMode | "auto" | "bentSheet"); setProposal(null); setError(''); }}><option value="auto">Automático — manter sólido se não reconhecer</option><option value="extrude">Extrusão, recortes e furos cilíndricos</option><option value="revolve">Revolução de 360°</option><option value="bentSheet">Chapa dobrada — reconhecer uma dobra simples</option><option value="sheetMetal">Chapa — dados estritos</option></select></label>
+        {mode === 'bentSheet' && <>
+          <p>Detecta uma dobra cilíndrica simples de espessura constante, sem furos ou alívios. A proposta só é aceita se reproduzir o sólido. Múltiplas dobras ainda não são suportadas.</p>
+          <label className="block"><input type="checkbox" disabled={busy} checked={estimateK} onChange={e=>{setEstimateK(e.target.checked);setProposal(null);}} /> Usar K = 0,5 estimado (não identificado pela espessura)</label>
+          <label>Fator K de fabricação <input disabled={busy || estimateK} type="number" min="0" max="1" step="0.01" value={bendK} onChange={e=>{setBendK(e.target.value);setProposal(null);}} className="w-20 rounded border bg-chrome-surface p-1" /></label>
+          <p>O fator K não pode ser obtido somente pela geometria do STEP. Informe o valor da sua regra de dobra.</p>
+        </>}
         {mode === 'sheetMetal' && <>
           <p>Sem dados complementares, somente chapa plana de espessura constante. Chapa dobrada exige operações, raios e fator K explícitos. Dados ausentes ou divergentes geram erro.</p>
           <label className="block">Dados de fabricação opcionais (.json)<input disabled={busy} type="file" accept=".json" className="mt-1 block w-full" onChange={async (e) => { const file = e.target.files?.[0]; setProposal(null); setRecipe(null); if (!file)

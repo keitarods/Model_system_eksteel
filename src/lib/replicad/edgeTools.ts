@@ -1,4 +1,4 @@
-import { measureArea } from "replicad";
+import { DistanceTool, makeVertex, measureArea } from "replicad";
 import type { Edge, Solid } from "replicad";
 
 // Tolerância pra reencontrar, num sólido RECONSTRUÍDO do zero, as mesmas
@@ -39,20 +39,23 @@ export function findClickedEdge(
   solid: Solid,
   point: [number, number, number]
 ): { point: [number, number, number] } | null {
-  let bestPoint: [number, number, number] | null = null;
-  let bestDist = Infinity;
-
-  for (const edge of solid.edges) {
-    for (const sample of sampleEdgePoints(edge)) {
-      const d = Math.hypot(sample[0] - point[0], sample[1] - point[1], sample[2] - point[2]);
-      if (d < bestDist) {
-        bestDist = d;
-        bestPoint = sample;
-      }
+  const edges = solid.edges;
+  const vertex = makeVertex(point);
+  const tool = new DistanceTool();
+  try {
+    let best: Edge | undefined;
+    let bestDistance = EDGE_CLICK_TOLERANCE;
+    for (const edge of edges) {
+      const distance = tool.distanceBetween(vertex, edge);
+      if (distance < bestDistance) { bestDistance = distance; best = edge; }
     }
-  }
+    if (!best) return null;
+    // Interior reference avoids matching every edge incident to a shared corner.
+    const midpoint = best.pointAt(0.5);
+    try { return { point: [midpoint.x, midpoint.y, midpoint.z] }; }
+    finally { midpoint.delete(); }
+  } finally { tool.delete(); vertex.delete(); edges.forEach(e => e.delete()); }
 
-  return bestPoint && bestDist <= EDGE_CLICK_TOLERANCE ? { point: bestPoint } : null;
 }
 
 type Vec3 = [number, number, number];
@@ -139,17 +142,20 @@ export function listLinearEdges(
   solid: Solid
 ): { start: [number, number, number]; end: [number, number, number] }[] {
   const result: { start: [number, number, number]; end: [number, number, number] }[] = [];
-  for (const edge of solid.edges) {
-    if (edge.geomType !== "LINE") continue;
-    const startVec = edge.startPoint;
-    const endVec = edge.endPoint;
-    result.push({
-      start: [startVec.x, startVec.y, startVec.z],
-      end: [endVec.x, endVec.y, endVec.z],
-    });
-    startVec.delete();
-    endVec.delete();
-  }
+  const edges = solid.edges;
+  try {
+    for (const edge of edges) {
+      if (edge.geomType !== "LINE") continue;
+      const startVec = edge.startPoint;
+      const endVec = edge.endPoint;
+      try {
+        result.push({
+          start: [startVec.x, startVec.y, startVec.z],
+          end: [endVec.x, endVec.y, endVec.z],
+        });
+      } finally { startVec.delete(); endVec.delete(); }
+    }
+  } finally { edges.forEach(edge => edge.delete()); }
   return result;
 }
 
@@ -221,18 +227,32 @@ export function findMainFaceForEdge(
 // Reencontra, num sólido reconstruído do zero, as arestas mais próximas dos
 // pontos de referência guardados numa feature de fillet/chamfro — mesmo
 // princípio geométrico já usado em findClickedFace/findClickedAxis (nunca
-// dá pra confiar em identidade de objeto entre reconstruções). De propósito
-// não chama .delete() nas arestas não usadas (mesmo cuidado de sempre com
-// WASM) — as escolhidas são devolvidas vivas, prontas pra passar direto
+// dá pra confiar em identidade de objeto entre reconstruções). A busca
+// libera arestas não usadas; as escolhidas são devolvidas vivas para o chamador liberar, prontas pra passar direto
 // pro .fillet()/.chamfer() do replicad (EdgeFinder.inList).
 export function findEdgesByPoints(solid: Solid, points: [number, number, number][]): Edge[] {
-  const matched: Edge[] = [];
-  for (const edge of solid.edges) {
-    const samples = sampleEdgePoints(edge);
-    const isMatch = points.some((p) =>
-      samples.some((s) => Math.hypot(s[0] - p[0], s[1] - p[1], s[2] - p[2]) < EDGE_MATCH_TOLERANCE)
-    );
-    if (isMatch) matched.push(edge);
+  const edges = solid.edges;
+  const matched = new Set<Edge>();
+  const tool = new DistanceTool();
+  let success = false;
+  try {
+    for (const point of points) {
+      const vertex = makeVertex(point);
+      try {
+        const candidates = edges.map(edge => ({ edge, distance: tool.distanceBetween(vertex, edge) }))
+          .sort((a, b) => a.distance - b.distance);
+        const best = candidates[0];
+        if (!best || best.distance > EDGE_MATCH_TOLERANCE) throw new Error('Aresta não encontrada. Selecione novamente as arestas da operação.');
+        if (candidates[1] && Math.abs(candidates[1].distance - best.distance) < 1e-7) {
+          throw new Error('Referência de aresta ambígua em um vértice. Selecione novamente pelo meio da aresta.');
+        }
+        matched.add(best.edge);
+      } finally { vertex.delete(); }
+    }
+    success = true;
+    return [...matched];
+  } finally {
+    tool.delete();
+    edges.forEach(edge => { if (!success || !matched.has(edge)) edge.delete(); });
   }
-  return matched;
 }

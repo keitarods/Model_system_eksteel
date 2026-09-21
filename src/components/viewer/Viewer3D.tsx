@@ -493,7 +493,7 @@ export function Viewer3D({
 }: {
   mesh: ShapeMesh | null;
   pickMode?: boolean;
-  onPickPlane?: (origin: [number, number, number], normal: [number, number, number]) => void;
+  onPickPlane?: (origin: [number, number, number], normal: [number, number, number], selection?: { faceId: number; endpoint: boolean; edge?: boolean; circle?: boolean }) => void;
   // Clique num dos 3 planos padrão (XY/XZ/YZ) mostrados durante a escolha
   // de plano — alternativa a clicar numa face do sólido existente.
   onPickStandardPlane?: (plane: SketchPlane) => void;
@@ -536,6 +536,7 @@ export function Viewer3D({
   onPickLinearEdge?: (start: [number, number, number], end: [number, number, number]) => void;
 }) {
   const [wireframe, setWireframe] = useState(false);
+  const [showGrid, setShowGrid] = useState(true);
   const [orbitTarget, setOrbitTarget] = useState<[number, number, number]>([0, 0, 0]);
   const cameraApiRef = useRef<CameraApi | null>(null);
   const pendingConstraint = useSketchStore((s) => s.pendingConstraint);
@@ -619,6 +620,15 @@ export function Viewer3D({
           />
           Wireframe
         </label>
+        <button
+          type="button"
+          aria-pressed={showGrid}
+          title={showGrid ? "Ocultar grid" : "Exibir grid"}
+          onClick={() => setShowGrid(value => !value)}
+          className={`rounded-lg px-3 py-1.5 text-primary-700 hover:bg-primary-100 ${showGrid ? "bg-primary-100" : "bg-white"}`}
+        >
+          Grid
+        </button>
       </div>
 
       <div className={`relative flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
@@ -676,7 +686,7 @@ export function Viewer3D({
               onOffsetChange={planeOffsetDrag.onOffsetChange}
             />
           )}
-          {mesh && <gridHelper args={[400, 40]} rotation={[Math.PI / 2, 0, 0]} />}
+          {mesh && showGrid && <gridHelper args={[400, 40]} rotation={[Math.PI / 2, 0, 0]} />}
           <axesHelper args={[60]} />
           <CameraApiCapture apiRef={cameraApiRef} />
           {/* ViewCube ao estilo Inventor/SolidWorks: clique numa face, aresta

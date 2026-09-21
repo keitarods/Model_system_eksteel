@@ -1,4 +1,5 @@
 "use client";
+import { disconnectCustomerSupabase } from "@/lib/project/supabaseConnection";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -529,6 +530,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
 
   const handleLogout = useCallback(async () => {
     const supabase = createClient();
+    await disconnectCustomerSupabase().catch(() => undefined);
     await supabase.auth.signOut();
     router.push("/login");
     router.refresh();

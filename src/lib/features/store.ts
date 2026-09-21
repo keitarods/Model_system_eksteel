@@ -18,7 +18,7 @@ export const useFeatureStore = create<FeatureState>((set) => ({
     set((s) => ({ features: [...s.features, feature] })),
   updateFeature: (id, feature) =>
     set((s) => ({
-      features: s.features.map((f) => (f.id === id ? { ...feature, ...(f.bodyGroupId ? { bodyGroupId: f.bodyGroupId } : {}) } : f)),
+      features: s.features.map((f) => (f.id === id ? { ...feature, visible: feature.visible ?? f.visible, suppressed: feature.suppressed ?? f.suppressed, ...(f.bodyGroupId ? { bodyGroupId: f.bodyGroupId } : {}) } : f)),
     })),
   removeFeature: (id) =>
     set((s) => ({ features: s.features.filter((f) => f.id !== id) })),

@@ -68,6 +68,7 @@ export function bendAllowance(angleDeg: number, innerRadius: number, thickness: 
 // ângulo, vSign) usados pra CONSTRUIR a dobra em bendCrossSection, pra poder
 // reaplicar a mesmíssima matemática ao contrário.
 export type FlattenLink = {
+  edgeLength: number;
   axisPoint: Vec3; // início da aresta original (linha de dobra)
   axisDir: Vec3; // unitário, ao longo da aresta
   outDir: Vec3; // unitário, "pra fora do corpo" no plano da face de origem (v=0 do perfil)
@@ -80,6 +81,35 @@ export type FlattenLink = {
   length: number; // comprimento reto da aba (dobrada)
   allowance: number; // bendAllowance(angleDeg, radius, thickness)
 };
+
+// Parameterization of the straight panel produced by bendCrossSection.
+function panelFrame(link: FlattenLink) {
+  const a = link.angleDeg * Math.PI / 180;
+  const origin = add(link.axisPoint, add(scale(link.outDir, link.radius * Math.sin(a)),
+    scale(link.yDir, link.radius * link.vSign * (1 - Math.cos(a)))));
+  const along = add(scale(link.outDir, Math.cos(a)), scale(link.yDir, Math.sin(a) * link.vSign));
+  const inward = add(scale(link.outDir, -Math.sin(a)), scale(link.yDir, Math.cos(a) * link.vSign));
+  return { origin, along, inward };
+}
+
+export function pointOnFlange(link: FlattenLink, uvw: Vec3): Vec3 {
+  const { origin, along, inward } = panelFrame(link);
+  return add(origin, add(scale(link.axisDir, uvw[0] * link.edgeLength),
+    add(scale(along, uvw[1] * link.length), scale(inward, uvw[2] * link.thickness))));
+}
+
+export function attachPointToFlange(link: FlattenLink, point: Vec3): Vec3 {
+  const { origin, along, inward } = panelFrame(link);
+  const rel = sub(point, origin);
+  const coords: Vec3 = [dot(rel, link.axisDir) / link.edgeLength,
+    dot(rel, along) / link.length, dot(rel, inward) / link.thickness];
+  // The straight panel spans [0,1] in width/length and [-1,0] in thickness.
+  if (coords.some(v => !Number.isFinite(v)) || coords[0] < -1e-5 || coords[0] > 1.00001
+    || coords[1] < -1e-5 || coords[1] > 1.00001 || coords[2] < -1.00001 || coords[2] > 1e-5) {
+    throw new Error('Flange: a aresta não pertence ao painel reto do pai. Selecione novamente a aresta de origem.');
+  }
+  return coords;
+}
 
 // Desfaz UM elo com a inversa EXATA da construção de bendCrossSection — não
 // uma rotação rígida aproximada em torno do eixo (que só é exata pra pontos
@@ -305,8 +335,10 @@ export function buildFlangeSolid(
   flatten: boolean,
   parentChain: FlattenLink[]
 ): { solid: Solid; shadowSolid: Solid; link: FlattenLink } {
-  const rawEdgeStart = feature.edgeStart;
-  const rawEdgeEnd = feature.edgeEnd;
+  const parent = parentChain.at(-1);
+  if (feature.attachment && !parent) throw new Error('Flange: referência ao pai indisponível.');
+  const rawEdgeStart = feature.attachment && parent ? pointOnFlange(parent, feature.attachment.start) : feature.edgeStart;
+  const rawEdgeEnd = feature.attachment && parent ? pointOnFlange(parent, feature.attachment.end) : feature.edgeEnd;
   const { length, angle } = feature;
   // Receitas reconstruídas podem fornecer raio/K explícitos. Campos ausentes
   // mantêm exatamente os padrões históricos dos projetos existentes.
@@ -378,6 +410,7 @@ export function buildFlangeSolid(
 
   const rawDRaw = norm(sub(rawEdgeEnd, rawEdgeStart));
   const link: FlattenLink = {
+    edgeLength,
     axisPoint: rawEdgeStart,
     axisDir: rawDRaw,
     outDir,

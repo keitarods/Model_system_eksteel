@@ -9,7 +9,7 @@ import { SHORTCUT_TO_TOOL } from "./tools";
 // viewport 3D agora é o único lugar onde se desenha/seleciona), por isso
 // vive num hook próprio chamado uma única vez no workspace, em vez de
 // dentro de um painel específico que poderia deixar de existir.
-export function useSketchKeyboardShortcuts() {
+export function useSketchKeyboardShortcuts(enabled = true) {
   const setTool = useSketchStore((s) => s.setTool);
   const tool = useSketchStore((s) => s.tool);
   const selectedShapeId = useSketchStore((s) => s.selectedShapeId);
@@ -19,6 +19,7 @@ export function useSketchKeyboardShortcuts() {
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      if (!enabled || e.defaultPrevented || e.repeat || e.isComposing || document.querySelector('dialog[open], [popover]:popover-open')) return;
       const target = e.target;
       if (
         target instanceof HTMLInputElement ||
@@ -67,7 +68,7 @@ export function useSketchKeyboardShortcuts() {
         return;
       }
 
-      const nextTool = SHORTCUT_TO_TOOL[e.key.toLowerCase()];
+      const nextTool = SHORTCUT_TO_TOOL[`${e.shiftKey ? "shift+" : ""}${e.key.toLowerCase()}`];
       if (nextTool) {
         e.preventDefault();
         setTool(nextTool);
@@ -76,5 +77,5 @@ export function useSketchKeyboardShortcuts() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [setTool, tool, selectedShapeId, deleteSelectedShape, copySelectedShape, pasteShape]);
+  }, [enabled, setTool, tool, selectedShapeId, deleteSelectedShape, copySelectedShape, pasteShape]);
 }

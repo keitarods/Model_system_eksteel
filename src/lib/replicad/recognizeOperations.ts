@@ -345,3 +345,74 @@ export function recognizeSheetRecipe(source: ImportedFeature, json: string, id: 
         shape.delete();
     }
 }
+
+/** Conservative recognition of one straight cylindrical bend. K is manufacturing
+ * input supplied by the user, never inferred from the BREP. No store mutations. */
+export function recognizeBentSheet(source: ImportedFeature, kFactor: number, id: () => string): Recognition {
+    if (source.format !== 'step') throw new Error('Reconhecimento de dobras requer STEP.');
+    if (!Number.isFinite(kFactor) || kFactor < 0 || kFactor > 1) throw new Error('Informe o fator K de fabricação entre 0 e 1.');
+    const shape = deserializeShape(source.brep);
+    if (!isShape3D(shape)) { shape.delete(); throw new Error('STEP sem sólido válido.'); }
+    const solid = shape as Solid, faces = solid.faces;
+    try {
+        const cylinders = faces.filter(f => f.geomType === 'CYLINDRE');
+        if (faces.length > 30 || cylinders.length !== 2 || faces.some(f => !['PLANE','CYLINDRE'].includes(f.geomType)))
+            throw new Error('Reconhecimento inicial limitado a uma dobra cilíndrica simples, sem furos ou alívios. Sólido original preservado.');
+        const info = cylinders.map(face => {
+            const adapter = new (getOC()).BRepAdaptor_Surface_2(face.wrapped,true);
+            const cylinder = adapter.Cylinder(), axis = cylinder.Axis(), loc = axis.Location(), dir = axis.Direction();
+            try { return { radius: cylinder.Radius(), origin: [loc.X(),loc.Y(),loc.Z()] as V, direction: [dir.X(),dir.Y(),dir.Z()] as V, angle: Math.abs(adapter.LastUParameter()-adapter.FirstUParameter())*180/Math.PI }; }
+            finally { dir.delete();loc.delete();axis.delete();cylinder.delete();adapter.delete(); }
+        }).sort((a,b)=>a.radius-b.radius);
+        const [inner,outer] = info, thickness = outer.radius-inner.radius;
+        const offset = sub(inner.origin,outer.origin), axial = dot(offset,inner.direction);
+        if (thickness <= 1e-6 || Math.abs(dot(inner.direction,outer.direction)) < .999999 ||
+            Math.hypot(...sub(offset,inner.direction.map(v=>v*axial) as V)) > 1e-5 ||
+            Math.abs(inner.angle-outer.angle)>1e-5 || inner.angle < 1 || inner.angle >= 179.9)
+            throw new Error('Não foi comprovado um par de superfícies coaxiais de espessura constante.');
+        const allEdges = solid.edges;
+        const lengths: number[] = [];
+        try {
+            for (const edge of allEdges) if (edge.geomType === 'LINE') {
+                const a=vector(edge.pointAt(0)), b=vector(edge.pointAt(1));
+                const length=Math.hypot(...sub(b,a));
+                if (length>thickness && !lengths.some(n=>Math.abs(n-length)<1e-5)) lengths.push(length);
+            }
+        } finally { allEdges.forEach(e=>e.delete()); }
+        const boundaries = cylinders.flatMap(face => {
+            const edges=face.edges;
+            try { return edges.filter(e=>e.geomType==='LINE').map(e=>[vector(e.pointAt(0)),vector(e.pointAt(1))]); }
+            finally { edges.forEach(e=>e.delete()); }
+        });
+        const same=(a:V,b:V)=>Math.hypot(...sub(a,b))<1e-5;
+        let attempts=0;
+        for (const face of faces.filter(f=>f.geomType==='PLANE').sort((a,b)=>measureArea(b)-measureArea(a))) {
+            let sketch: SketchFeature; let loops: NonNullable<ProfileSource>[];
+            try { sketch=faceSketch(face,id);loops=profiles(sketch); } catch { continue; }
+            if(loops.length!==1 || area(loops[0])<=thickness*thickness) continue;
+            const edges=face.edges;
+            try {
+                for(const edge of edges) {
+                    if(edge.geomType!=='LINE')continue;
+                    const start=vector(edge.pointAt(0)),end=vector(edge.pointAt(1));
+                    if(!boundaries.some(([a,b])=>(same(start,a)&&same(end,b))||(same(start,b)&&same(end,a))))continue;
+                    for(const direction of ['normal','flipped'] as const) for(const length of lengths) for(const sign of [1,-1]) {
+                        if(++attempts>240)throw new Error('Limite de hipóteses atingido. Sólido preservado.');
+                        const baseId=id();
+                        const features:Feature[]=[sketch,{id:id(),type:'sheetMetal',label:`Chapa reconhecida ${thickness.toFixed(3)} mm`,thickness},
+                          {id:baseId,type:'face',label:'Face base reconhecida',plane:sketch.plane,profile:loops[0],direction},
+                          {id:id(),type:'flange',label:'Dobra reconhecida',parentId:baseId,edgeStart:start,edgeEnd:end,length,angle:inner.angle*sign,innerRadius:inner.radius,kFactor}];
+                        try {
+                            const check=compareReconstruction(solid,features);
+                            const flat=rebuildModel(features,{flatten:true});
+                            if(!flat)continue;
+                            try { if(!Number.isFinite(measureVolume(flat)) || measureVolume(flat)<=0)continue; flat.mesh(); } finally { flat.delete(); }
+                            return {features,...check,notes:[`Dobra reconhecida: espessura ${thickness.toFixed(3)} mm, raio interno ${inner.radius.toFixed(3)} mm, ângulo ${inner.angle.toFixed(2)}°.`, `Fator K ${kFactor} informado pelo usuário; não recuperado do STEP. Confira o desenvolvimento antes de fabricar.`, 'Uma dobra simples reconhecida e comparada ao sólido original.']};
+                        } catch { /* A rejected hypothesis never changes the original. */ }
+                    }
+                }
+            } finally { edges.forEach(e=>e.delete()); }
+        }
+        throw new Error('Não foi possível reconstruir uma dobra nativa equivalente ao STEP. Sólido original preservado.');
+    } finally { faces.forEach(f=>f.delete());shape.delete(); }
+}

@@ -1,7 +1,7 @@
 "use client";
 import { HeaderIcon } from "@/components/icons/HeaderIcon";
 
-import { loadRememberedCloud, rememberCloud, forgetCloud } from "@/lib/project/rememberedCloud";
+import { loadRememberedCloudUser, rememberCloudUser, forgetCloudUser, loadRememberedCloud, rememberCloud, forgetCloud } from "@/lib/project/rememberedCloud";
 import { CloudDocumentsPanel } from "./CloudDocumentsPanel";
 import { useEffect, useRef, useState } from "react";
 import { useInstallation } from "@/lib/supabase/InstallationProvider";
@@ -9,7 +9,7 @@ import { ConnectionStringInput } from "./ConnectionStringInput";
 import { createPortal } from "react-dom";
 import { connectCustomerDatabase } from "@/lib/project/databaseConnection";
 import type { DatabaseKind } from "@/lib/project/databaseConfig";
-import { connectCustomerSupabase } from "@/lib/project/supabaseConnection";
+import { connectCustomerSupabase, restoreCustomerSupabase, savedTabConnection } from "@/lib/project/supabaseConnection";
 import type { CloudSession } from "@/lib/project/cloudProvider";
 import { cloudName, type CloudConnection } from "@/lib/project/cloudStorage";
 
@@ -60,9 +60,41 @@ export function CloudProjectsButton({ getProject, onOpen, suggestedName, disable
     catch { setPreferenceMessage("O navegador não permitiu remover os dados. Remova os dados deste site nas configurações do navegador."); }
   }
   const [email, setEmail] = useState("");
+  const [rememberUser, setRememberUser] = useState(false);
   const [password, setPassword] = useState("");
   const session = useRef<CloudSession | null>(null);
-  useEffect(() => () => { void session.current?.disconnect().catch(() => undefined); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    try {
+      const user = loadRememberedCloudUser(window.localStorage);
+      if (user) { setEmail(user); setRememberUser(true); }
+    } catch { /* Preferences are optional. */ }
+    const config = savedTabConnection();
+    if (config) {
+      setUrl(config.url); setPublicKey(config.key); setEmail(config.email);
+      locked.current = true; setBusy(true);
+      void (async () => {
+        try {
+          const restored = await restoreCustomerSupabase();
+          if (!restored || cancelled) return;
+          const names = await restored.provider.folders();
+          const selected = names[0] ?? "";
+          const items = selected ? await restored.provider.projects(selected) : [];
+          if (cancelled) return;
+          session.current = restored;
+          setConnection(restored.provider); setFolders(names); setFolder(selected); setProjects(items);
+          setMessage("Conexão com o Storage restaurada nesta aba.");
+        } catch {
+          if (!cancelled) { setFailed(true); setMessage("Não foi possível restaurar a conexão do Storage. Confira a rede e conecte novamente."); }
+        } finally { if (!cancelled) { locked.current = false; setBusy(false); } }
+      })();
+    }
+    return () => {
+      cancelled = true;
+      // SQL server sessions are not persisted. Supabase survives route changes/reloads.
+      if (session.current && !session.current.provider.documents) void session.current.disconnect().catch(() => undefined);
+    };
+  }, []);
   const [folders, setFolders] = useState<string[]>([]);
   const [folder, setFolder] = useState("");
   const [newFolder, setNewFolder] = useState("");
@@ -112,6 +144,12 @@ export function CloudProjectsButton({ getProject, onOpen, suggestedName, disable
       const selected = names[0] ?? "";
       const items = selected ? await api.projects(selected) : [];
       session.current = next;
+      if (providerKind === "supabase") {
+        try {
+          if (rememberUser) rememberCloudUser(window.localStorage, email);
+          else forgetCloudUser(window.localStorage);
+        } catch { /* Connection remains usable when preference storage is blocked. */ }
+      }
       if (providerKind === "supabase" && rememberPublic) savePublicPreference();
       setOpened(null); setConnection(api); setFolders(names); setFolder(selected); setProjects(items); setVersions([]);
       setMessage("Conexão OK: autenticação e consulta ao armazenamento concluídas. A permissão de gravação será verificada ao criar uma pasta ou salvar uma peça.");
@@ -163,6 +201,11 @@ export function CloudProjectsButton({ getProject, onOpen, suggestedName, disable
           </div>}
           {preferenceMessage && <p role="status" className="text-xs text-chrome-text-muted">{preferenceMessage}</p>}
           <label className="block text-sm">E-mail no Supabase do cliente<input required type="email" autoComplete="off" className={fieldClass} value={email} onChange={e => setEmail(e.target.value)} /></label>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={rememberUser} onChange={e => {
+            setRememberUser(e.target.checked);
+            if (!e.target.checked) { try { forgetCloudUser(window.localStorage); } catch { /* Optional preference. */ } }
+          }} />Lembrar usuário neste navegador (somente e-mail)</label>
+          <p className="text-xs text-chrome-text-muted">A conexão permanece nesta aba ao atualizar a página. A senha não é salva. Use Sair do Storage para encerrar.</p>
           </> : <>
             <ConnectionStringInput key={providerKind} kind={providerKind} disabled={busy} onApply={c => {
               setHost(c.host); setPort(String(c.port)); setDatabase(c.database); setUsername(c.username); setPassword(c.password);
@@ -185,7 +228,7 @@ export function CloudProjectsButton({ getProject, onOpen, suggestedName, disable
           const current = session.current; session.current = null;
           setOpened(null); setConnection(null); setFolders([]); setFolder(""); setProjects([]); setVersions([]); setPassword(""); if (!rememberPublic) setPublicKey("");
           await current?.disconnect();
-        })}>Desconectar / trocar banco</button>
+        })}>{providerKind === "supabase" ? "Sair do Storage" : "Desconectar / trocar banco"}</button>
       </div>}
       {connection && <fieldset disabled={busy} className="space-y-4 disabled:opacity-60">
         <label className="block text-sm">Pasta

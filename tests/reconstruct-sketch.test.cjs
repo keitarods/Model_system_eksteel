@@ -73,3 +73,21 @@ test('rounded edges remain exact arcs, unsupported elliptical contours fail with
   assert.ok(Math.abs(r.measureVolume(ellipse)-250*Math.PI)<1e-4);
  }finally{ellipse.delete();}
 });
+
+test('reconstructed face resolves outer boundary and inner wires as a usable Face profile',async()=>{
+ await require('./kernel.cjs')();const r=require('replicad');
+ const {reconstructedSketchProfile}=require('../src/lib/replicad/geometry.ts');
+ const {rebuildModel}=require('../src/lib/replicad/build-model.ts');
+ const box=r.makeBox([0,0,0],[30,20,2]);const tool=r.makeBox([5,5,-1],[10,10,3]);const body=box.cut(tool);box.delete();tool.delete();
+ try {
+  const sketch=reconstructFaceSketch(body,[2,2,2],[0,0,1],id);
+  assert.equal(sketch.profileWires.length,2);
+  const profile=reconstructedSketchProfile(sketch.shapes,sketch.points,sketch.profileWires);
+  assert.equal(profile.kind,'region');assert.equal(profile.holes.length,1);
+  const fs=[sketch,{id:id(),type:'sheetMetal',label:'Chapa',thickness:2},{id:id(),type:'face',label:'Face',plane:sketch.plane,profile,direction:'flipped'}];
+  const loaded=parseProject(serializeProject(fs)).features;
+  const rebuilt=rebuildModel(loaded);
+  try {assert.ok(Math.abs(r.measureVolume(rebuilt)-r.measureVolume(body))<1e-6);}finally{rebuilt.delete();}
+  assert.equal(reconstructedSketchProfile(sketch.shapes.slice(1),sketch.points,sketch.profileWires),null);
+ }finally{body.delete();}
+});

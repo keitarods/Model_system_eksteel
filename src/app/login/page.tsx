@@ -84,31 +84,6 @@ function limparTentativasLogin(email: string) {
   localStorage.removeItem(gerarChaveBloqueio(email));
 }
 
-async function verificarEmailCadastrado(email: string) {
-  try {
-    const response = await fetch("/api/auth/check-email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
-    });
-
-    if (!response.ok) return null;
-
-    const data = (await response.json()) as {
-      exists?: boolean | null;
-      reason?: "missing_service_role" | "admin_lookup_failed";
-    };
-
-    if (data.reason === "missing_service_role") {
-      return "missing_service_role";
-    }
-
-    return typeof data.exists === "boolean" ? data.exists : null;
-  } catch {
-    return null;
-  }
-}
-
 export default function LoginPage() {
   const router = useRouter();
 
@@ -143,7 +118,7 @@ export default function LoginPage() {
     return () => {
       montado = false;
     };
-  }, [router]);
+  }, [router, config]);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -165,26 +140,9 @@ export default function LoginPage() {
 
     setCarregando(true);
 
-    const emailCadastrado = await verificarEmailCadastrado(email);
-
-    if (emailCadastrado === "missing_service_role") {
-      setCarregando(false);
-      setErro(
-        "A validação de conta existente ainda não está configurada. Adicione SUPABASE_SERVICE_ROLE_KEY no .env.local."
-      );
-      return;
-    }
-
-    if (emailCadastrado === false) {
-      limparTentativasLogin(email);
-      setCarregando(false);
-      setErro("Não encontramos uma conta com esse e-mail.");
-      return;
-    }
-
     const tempoRestante = obterTempoRestanteBloqueio(email);
 
-    if (emailCadastrado === true && tempoRestante > 0) {
+    if (tempoRestante > 0) {
       setCarregando(false);
       setErro(
         `Muitas tentativas incorretas. Tente novamente em ${formatarTempoBloqueio(
@@ -203,7 +161,7 @@ export default function LoginPage() {
     setCarregando(false);
 
     if (error) {
-      if (emailCadastrado !== true) {
+      if (error.code !== "invalid_credentials") {
         setErro("Não foi possível entrar. Confira o e-mail e a senha.");
         return;
       }
@@ -220,10 +178,10 @@ export default function LoginPage() {
 
       setErro(
         tentativasRestantes > 0
-          ? `Senha incorreta, tente novamente. Você ainda tem ${tentativasRestantes} tentativa${
+          ? `E-mail ou senha incorretos, tente novamente. Você ainda tem ${tentativasRestantes} tentativa${
               tentativasRestantes === 1 ? "" : "s"
             } antes do bloqueio.`
-          : "Senha incorreta, tente novamente."
+          : "E-mail ou senha incorretos, tente novamente."
       );
       return;
     }

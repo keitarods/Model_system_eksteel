@@ -22,7 +22,7 @@ export function SolidMesh({
   mesh: ShapeMesh;
   wireframe: boolean;
   pickMode: boolean;
-  onPick?: (origin: [number, number, number], normal: [number, number, number]) => void;
+  onPick?: (origin: [number, number, number], normal: [number, number, number], selection?: { faceId: number; endpoint: boolean; edge?: boolean; circle?: boolean }) => void;
   // Botão direito numa face (fora de modo de escolha) — usado pro menu de
   // contexto "Exportar face em DXF", ao estilo Inventor.
   onContextMenu?: (
@@ -78,7 +78,7 @@ export function SolidMesh({
   // faceIndex do three.js é em unidade de TRIÂNGULO (0, 1, 2, ...); start/
   // count de faceGroups são em unidade de ÍNDICE FLAT (mesh.triangles), 3
   // por triângulo — por isso o *3 pra comparar no mesmo referencial.
-  function faceIdAt(event: ThreeEvent<PointerEvent>): number | null {
+  function faceIdAt(event: ThreeEvent<PointerEvent | MouseEvent>): number | null {
     if (event.faceIndex == null) return null;
     const flatIndex = event.faceIndex * 3;
     const group = mesh.faceGroups.find((g) => flatIndex >= g.start && flatIndex < g.start + g.count);
@@ -99,9 +99,11 @@ export function SolidMesh({
     if (!pickMode || !onPick || !event.face) return;
     event.stopPropagation();
     const worldNormal = worldNormalOf(event);
+    const faceId = faceIdAt(event);
     onPick(
       [event.point.x, event.point.y, event.point.z],
-      [worldNormal.x, worldNormal.y, worldNormal.z]
+      [worldNormal.x, worldNormal.y, worldNormal.z],
+      faceId === null ? undefined : { faceId, endpoint: event.shiftKey && event.altKey, edge: event.shiftKey && !event.altKey, circle: event.altKey && !event.shiftKey }
     );
   }
 

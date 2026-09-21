@@ -158,6 +158,7 @@ export function findClosedLoopContaining(
 // aditivo (ausente = perfil 100% reto) só pra manter compatibilidade com
 // projetos .eks3d salvos antes da ferramenta de fillet existir.
 export type ProfileSource =
+  | { kind: "region"; outer: NonNullable<ProfileSource>; holes: NonNullable<ProfileSource>[] }
   | { kind: "rect"; x1: number; y1: number; x2: number; y2: number }
   | { kind: "circle"; cx: number; cy: number; r: number }
   | { kind: "slot"; c1: Point; c2: Point; r: number }
@@ -201,6 +202,23 @@ export function findProfileSource(
   );
   const loop = findClosedLoop(edges, points);
   return loop ? { kind: "loop", points: loop.points, arcCenters: loop.arcCenters, splineControls: loop.splineControls } : null;
+}
+
+/** Resolve reconstructed face boundaries independently; inner wires remain holes.
+ * Never silently fill a missing/open boundary after editing an imported sketch. */
+export function reconstructedSketchProfile(shapes: SketchShape[], points: Record<string, SketchPoint>, wires?: string[][]): ProfileSource {
+  if (!wires) return findProfileSource(shapes, points);
+  if (!wires.length) return null;
+  const byId = new Map(shapes.map(s => [s.id, s]));
+  const contours: NonNullable<ProfileSource>[] = [];
+  for (const wire of wires) {
+    const boundary = wire.map(id => byId.get(id));
+    if (!boundary.length || boundary.some(s => !s)) return null;
+    const profile = findProfileSource(boundary as SketchShape[], points);
+    if (!profile) return null;
+    contours.push(profile);
+  }
+  return contours.length === 1 ? contours[0] : { kind: "region", outer: contours[0], holes: contours.slice(1) };
 }
 
 // Perfil de UMA forma específica — só rect/circle/slot; LINHA é tratada à
@@ -445,6 +463,7 @@ export function pathToDrawing(shapes: SketchShape[], points: Record<string, Sket
 // escolhido à parte, igual Revolução não pede raio).
 export function profileReferencePoint(profile: ProfileSource): Point | null {
   if (!profile) return null;
+  if (profile.kind === "region") return profileReferencePoint(profile.outer);
   if (profile.kind === "rect") return { x: (profile.x1 + profile.x2) / 2, y: (profile.y1 + profile.y2) / 2 };
   if (profile.kind === "circle") return { x: profile.cx, y: profile.cy };
   if (profile.kind === "slot") return { x: (profile.c1.x + profile.c2.x) / 2, y: (profile.c1.y + profile.c2.y) / 2 };
@@ -478,6 +497,16 @@ function arcInnerPoint(center: Point, from: Point, to: Point, radius: number): P
 
 export function profileToDrawing(profile: ProfileSource): Drawing | null {
   if (!profile) return null;
+  if (profile.kind === "region") {
+    let drawing = profileToDrawing(profile.outer);
+    if (!drawing) return null;
+    for (const hole of profile.holes) {
+      const cut = profileToDrawing(hole);
+      if (!cut) return null;
+      drawing = drawing.cut(cut);
+    }
+    return drawing;
+  }
 
   if (profile.kind === "rect") {
     const { x1, y1, x2, y2 } = profile;

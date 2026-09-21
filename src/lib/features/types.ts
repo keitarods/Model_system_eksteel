@@ -22,6 +22,8 @@ type ProfileSources = NonNullable<ProfileSource> | NonNullable<ProfileSource>[];
 // (useSketchStore), não este snapshot. Reabrir um SketchFeature carrega os
 // dados dele de volta pro sketch ao vivo pra continuar editando.
 export type SketchFeature = {
+  /** Shape IDs grouped by original face wires: outer boundary first, then holes. */
+  profileWires?: string[][];
   id: string;
   type: "sketch";
   layers?: SketchLayer[];
@@ -187,6 +189,8 @@ export type FaceFeature = {
   plane: SketchPlane;
   direction?: ExtrudeDirection;
   cut?: boolean;
+  /** Optional cut depth in mm; absent follows the sheet thickness. */
+  cutDepth?: number;
 };
 
 // Dobra (Inventor "Flange"): nasce de uma aresta reta já existente da
@@ -195,7 +199,7 @@ export type FaceFeature = {
 // "reencontrável" como fillet/chamfer, porque aqui a geometria nova é
 // CONSTRUÍDA a partir desses números, não buscada depois — como a árvore de
 // features é reconstruída determinística e sequencialmente, as mesmas
-// coordenadas continuam válidas a cada rebuild). Sem campo de normal de
+// coordenadas legadas; flanges encadeados usam attachment para acompanhar o pai). Sem campo de normal de
 // face: a face de origem da dobra é achada pela GEOMETRIA da própria
 // aresta (a face plana de maior área que a contém — ver findMainFaceForEdge
 // em edgeTools.ts), nunca por uma normal capturada no clique. Sem campo de
@@ -212,10 +216,13 @@ export type FlangeFeature = {
   /** Explicit manufacturing values; absent preserves legacy defaults. */
   innerRadius?: number;
   kFactor?: number;
+  kFactorSource?: "user" | "estimated";
   id: string;
   type: "flange";
   label: string;
   parentId: string;
+  /** Coordinates on the parent's straight panel: width, length and thickness fractions. */
+  attachment?: { start: [number, number, number]; end: [number, number, number] };
   edgeStart: [number, number, number];
   edgeEnd: [number, number, number];
   length: number;
@@ -348,4 +355,6 @@ export type Feature = (
   | PatternFeature) & {
   /** Independent reconstructed body. Its contiguous operations rebuild in isolation. */
   bodyGroupId?: string;
+  suppressed?: boolean;
+  visible?: boolean;
 };

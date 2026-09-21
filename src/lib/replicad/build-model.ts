@@ -1,3 +1,4 @@
+import { activeFeatures } from "@/lib/features/suppression";
 import { sheetIsUnfolded } from "@/lib/features/sheetState";
 import { buildLoft, buildShell } from "./advancedFeatures";
 import { deserializeShape, isShape3D, makeCompound, drawCircle, drawRoundedRectangle, genericSweep, makeHelix } from "replicad";
@@ -6,7 +7,7 @@ import type { Feature, SketchFeature } from "@/lib/features/types";
 import type { SketchPlane } from "@/lib/sketch/types";
 import { extrudeProfile, pathToDrawing, profileReferencePoint, pointToLineDistance2D, profileToDrawing, profilesToDrawing } from "./geometry";
 import { findEdgesByPoints, listLinearEdges } from "./edgeTools";
-import { buildFlangeSolid, type FlattenLink } from "./sheetMetal";
+import { buildFlangeSolid, attachPointToFlange, undoFlattenChain, type FlattenLink } from "./sheetMetal";
 import { applyPatternOffset, computePatternOffsets, isPatternable } from "./pattern";
 import {
   localToWorldDirection,
@@ -32,7 +33,9 @@ function buildFaceSolid(
   thickness: number
 ): Solid | null {
   const drawing = profilesToDrawing(feature.profile);
-  return drawing ? extrudeProfile(drawing, thickness, feature.plane, feature.direction ?? "normal") : null;
+  const depth = feature.cut ? feature.cutDepth ?? thickness : thickness;
+  if (!Number.isFinite(depth) || depth <= 0) throw new Error("Recortar: informe uma distância positiva.");
+  return drawing ? extrudeProfile(drawing, depth, feature.plane, feature.direction ?? "normal") : null;
 }
 
 // O eixo é a linha de centro desenhada no sketch (coordenadas locais do
@@ -125,8 +128,12 @@ function buildFilletSolid(
   activeSolid: Solid
 ): Solid | null {
   const matched = findEdgesByPoints(activeSolid, feature.edgePoints);
-  if (matched.length === 0) return null;
-  return activeSolid.fillet(feature.radius, (f) => f.inList(matched)) as unknown as Solid;
+  try {
+    if (!matched.length) throw new Error('Selecione pelo menos uma aresta.');
+    if (!Number.isFinite(feature.radius) || feature.radius <= 0) throw new Error('Informe um raio positivo.');
+    try { return activeSolid.fillet(feature.radius, f => f.inList(matched)) as Solid; }
+    catch { throw new Error(`Não foi possível arredondar as ${matched.length} arestas com raio ${feature.radius} mm. Reduza o raio ou revise as arestas selecionadas; a combinação pode gerar interseções ou não ter espaço para a concordância.`); }
+  } finally { matched.forEach(edge => edge.delete()); }
 }
 
 function buildChamferSolid(
@@ -134,8 +141,11 @@ function buildChamferSolid(
   activeSolid: Solid
 ): Solid | null {
   const matched = findEdgesByPoints(activeSolid, feature.edgePoints);
-  if (matched.length === 0) return null;
-  return activeSolid.chamfer(feature.distance, (f) => f.inList(matched)) as unknown as Solid;
+  try {
+    if (!matched.length) throw new Error('Selecione pelo menos uma aresta.');
+    try { return activeSolid.chamfer(feature.distance, f => f.inList(matched)) as Solid; }
+    catch { throw new Error('Não foi possível criar o chanfro. Reduza a distância ou revise as arestas selecionadas.'); }
+  } finally { matched.forEach(edge => edge.delete()); }
 }
 
 // Varredura: perfil do plano da PRÓPRIA feature (não do sketch ativo — já
@@ -227,7 +237,8 @@ function buildHelixSolid(feature: Extract<Feature, { type: "helix" }>): Solid | 
 // operação (fuse/corte/fillet/chamfro) em active E em shadow, exceto Flange
 // — que faz a versão arredondada na sombra e a versão reta (ou arredondada,
 // se flatten=false) no sólido exibido.
-export function rebuildModel(features: Feature[], options: { flatten?: boolean } = {}): Solid | null {
+export function rebuildModel(features: Feature[], options: { flatten?: boolean; onFlange?: (feature: Extract<Feature, { type: "flange" }>, link: FlattenLink, parent?: FlattenLink) => void } = {}): Solid | null {
+  features = activeFeatures(features);
   const unfolded = sheetIsUnfolded(features);
   const flatten = !!options.flatten || unfolded;
   // Reconstructed bodies retain editable native operations, but their cuts only
@@ -266,6 +277,21 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
   // cadeia vazia (nunca dobra).
   const chains = new Map<string, FlattenLink[]>();
 
+  // Edge references are stored in the folded model. Only points on a
+  // flange's straight panel can carry constant-radius edge treatments to flat.
+  function flatEdgeReferences(points: [number, number, number][]): [number, number, number][] {
+    const candidates = [...chains.values()].filter(chain => chain.length)
+      .sort((a, b) => b.length - a.length);
+    return points.map(point => {
+      for (const chain of candidates) {
+        try { attachPointToFlange(chain[chain.length - 1], point); }
+        catch { continue; }
+        return undoFlattenChain(chain, point);
+      }
+      return point; // Base panel references do not move.
+    });
+  }
+
   // Aplica a MESMA peça de geometria (fuse ou corte) em active e, se
   // existir, em shadow — usado por toda feature que não seja Flange (que
   // tem tratamento próprio, com geometria DIFERENTE em cada um).
@@ -293,8 +319,10 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
     built.delete();
   }
 
+  let buildingFeature: Feature | undefined;
   try {
   for (const feature of features) {
+    buildingFeature = feature;
     if(feature.type==="imported"){
       const body=deserializeShape(feature.brep);
       if(!isShape3D(body)){body.delete();throw new Error("Corpo importado inválido.");}
@@ -358,6 +386,7 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
       chains.set(feature.id, [...parentChain, link]);
       active = solid;
       shadow = flatten ? shadowSolid : null;
+      options.onFlange?.(feature, link, parentChain.at(-1));
       continue;
     }
 
@@ -375,7 +404,7 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
 
     if (feature.type === "fillet") {
       if (!active) continue; // nada pra arredondar ainda
-      const result = buildFilletSolid(feature, active);
+      const result = buildFilletSolid(flatten ? { ...feature, edgePoints: flatEdgeReferences(feature.edgePoints) } : feature, active);
       if (result) {
         active.delete();
         active = result;
@@ -392,7 +421,7 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
 
     if (feature.type === "chamfer") {
       if (!active) continue; // nada pra chanfrar ainda
-      const result = buildChamferSolid(feature, active);
+      const result = buildChamferSolid(flatten ? { ...feature, edgePoints: flatEdgeReferences(feature.edgePoints) } : feature, active);
       if (result) {
         active.delete();
         active = result;
@@ -451,15 +480,17 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean }
   }
 
   } catch (error) {
-    active?.delete();
-    shadow?.delete();
-    throw error;
+    // Some failed boolean operations have already released their input wrappers.
+    try { active?.delete(); } catch { /* Preserve the original geometry error. */ }
+    try { shadow?.delete(); } catch { /* Preserve the original geometry error. */ }
+    const detail = error instanceof Error ? error.message : `Falha do kernel geométrico (código ${String(error)}).`;
+    throw new Error(`${flatten ? 'Planificação' : 'Reconstrução'}: operação "${buildingFeature?.label ?? buildingFeature?.type ?? 'desconhecida'}" (${buildingFeature?.id ?? '?'}): ${detail}`);
   }
   shadow?.delete();
   return active;
 }
 
-const PARENT_EDGE_TOLERANCE = 0.75;
+const PARENT_EDGE_TOLERANCE = 1e-4;
 
 function samePoint(a: [number, number, number], b: [number, number, number]): boolean {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < PARENT_EDGE_TOLERANCE;
@@ -479,27 +510,88 @@ function samePoint(a: [number, number, number], b: [number, number, number]): bo
 // ou seja, a feature que genuinamente originou essa aresta. Roda só uma vez
 // por Flange criada (não a cada frame), então o custo de reconstruir várias
 // vezes é aceitável.
+/** Boolean operations can split an original edge without changing its owner. */
+function segmentContains(start: number[], end: number[], point: number[]): boolean {
+  const axis = end.map((v, i) => v - start[i]);
+  const length = Math.hypot(...axis);
+  if (length < 1e-7) return false;
+  const relative = point.map((v, i) => v - start[i]);
+  const along = relative.reduce((sum, v, i) => sum + v * axis[i] / length, 0);
+  const distance = Math.hypot(...relative.map((v, i) => v - along * axis[i] / length));
+  return distance < 1e-4 && along >= -1e-4 && along <= length + 1e-4;
+}
+
 export function findFlangeParentId(
   features: Feature[],
   edgeStart: [number, number, number],
   edgeEnd: [number, number, number]
 ): string | null {
+  // Match the same geometry the picker displays. A hidden imported body can
+  // otherwise swallow the native Face's edges in a union.
+  features = activeFeatures(features.map(f => f.type === 'imported' && f.visible === false
+    ? { ...f, suppressed: true } : f));
+  const matches = (solid: Solid) => listLinearEdges(solid).some(e =>
+    (samePoint(e.start, edgeStart) && samePoint(e.end, edgeEnd)) ||
+    (samePoint(e.start, edgeEnd) && samePoint(e.end, edgeStart)) ||
+    (segmentContains(e.start, e.end, edgeStart) && segmentContains(e.start, e.end, edgeEnd)));
+  let thickness = 1;
   for (let i = 0; i < features.length; i++) {
     const feature = features[i];
-    if (feature.type !== "face" && feature.type !== "flange") continue;
-
+    if (feature.type === 'sheetMetal') { thickness = feature.thickness; continue; }
+    if (feature.type !== 'face' && feature.type !== 'flange') continue;
+    // Preserve the Face's own edges before fusion with other bodies changes
+    // their segmentation or removes them from the cumulative result.
+    if (feature.type === 'face' && !feature.cut) {
+      const source = buildFaceSolid(feature, thickness);
+      if (source) {
+        try { if (matches(source)) return feature.id; }
+        finally { source.delete(); }
+      }
+    }
     const partial = rebuildModel(features.slice(0, i + 1));
     if (!partial) continue;
-    const edges = listLinearEdges(partial);
-    partial.delete();
-
-    const found = edges.some(
-      (e) =>
-        (samePoint(e.start, edgeStart) && samePoint(e.end, edgeEnd)) ||
-        (samePoint(e.start, edgeEnd) && samePoint(e.end, edgeStart))
-    );
-    if (found) return feature.id;
+    try { if (matches(partial)) return feature.id; }
+    finally { partial.delete(); }
   }
 
   return null;
+}
+
+/** Upgrade legacy fixed endpoints before editing ancestors; never mutate the input. */
+export function attachFlangeReferences(features: Feature[]): Feature[] {
+  if (!features.some(f => f.type === 'flange' && !f.attachment
+    && features.some(p => p.id === f.parentId && p.type === 'flange'))) return features;
+  const attachments = new Map<string, NonNullable<Extract<Feature, { type: 'flange' }>['attachment']>>();
+  const solid = rebuildModel(features, { onFlange(feature, _link, parent) {
+    if (!feature.attachment && parent) {
+      attachments.set(feature.id, { start: attachPointToFlange(parent, feature.edgeStart),
+        end: attachPointToFlange(parent, feature.edgeEnd) });
+    }
+  } });
+  solid?.delete();
+  return features.map(f => f.type === 'flange' && attachments.has(f.id)
+    ? { ...f, attachment: attachments.get(f.id)! } : f);
+}
+
+export function editFlangeWithDependents(features: Feature[], replacement: Extract<Feature, { type: 'flange' }>): Feature[] {
+  const attached = attachFlangeReferences(features);
+  const descendants = new Set([replacement.id]);
+  for (const feature of attached) {
+    if (feature.type === 'flange' && descendants.has(feature.parentId)) {
+      if (!feature.attachment) throw new Error('Reative os flanges dependentes antigos antes de editar o pai, para recuperar seus vínculos.');
+      descendants.add(feature.id);
+    }
+  }
+  const updated = attached.map(f => f.id === replacement.id && f.type === 'flange'
+    ? { ...replacement, attachment: f.attachment } : f);
+  const resolved = new Map<string, FlattenLink>();
+  const solid = rebuildModel(updated, { onFlange: (feature, link) => { resolved.set(feature.id, link); } });
+  try { solid?.mesh(); } finally { solid?.delete(); }
+  // Keep legacy endpoints current too, for edit markers and older file consumers.
+  return updated.map(feature => {
+    const link = resolved.get(feature.id);
+    if (feature.type !== 'flange' || !link) return feature;
+    const edgeEnd = link.axisPoint.map((v, i) => v + link.axisDir[i] * link.edgeLength) as [number, number, number];
+    return { ...feature, edgeStart: link.axisPoint, edgeEnd };
+  });
 }

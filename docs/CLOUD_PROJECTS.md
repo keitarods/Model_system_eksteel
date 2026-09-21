@@ -46,7 +46,7 @@ Reinicie o servidor local após mudar o ambiente; em produção, recompile/reimp
 
 O projeto do login pode ser diferente do Supabase de armazenamento de cada cliente. No seu teste, pode ser o mesmo. No modo local sem autenticação configurada, o conector **Supabase Storage** continua usando sua sessão própria; os conectores SQL no servidor exigem o login da instalação. Em produção, configure a autenticação antes de disponibilizar o software.
 
-A sessão Supabase do armazenamento fica em memória na aba, sem substituir os cookies do login da instalação. A senha do formulário é limpa após a tentativa. Recarregar exige reconectar. Não há cofre persistente de credenciais de clientes implementado.
+A sessão Supabase do armazenamento usa sessionStorage separado dos cookies do login da instalação. Atualizar a página ou navegar entre peça e montagem restaura a conexão na mesma aba, usando os tokens renováveis do Supabase; a senha nunca é salva. Sair do Storage encerra apenas essa conexão. Sair do software também encerra o Storage. Fechar a aba normalmente encerra seu armazenamento de sessão; navegadores podem restaurá-lo ao recuperar abas, portanto use Sair em computadores compartilhados. A opção Lembrar usuário guarda somente o e-mail no localStorage, independente de Lembrar URL e chave pública. Bancos SQL externos mantêm seu funcionamento anterior e não são restaurados após recarregar.
 
 ## Outros bancos: preparação no servidor/banco
 
@@ -134,3 +134,7 @@ No ambiente **Desenho**:
 O PDF é vetorial. O DXF representa a folha em milímetros de papel, com texto e contornos; curvas são aproximadas por segmentos de até 0,2 mm de percurso. Não inclui imagens/logotipos, preenchimentos ou todos os detalhes de tipografia do SVG. Não use o DXF de folha como perfil de corte 1:1: para fabricação, use o exportador de perfil da peça. Caminhos SVG compostos relativos não suportados geram erro explícito.
 
 O `.eksdesenho` preserva vistas calculadas, mas não inclui o sólido/árvore da peça ou montagem. Abra o projeto original para recalcular vistas. Os projetos `.eks3d`/`.eks3dasm` continuam armazenando suas folhas normalmente. Os envios da biblioteca são cópias independentes; leitores do Gestão continuam acessando somente PDF/DXF autorizados, não o desenho editável.
+
+### Login sem chave administrativa
+
+O login valida e-mail e senha diretamente pelo Supabase Auth usando a URL e a chave pública configuradas para a instalação. Não exige `SUPABASE_SERVICE_ROLE_KEY` e não lista usuários antes de autenticar. A conta deve existir no projeto Supabase usado pelo login. Credenciais inválidas recebem uma mensagem conjunta de e-mail/senha; erros de rede não contam como senha incorreta. A rota antiga de consulta de e-mail permanece compatível, retornando `exists: null`, sem revelar contas.

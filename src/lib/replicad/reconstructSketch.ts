@@ -39,10 +39,15 @@ export function reconstructFaceSketch(solid: Solid, hit: Vec3, normal: Vec3, new
       if (match) return match.id;
       const id = newId(); sketch.points[id] = { id, x: value.x, y: value.y }; return id;
     }
-    const edges = selected.edges;
+    const wires = [selected.clone().outerWire(), ...selected.clone().innerWires()];
+    const wireEdges = wires.map(w => w.edges);
+    const edges = wireEdges.flat();
+    sketch.profileWires = [];
     try {
       if (edges.length > 1000) throw new Error("Face com mais de mil arestas; simplifique a geometria antes de reconstruir.");
-      for (const edge of edges) {
+      for (const boundary of wireEdges) {
+        const firstShape = sketch.shapes.length;
+        for (const edge of boundary) {
         const at = (t: number) => { const v = edge.pointAt(t); const p = worldToLocalPoint(plane, [v.x, v.y, v.z]); v.delete(); return p; };
         if (edge.geomType === "LINE") {
           const p1 = point(at(0)), p2 = point(at(1));
@@ -70,8 +75,10 @@ export function reconstructFaceSketch(solid: Solid, hit: Vec3, normal: Vec3, new
           }
         } else throw new Error(`A face contém ${edge.geomType}. Esta etapa reconstrói apenas retas, arcos e círculos, sem aproximar curvas.`);
       }
+        sketch.profileWires.push(sketch.shapes.slice(firstShape).map(s => s.id));
+      }
       if (!sketch.shapes.length) throw new Error("Face sem contorno utilizável.");
       return sketch;
-    } finally { for (const edge of edges) edge.delete(); }
+    } finally { for (const edge of edges) edge.delete(); for (const wire of wires) wire.delete(); }
   } finally { vertex.delete(); for (const face of faces) face.delete(); }
 }
