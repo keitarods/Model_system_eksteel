@@ -80,7 +80,7 @@ import {
 import { useDrawingStore } from "@/lib/drawing/store";
 import type { Feature } from "@/lib/features/types";
 import type { ExtrudeDirection } from "@/lib/replicad/geometry";
-import { redoModel, undoModel, useUndoStore } from "@/lib/history/store";
+import { redoModel, resetModelHistory, undoModel, useUndoStore } from "@/lib/history/store";
 import { NATIVE_FILE_EXTENSION, parseProject, serializeProject } from "@/lib/project/nativeFormat";
 import { buildDxf } from "@/lib/project/dxf";
 import { reconstructFaceSketch } from "@/lib/replicad/reconstructSketch";
@@ -2378,7 +2378,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // apaga o rascunho automático (clearDraft) — sem isso ela voltaria
   // sozinha na próxima vez que a página abrisse, apesar de "fechada".
   const handleCloseProject = useCallback(() => {
-    if (features.length === 0 && drawingSheets.length === 0 && !currentFileName) return;
+    if (features.length === 0 && drawingSheets.length === 0 && shapes.length === 0 && !currentFileName) return;
     if (
       !window.confirm(
         "Fechar a peça atual? Qualquer alteração que ainda não esteja salva num arquivo será perdida (o rascunho automático também é apagado)."
@@ -2386,12 +2386,36 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     ) {
       return;
     }
+    setFeatureToolMode(null);
+    setEditingFeatureId(null);
+    setAdvancedEditing(null);
+    setAdvancedDraft(null);
+    setDebouncedDraftFeature(null);
+    setEdgeToolMode(null);
+    setSelectedEdgePoints([]);
+    setFlangePicking(false);
+    setFlangeCandidate(null);
+    setCreatingPlane(false);
+    setPlaneBase(null);
+    setPickingAxisFace(false);
+    setCreatingSheetMetal(false);
+    setMeasuring3d(false);
+    setMeasurePoints([]);
+    setMeasureAngle(null);
+    setMeasureCircles([]);
+    measurementSelection.current = null;
+    setFlattenView(false);
+    setFlattenError(null);
+    setErrorMessage(null);
+    setRedefiningSketchId(null);
+    setOperationProfileSelection(null);
+    setMode("modelar");
     setCloudDocumentEpoch(value => value + 1);
     useFeatureStore.setState({ features: [] });
     useDrawingStore.getState().loadSheets([]);
     usePartPropertiesStore.getState().clear();
-    useUndoStore.setState({ past: [], future: [] });
     clearSketch();
+    resetModelHistory();
     setEditingSketchId(null);
     setSketching(false);
     setPickingPlane(false);
@@ -2401,7 +2425,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     rememberCurrentFileHandle("modelador", null);
     clearDraft("modelador").catch((err) => console.error("Falha ao apagar rascunho automático:", err));
     showNotice("Peça fechada.");
-  }, [features.length, drawingSheets.length, currentFileName, clearSketch, showNotice]);
+  }, [features.length, drawingSheets.length, shapes.length, currentFileName, clearSketch, showNotice]);
 
   // "Voltar pra Montagem" (ao estilo do "Return" do Inventor, na edição em
   // contexto): salva a peça de volta no MESMO arquivo vinculado (se tiver
@@ -2619,7 +2643,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             title="Fechar a peça atual (volta pro Modelador vazio)"
             className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
           >
-            <HeaderIcon kind="close" /><span className="">Fechar</span>
+            <HeaderIcon kind="close" /><span className="">Fechar peça</span>
           </button>
           <button
             type="button"
@@ -2688,6 +2712,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           </button>
           <div aria-hidden="true" className="my-1 h-px w-full bg-chrome-border" />
           </ApplicationFileMenu>
+          <button type="button" onClick={handleCloseProject} title="Fechar peça atual" aria-label="Fechar peça atual"
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt">
+            <HeaderIcon kind="close" /><span className="sr-only">Fechar peça</span>
+          </button>
           <div className="hidden h-7 w-px bg-chrome-border sm:block" />
           <span
             className="hidden text-sm font-semibold uppercase tracking-wide text-chrome-text-muted 2xl:inline"
@@ -2814,7 +2842,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       </header>
 
       {mode === "desenho" ? (
-        <DrawingSheetWorkspace source={partSheetSource} />
+        <DrawingSheetWorkspace source={partSheetSource} onClose={() => setMode("modelar")} />
       ) : (
         <>
       {/* Altura ajustável (arraste a divisória logo abaixo) — sem isso, o

@@ -118,6 +118,14 @@ function flushPendingHistory() {
   }));
 }
 
+// Call after clearing a document: discard queued edits as well as committed history.
+export function resetModelHistory() {
+  batching = false;
+  batchStart = null;
+  lastSnapshot = captureSnapshot();
+  useUndoStore.setState({ past: [], future: [] });
+}
+
 // useSketchStore também guarda estado efêmero de interação (preview de
 // arrasto, indicador de snap, seleção, ferramenta pendente etc.) — isso
 // muda a cada movimento do mouse durante um arrasto, e um subscribe() sem

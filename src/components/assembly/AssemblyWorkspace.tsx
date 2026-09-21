@@ -51,7 +51,7 @@ import {
   scheduleDraftSave,
 } from "@/lib/project/autosave";
 import { consumePendingReturnSelection, requestEditInContext } from "@/lib/project/editInContext";
-import { redoModel, undoModel, useUndoStore } from "@/lib/history/store";
+import { redoModel, resetModelHistory, undoModel, useUndoStore } from "@/lib/history/store";
 
 function createId() {
   return Math.random().toString(36).slice(2, 10);
@@ -603,7 +603,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
   // peça visível na tela. clearDraft apaga esse rascunho na hora, em vez de
   // confiar só no autosave (debounced) reescrever o estado vazio a tempo.
   const handleCloseAssembly = useCallback(() => {
-    if (instances.length === 0 && !currentFileName) return;
+    if (instances.length === 0 && useAssemblyDrawingStore.getState().sheets.length === 0 && !currentFileName) return;
     if (
       !window.confirm(
         "Fechar a montagem atual? Qualquer alteração que ainda não esteja salva num arquivo será perdida (o rascunho automático também é apagado)."
@@ -613,6 +613,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
     }
     clearAssembly();
     useAssemblyDrawingStore.getState().clear();
+    resetModelHistory();
     setSelectedInstanceId(null);
     setConstraintMode(false);
     setPendingFace(null);
@@ -790,7 +791,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
             title="Fechar a montagem atual (volta pra uma Montagem vazia)"
             className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
           >
-            Fechar
+            Fechar montagem
           </button>
           <button
             type="button"
@@ -901,7 +902,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
       )}
 
       {mode === "desenho" ? (
-        <DrawingSheetWorkspace useStore={useAssemblyDrawingStore} source={assemblySheetSource} />
+        <DrawingSheetWorkspace useStore={useAssemblyDrawingStore} source={assemblySheetSource} onClose={() => setMode("modelo")} />
       ) : (
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
         <div className="min-h-0 flex-1 md:order-1">

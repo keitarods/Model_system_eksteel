@@ -312,7 +312,9 @@ const HATCH_PATTERN_ID = "section-hatch";
 export function DrawingSheetWorkspace({
   useStore = useDrawingStore,
   source,
+  onClose,
 }: {
+  onClose?: () => void;
   useStore?: SheetStore;
   source: SheetShapeSource;
 }) {
@@ -717,6 +719,18 @@ export function DrawingSheetWorkspace({
       setErrorMessage(err instanceof Error ? err.message : "Erro ao exportar PDF.");
     }
   }
+  function handleCloseDrawing() {
+    if (computing) return;
+    setDimensionMode(false); setPendingLinePick(null);
+    setAnnotationMode(null); setPendingWeldPoint(null);
+    setViewInsertTarget(null); setViewPickerOpen(false); setContextMenu(null);
+    setProjectionMode(false); setProjectionBase(null);
+    setSectionMode(false); setSectionBase(null); setPendingSectionPoint(null);
+    setPendingFlattened(false); setErrorMessage(null);
+    dragRef.current = null;
+    onClose?.();
+  }
+
   async function handleDrawingFile(action: "save" | "open" | "dxf") {
     setErrorMessage(null);
     try {
@@ -979,6 +993,8 @@ export function DrawingSheetWorkspace({
         </div>
 
             <button type="button" className={toolButtonClass(false)} onClick={() => void handleDrawingFile("open")}>Abrir desenho</button>
+            <button type="button" className={toolButtonClass(false)} disabled={computing || !onClose}
+              onClick={handleCloseDrawing} title="Voltar ao modelo 3D preservando as folhas do projeto">Fechar desenho</button>
             <CloudProjectsButton documentKind="drawing" suggestedName={activeSheet?.name || "desenho"}
               getProject={() => serializeDrawing(useStore.getState().sheets)}
               onOpen={json => useStore.getState().loadSheets(parseDrawing(json))}

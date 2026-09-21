@@ -138,3 +138,15 @@ O `.eksdesenho` preserva vistas calculadas, mas não inclui o sólido/árvore da
 ### Login sem chave administrativa
 
 O login valida e-mail e senha diretamente pelo Supabase Auth usando a URL e a chave pública configuradas para a instalação. Não exige `SUPABASE_SERVICE_ROLE_KEY` e não lista usuários antes de autenticar. A conta deve existir no projeto Supabase usado pelo login. Credenciais inválidas recebem uma mensagem conjunta de e-mail/senha; erros de rede não contam como senha incorreta. A rota antiga de consulta de e-mail permanece compatível, retornando `exists: null`, sem revelar contas.
+
+### Atualizar uma peça existente com o modelo aberto
+
+Selecione a pasta e a peça em **Peça existente**. O software consulta o token da versão atual e libera **Salvar**, sem abrir o arquivo da nuvem nem substituir seu modelo local. Clicar em Salvar atualiza esse destino com o conteúdo da área de trabalho, sem criar revisão adicional. Para carregar o conteúdo remoto, use **Abrir peça atual**. Uma alteração remota posterior à seleção continua gerando conflito; selecionar novamente o mesmo destino não renova silenciosamente o token. Abrir outro documento local invalida o destino anterior.
+
+### Fechar documentos
+
+- **Fechar peça**: no menu do logo ou no ícone de fechar ao lado dele. Confirma o descarte do documento em memória e do rascunho automático; arquivos locais e da nuvem são preservados.
+- **Fechar montagem**: na barra superior, com a mesma confirmação.
+- **Fechar desenho**: na barra do ambiente Desenho, volta ao modelo 3D. Como as folhas fazem parte do projeto da peça/montagem, elas são preservadas, não excluídas. Reabra a aba Desenho para continuar; use Salvar desenho para gravar o arquivo separado.
+
+Fechar uma peça cancela suas ferramentas ativas e desvincula o destino anterior de Salvar na nuvem. Não encerra a conexão com o Storage.

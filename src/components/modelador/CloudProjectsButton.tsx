@@ -1,4 +1,5 @@
 "use client";
+import { currentSaveTarget, selectSaveTarget, type CloudSaveTarget } from "@/lib/project/cloudSaveTarget";
 import { HeaderIcon } from "@/components/icons/HeaderIcon";
 
 import { loadRememberedCloudUser, rememberCloudUser, forgetCloudUser, loadRememberedCloud, rememberCloud, forgetCloud } from "@/lib/project/rememberedCloud";
@@ -100,8 +101,11 @@ export function CloudProjectsButton({ getProject, onOpen, suggestedName, disable
   const [newFolder, setNewFolder] = useState("");
   const [projects, setProjects] = useState<string[]>([]);
   const [project, setProject] = useState("");
-  const [opened, setOpened] = useState<{ folder: string; project: string; token: string | null } | null>(null);
-  useEffect(() => { setOpened(null); }, [documentEpoch]);
+  const [saveTarget, setSaveTarget] = useState<CloudSaveTarget | null>(null);
+  const opened = currentSaveTarget(saveTarget, documentEpoch);
+  function setOpened(value: Omit<CloudSaveTarget, "documentEpoch"> | null) {
+    setSaveTarget(value ? { ...value, documentEpoch } : null);
+  }
   const [versions, setVersions] = useState<string[]>([]);
   const dialog = useRef<HTMLDialogElement>(null);
   const locked = useRef(false);
@@ -246,14 +250,23 @@ export function CloudProjectsButton({ getProject, onOpen, suggestedName, disable
           })}>Criar pasta</button>
         </div>
         {documentKind === "part" && <label className="block text-sm">Peça existente
-          <select className={fieldClass} value={projects.includes(project) ? project : ""} onChange={e => { setProject(e.target.value); setVersions([]); }}>
+          <select className={fieldClass} value={projects.includes(project) ? project : ""} onChange={e => {
+            const selected = e.target.value;
+            setProject(selected); setVersions([]);
+            if (!selected) { setOpened(null); return; }
+            void run(async () => {
+              const target = await selectSaveTarget(connection!, folder, selected, opened, documentEpoch);
+              setSaveTarget(target);
+              setMessage(`Destino selecionado: ${folder}/${selected}. Salvar substituirá esta peça pelo conteúdo aberto na área de trabalho.`);
+            });
+          }}>
             <option value="">Nova peça ou nome abaixo</option>{projects.map(name => <option key={name}>{name}</option>)}
           </select>
         </label>
         }
         <label className="block text-sm">Nome da peça ou montagem<input className={fieldClass} maxLength={80} value={project} onChange={e => { setProject(e.target.value); setVersions([]); }} /></label>
         {documentKind === "part" && <>
-        <p className="text-xs text-chrome-text-muted">Para uma peça nova, informe o nome e use Salvar como. Para atualizar uma existente, abra a peça atual ou uma revisão.</p>
+        <p className="text-xs text-chrome-text-muted">Para uma peça nova, informe o nome e use Salvar como. Para atualizar uma existente com o conteúdo da área de trabalho, selecione-a em Peça existente e clique em Salvar. Abrir peça atual carrega o conteúdo salvo na nuvem.</p>
         <div className="flex flex-wrap gap-2">
           <button type="button" className={buttonClass} disabled={!opened || opened.folder !== folder || opened.project !== project} onClick={() => void run(async () => {
             if (!opened) return;
@@ -262,7 +275,7 @@ export function CloudProjectsButton({ getProject, onOpen, suggestedName, disable
           })}>Salvar</button>
           <button type="button" className={buttonClass} disabled={!folder || !project.trim()} onClick={() => void run(async () => {
             const name = cloudName(project);
-            if ((await connection!.projects(folder)).includes(name)) throw new Error("Esse nome já existe. Para atualizar, abra a peça; para Salvar como, informe outro nome.");
+            if ((await connection!.projects(folder)).includes(name)) throw new Error("Esse nome já existe. Para atualizar, selecione-a em Peça existente e use Salvar; para Salvar como, informe outro nome.");
             const token = await connection!.saveCurrent(folder, name, await getProject(), null);
             setProject(name); setOpened({ folder, project: name, token });
             setMessage("Nova peça salva. Os próximos salvamentos atualizarão esta peça.");
