@@ -4,8 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
 import { Line, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
+import type { SketchFeature } from "@/lib/features/types";
+import { localToWorldPoint } from "@/lib/replicad/plane";
 import type { ShapeMesh } from "replicad";
 import { orientCamera, type NavigationControls } from "@/components/viewer/cameraNavigation";
+import { MaterialLighting } from "@/components/materials/MaterialLighting";
+import type { Appearance } from "@/lib/materials/library";
 import { SolidMesh } from "@/components/viewer/SolidMesh";
 import type { ComponentPlacement } from "@/lib/assembly/types";
 
@@ -23,6 +27,8 @@ export type AssemblyBody = {
   placement: ComponentPlacement;
   visible: boolean;
   grounded: boolean;
+  color?: string;
+  appearance?: Appearance;
 };
 
 export type FacePick = {
@@ -69,6 +75,38 @@ function CameraRig({ position, token }: { position: [number, number, number]; to
     applied.current = token;
     orientCamera(camera, controls, new THREE.Vector3(...position));
   }, [camera, controls, position, token]);
+  return null;
+}
+
+function FitAssembly({bodies,sketches,token}:{bodies:AssemblyBody[];sketches:{sketch:SketchFeature;placement:ComponentPlacement}[];token:number}) {
+  const {camera,size} = useThree();
+  const controls = useThree(s=>s.controls) as NavigationControls | null;
+  const applied = useRef("");
+  useEffect(()=>{
+    const key = `${token}:${bodies.map(b=>b.instanceId).join(",")}:${sketches.map(s=>s.sketch.id).join(",")}`;
+    if(!controls || applied.current===key) return;
+    const box = new THREE.Box3();
+    const point = new THREE.Vector3();
+    for(const body of bodies.filter(b=>b.visible)) {
+      const q=new THREE.Quaternion(...body.placement.quaternion),pos=new THREE.Vector3(...body.placement.position);
+      for(let i=0;i<body.mesh.vertices.length;i+=3) box.expandByPoint(point.fromArray(body.mesh.vertices,i).applyQuaternion(q).add(pos));
+    }
+    for(const {sketch,placement} of sketches) {
+      const q=new THREE.Quaternion(...placement.quaternion),pos=new THREE.Vector3(...placement.position);
+      const points=Object.values(sketch.points).map(p=>({x:p.x,y:p.y}));
+      for(const shape of sketch.shapes) if(shape.type==='circle') {const c=sketch.points[shape.center];points.push({x:c.x-shape.radius,y:c.y-shape.radius},{x:c.x+shape.radius,y:c.y+shape.radius});}
+      for(const p of points) box.expandByPoint(point.fromArray(localToWorldPoint(sketch.plane,p)).applyQuaternion(q).add(pos));
+    }
+    if(box.isEmpty()) return;
+    applied.current=key;
+    const center=box.getCenter(new THREE.Vector3());
+    const radius=Math.max(box.getSize(new THREE.Vector3()).length()/2,1);
+    const direction=camera.position.clone().sub(controls.target).normalize();
+    const fov=camera instanceof THREE.PerspectiveCamera?camera.fov:45;
+    const halfAngle=Math.atan(Math.tan(fov*Math.PI/360)*Math.min(1,size.width/size.height));
+    camera.position.copy(center).addScaledVector(direction,Math.max(15,radius/Math.sin(halfAngle)*1.2));
+    controls.target.copy(center);controls.update();
+  },[bodies,sketches,token,camera,controls,size.width,size.height]);
   return null;
 }
 
@@ -130,6 +168,7 @@ function useBodyDrag(onDragMove: (instanceId: string, position: [number, number,
 
 export function AssemblyViewer3D({
   bodies,
+  sketches = [],
   pickMode = false,
   pickModeHint,
   onPickFace,
@@ -141,6 +180,7 @@ export function AssemblyViewer3D({
   onEditInstance,
 }: {
   bodies: AssemblyBody[];
+  sketches?: { sketch: SketchFeature; placement: ComponentPlacement }[];
   pickMode?: boolean;
   pickModeHint?: string;
   onPickFace?: (pick: FacePick) => void;
@@ -158,36 +198,40 @@ export function AssemblyViewer3D({
   // Inventor, abre a peça pra editar (ver src/lib/project/editInContext.ts).
   onEditInstance?: (instanceId: string) => void;
 }) {
+  const [fitToken,setFitToken] = useState(0);
   const [wireframe, setWireframe] = useState(false);
   const [view, setView] = useState<ViewPreset>("isometrica");
   const [viewToken, setViewToken] = useState(0);
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b border-primary-100 bg-primary-50 px-3 py-2 text-sm">
-        {(Object.keys(VIEW_PRESETS) as ViewPreset[]).map((preset) => (
-          <button
-            key={preset}
-            type="button"
-            onClick={() => { setView(preset); setViewToken((token) => token + 1); }}
-            className={`rounded-lg px-3 py-1.5 capitalize transition ${
-              view === preset ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"
-            }`}
-          >
-            {preset}
+    <div className="relative flex h-full min-h-0 flex-col">
+      <div aria-label="Visualização da montagem" className="pointer-events-none absolute inset-x-2 top-2 z-10 flex items-start justify-between gap-2">
+        <div className="pointer-events-auto flex shrink-0 items-center gap-0.5 rounded-lg border border-primary-100 bg-white/95 p-1 shadow-sm">
+          {(Object.keys(VIEW_PRESETS) as ViewPreset[]).map(preset=><button key={preset} type="button" title={`Vista ${preset}`} aria-label={`Vista ${preset}`} aria-pressed={view===preset}
+            onClick={()=>{setView(preset);setViewToken(t=>t+1);}}
+            className={`flex h-8 w-8 items-center justify-center rounded ${view===preset?'bg-primary text-primary-foreground':'text-primary-700 hover:bg-primary-50'}`}>
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="m4 7 8-4 8 4v10l-8 4-8-4Z M4 7l8 4 8-4 M12 11v10"/>
+              {preset==='superior'&&<path d="m4 7 8-4 8 4-8 4Z" fill="currentColor" fillOpacity=".3"/>}
+              {preset==='frontal'&&<path d="m4 7 8 4v10l-8-4Z" fill="currentColor" fillOpacity=".3"/>}
+            </svg>
+          </button>)}
+          <div className="mx-1 h-5 w-px bg-primary-100"/>
+          <button type="button" onClick={()=>setFitToken(t=>t+1)} title="Enquadrar tudo" aria-label="Enquadrar tudo" className="flex h-8 w-8 items-center justify-center rounded text-primary-700 hover:bg-primary-50">
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3H3v5 M16 3h5v5 M21 16v5h-5 M8 21H3v-5"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
           </button>
-        ))}
-        <label className="ml-auto flex items-center gap-2 text-primary-700">
-          <input type="checkbox" checked={wireframe} onChange={(e) => setWireframe(e.target.checked)} />
-          Wireframe
-        </label>
+          <button type="button" onClick={()=>setWireframe(v=>!v)} title="Wireframe — exibir arestas" aria-label="Wireframe" aria-pressed={wireframe} className={`flex h-8 w-8 items-center justify-center rounded ${wireframe?'bg-primary text-primary-foreground':'text-primary-700 hover:bg-primary-50'}`}>
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m4 7 8-4 8 4v10l-8 4-8-4Z M4 7l8 4 8-4 M12 11v10"/><path strokeDasharray="2 2" d="m4 17 8-4 8 4 M12 3v10"/></svg>
+          </button>
+        </div>
       </div>
-
-      <div className={`relative flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
+      <div className={`relative min-h-0 flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
         <Canvas camera={{ position: VIEW_PRESETS.isometrica, fov: 45, up: [0, 0, 1], near: 0.1, far: 100000 }}>
           <color attach="background" args={["#ffffff"]} />
+          <MaterialLighting/>
           <ambientLight intensity={0.7} />
           <directionalLight position={[1200, -1500, 2200]} intensity={1} />
+          <FitAssembly bodies={bodies} sketches={sketches} token={fitToken}/>
           <CameraRig position={VIEW_PRESETS[view]} token={viewToken} />
           <AssemblyBodies
             bodies={bodies}
@@ -200,6 +244,16 @@ export function AssemblyViewer3D({
             onDragInstance={onDragInstance}
             onEditInstance={onEditInstance}
           />
+          {sketches.map(({sketch,placement}) => <group key={sketch.id} position={placement.position} quaternion={placement.quaternion}>
+            {sketch.shapes.map(shape => {
+              const p = sketch.points;
+              let points: {x:number;y:number}[] = [];
+              if(shape.type === "line") points = [p[shape.p1],p[shape.p2]];
+              if(shape.type === "rect") { const a=p[shape.p1],b=p[shape.p2]; points=[a,{x:b.x,y:a.y},b,{x:a.x,y:b.y},a]; }
+              if(shape.type === "circle") { const c=p[shape.center]; points=Array.from({length:65},(_,i)=>({x:c.x+shape.radius*Math.cos(i*Math.PI/32),y:c.y+shape.radius*Math.sin(i*Math.PI/32)})); }
+              return points.length>1 ? <Line key={shape.id} points={points.map(point=>localToWorldPoint(sketch.plane,point))} color="#16a34a" lineWidth={2} /> : null;
+            })}
+          </group>)}
           {pickMarkers.map((marker, i) => (
             <PickMarker3D key={i} marker={marker} />
           ))}
@@ -208,13 +262,13 @@ export function AssemblyViewer3D({
           <OrbitControls makeDefault enableZoom zoomToCursor zoomSpeed={1.2} minDistance={10} maxDistance={40000} />
         </Canvas>
 
-        {bodies.length === 0 && !pickMode && (
+        {bodies.length === 0 && sketches.length === 0 && !pickMode && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-primary-500">
             Insira uma peça para começar a montagem.
           </div>
         )}
         {pickMode && pickModeHint && (
-          <div className="pointer-events-none absolute left-1/2 top-2 -translate-x-1/2 rounded-full bg-primary-900/95 px-4 py-2 text-sm font-semibold text-white shadow-lg">
+          <div className="pointer-events-none absolute left-1/2 top-16 -translate-x-1/2 rounded-full bg-primary-900/95 px-4 py-2 text-sm font-semibold text-white shadow-lg">
             {pickModeHint}
           </div>
         )}
@@ -252,7 +306,7 @@ function AssemblyBodies({
         .filter((b) => b.visible)
         .map((body) => {
           const isSelected = body.instanceId === selectedInstanceId;
-          const color = isSelected ? "#2196f3" : body.grounded ? "#8d6e63" : undefined;
+          const color = isSelected ? "#2196f3" : body.color ?? (body.appearance ? undefined : body.grounded ? "#8d6e63" : undefined);
           const isDraggable = !pickMode && body.instanceId === draggableInstanceId;
 
           return (
@@ -282,6 +336,7 @@ function AssemblyBodies({
                 wireframe={wireframe}
                 pickMode={pickMode}
                 color={color}
+                appearance={body.appearance}
                 transform={body.placement}
                 onPick={
                   pickMode

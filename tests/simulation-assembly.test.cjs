@@ -1,0 +1,33 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {snapshotAssembly}=require('../src/lib/simulation/assemblyImport.ts');
+const {createAssemblySketch,createAssemblyOperation}=require('../src/lib/assembly/modeling.ts');
+const {serializeProject}=require('../src/lib/project/nativeFormat.ts');
+const {emptyStudy}=require('../src/lib/simulation/types.ts');
+const {parseStudy,serializeStudy}=require('../src/lib/simulation/format.ts');
+const sketch=createAssemblySketch({shape:'rectangle',plane:'XY',x:0,y:0,offset:0,width:20,height:10},'s');
+const base=createAssemblyOperation(sketch,'extrude',5,false,false,'Y','e');
+const instance=(id,patch={})=>({id,label:id,linkKey:id,sourceFileName:id+'.eks3d',embeddedPart:serializeProject([base]),grounded:true,visible:true,suppressed:false,placementSeed:{position:[0,0,0],quaternion:[0,0,0,1]},...patch});
+test('assembly snapshot preserves rotation, translation, hidden components and assembly operations',async()=>{
+ await require('./kernel.cjs')();
+ const a=instance('a');
+ const b=instance('b',{visible:false,embeddedPart:serializeProject([]),assemblyFeatures:[base],placementSeed:{position:[50,0,0],quaternion:[0,0,Math.SQRT1_2,Math.SQRT1_2]}});
+ const doc={instances:[a,b,instance('suppressed',{suppressed:true})],constraints:[]};
+ const before=JSON.stringify(doc);const result=await snapshotAssembly(doc);
+ assert.deepEqual(result.components,[{id:'a',label:'a'},{id:'b',label:'b'}]);
+ const vertices=result.preview.vertices;
+ const xs=vertices.filter((_,i)=>i%3===0);const ys=vertices.filter((_,i)=>i%3===1);
+ assert.ok(Math.abs(Math.min(...xs))<1e-6);assert.ok(Math.abs(Math.max(...xs)-50)<1e-6);
+ assert.ok(Math.abs(Math.max(...ys)-20)<1e-6);
+ assert.match(result.step,/ISO-10303-21/);assert.equal(JSON.stringify(doc),before);
+ const study={...emptyStudy(),step:result.step,geometryMode:'assemblyBonded',components:result.components};
+ assert.deepEqual(parseStudy(serializeStudy(study)),study);
+});
+test('assembly snapshot rejects empty assemblies and fails atomically on unavailable components',async()=>{
+ await require('./kernel.cjs')();
+ await assert.rejects(snapshotAssembly({instances:[],constraints:[]}),/componentes ativos/);
+ const doc={instances:[instance('a'),instance('missing')],constraints:[]};
+ await assert.rejects(snapshotAssembly(doc,async i=>{if(i.id==='missing')throw Error('missing linked part');return [base];}),/missing linked part/);
+ await assert.rejects(snapshotAssembly({instances:[instance('empty',{embeddedPart:serializeProject([])})],constraints:[]}),/não possui um sólido/);
+ assert.equal((await snapshotAssembly({instances:[instance('ok')],constraints:[]})).components.length,1);
+});

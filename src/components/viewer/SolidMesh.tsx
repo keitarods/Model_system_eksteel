@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
+import type { Appearance } from "@/lib/materials/library";
 import type { ShapeMesh } from "replicad";
 
 // Extraído de Viewer3D.tsx pra ser reaproveitado também pelo
@@ -18,6 +19,7 @@ export function SolidMesh({
   onContextMenu,
   transform,
   color,
+  appearance,
 }: {
   mesh: ShapeMesh;
   wireframe: boolean;
@@ -38,6 +40,7 @@ export function SolidMesh({
   // Cor do material — permite distinguir visualmente o componente
   // selecionado/fixo na montagem sem precisar de outro material.
   color?: string;
+  appearance?: Appearance;
 }) {
   const geometry = useMemo(() => {
     const geo = new THREE.BufferGeometry();
@@ -132,11 +135,14 @@ export function SolidMesh({
         onPointerOut={pickMode ? handlePointerOut : undefined}
       >
         <meshStandardMaterial
-          color={color ?? (pickMode ? "#78909C" : "#546E7A")}
+          color={color ?? appearance?.color ?? (pickMode ? "#78909C" : "#546E7A")}
           wireframe={wireframe}
           side={THREE.DoubleSide}
-          metalness={0.05}
-          roughness={0.65}
+          metalness={appearance?.metalness ?? 0.05}
+          roughness={appearance?.roughness ?? 0.65}
+          transparent={(appearance?.opacity ?? 1)<1}
+          opacity={appearance?.opacity ?? 1}
+          depthWrite={(appearance?.opacity ?? 1)>=1}
         />
       </mesh>
       {pickMode && highlightGeometry && (

@@ -1,11 +1,14 @@
 "use client";
 
 import { useId, useRef, useState, type ReactNode } from "react";
+import { WorkspaceMenuSection, type WorkspaceKind } from "@/components/layout/WorkspaceChrome";
 
 /** Native popover uses the top layer, so the header's scrolling cannot clip it.
  * Keep children mounted: cloud connections and their dialogs survive dismissal.
+ * Same order in every workspace: documento (abrir/nuvem/importar) · salvar · exportar ·
+ * propriedades · fechar, then the fixed "Ambientes" section.
  */
-export function ApplicationFileMenu({ children }: { children: ReactNode }) {
+export function ApplicationFileMenu({ current, children }: { current: WorkspaceKind; children: ReactNode }) {
   const id = useId();
   const panel = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
@@ -26,6 +29,7 @@ export function ApplicationFileMenu({ children }: { children: ReactNode }) {
       <h2 className="mb-2 border-b border-chrome-border px-2 pb-2 text-sm font-semibold">Arquivo</h2>
       <div className="flex flex-col gap-1 [&>button]:flex [&>button]:w-full [&>button]:max-w-none [&>button]:items-center [&>button]:gap-3 [&>button]:px-3 [&>button]:py-2 [&>button]:text-left [&>button]:text-sm">
         {children}
+        <WorkspaceMenuSection current={current} />
       </div>
     </div>
   </>;

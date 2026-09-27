@@ -24,3 +24,12 @@ npm-debug.log*
 *.key
 *.p12
 *.pfx
+
+# Python FEA service
+__pycache__/
+*.pyc
+services/fea/.venv/
+services/fea/.runtime/
+
+# Dados da biblioteca de materiais Autodesk: ficam no banco (ver docs/MATERIALS.md), nunca no Git
+/src/lib/materials/inventorLibrary*.json

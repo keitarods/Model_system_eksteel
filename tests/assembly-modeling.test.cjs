@@ -1,0 +1,43 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {createAssemblySketch,createAssemblyOperation}=require('../src/lib/assembly/modeling.ts');
+const {rebuildModel}=require('../src/lib/replicad/build-model.ts');
+const {serializeAssembly,parseAssembly}=require('../src/lib/project/assemblyFormat.ts');
+const {serializeProject}=require('../src/lib/project/nativeFormat.ts');
+const defaults={shape:'rectangle',plane:'XY',x:0,y:0,offset:0,width:20,height:20};
+const sketch=(patch={})=>createAssemblySketch({...defaults,...patch},'sketch');
+const op=(s,kind,value,cut=false,reversed=false)=>createAssemblyOperation(s,kind,value,cut,reversed,'Y',Math.random().toString());
+test('assembly sketches and operations reject invalid dimensions',()=>{
+ for(const width of [0,-1,NaN,Infinity])assert.throws(()=>sketch({width}));
+ for(const angle of [0,-1,361,NaN])assert.throws(()=>op(sketch(),'revolve',angle));
+});
+test('assembly extrude/revolve join and cut, planes, weld volumes and native roundtrip',async()=>{
+ await require('./kernel.cjs')();
+ const {measureVolume}=require('replicad');
+ const volume=features=>{const solid=rebuildModel(features);assert.ok(solid);try{return measureVolume(solid);}finally{solid.delete();}};
+ const near=(a,b)=>assert.ok(Math.abs(a-b)<1e-4,`${a} != ${b}`);
+ const base=op(sketch(),'extrude',10);
+ near(volume([base]),4000);
+ near(volume([base,op(sketch({width:5,height:5}),'extrude',10,true)]),3750);
+ near(volume([base,op(sketch({offset:10,width:10,height:10}),'extrude',5)]),4500);
+ for(const plane of ['XY','XZ','YZ'])near(volume([op(sketch({plane}),'extrude',10,false,true)]),4000);
+ const ring=op(sketch({x:5,width:5,height:10}),'revolve',360);
+ near(volume([ring]),Math.PI*750);
+ const trim=op(sketch({x:7,width:2,height:10}),'revolve',360,true);
+ near(volume([ring,trim]),Math.PI*430);
+ near(volume([op(sketch({shape:'triangle',width:5,height:5}),'extrude',50)]),625);
+ const instance={id:'part',label:'Part',linkKey:'part',sourceFileName:'part.eks3d',embeddedPart:serializeProject([]),assemblyFeatures:[sketch(),base],grounded:true,visible:true,suppressed:false,placementSeed:{position:[0,0,0],quaternion:[0,0,0,1]}};
+ const loaded=parseAssembly(serializeAssembly([instance],[]));
+ near(volume(loaded.instances[0].assemblyFeatures),4000);
+ assert.deepEqual(loaded.instances[0].assemblyFeatures,instance.assemblyFeatures);
+});
+test('assembly operations and weld metadata survive undo and redo',async()=>{
+ const {useAssemblyStore}=require('../src/lib/assembly/store.ts');
+ const {resetModelHistory,undoModel,redoModel}=require('../src/lib/history/store.ts');
+ useAssemblyStore.getState().clear();resetModelHistory();
+ useAssemblyStore.getState().addInstance({id:'w',assemblyFeatures:[sketch()],weld:{process:'TIG',size:5,length:50}});
+ await Promise.resolve();undoModel();assert.equal(useAssemblyStore.getState().instances.length,0);
+ redoModel();assert.equal(useAssemblyStore.getState().instances[0].weld.process,'TIG');
+ assert.equal(useAssemblyStore.getState().instances[0].assemblyFeatures.length,1);
+ useAssemblyStore.getState().clear();resetModelHistory();
+});

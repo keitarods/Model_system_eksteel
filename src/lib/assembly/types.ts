@@ -39,6 +39,14 @@ export type MateFrame = {
 };
 
 export type ComponentInstance = {
+  /** Operações locais da montagem; preservam o arquivo vinculado. */
+  assemblyFeatures?: import("@/lib/features/types").Feature[];
+  weld?: { process: string; size: number; length: number };
+  /**
+   * Substituição de aparência desta ocorrência, ao estilo Inventor: fica só na
+   * montagem e não altera a peça. Ausente = usa a aparência do material da peça.
+   */
+  appearanceOverride?: import("@/lib/materials/library").Appearance & { name?: string };
   /** Snapshot portátil opcional. Ao religar um arquivo local, remova este campo. */
   embeddedPart?: string;
   id: string;

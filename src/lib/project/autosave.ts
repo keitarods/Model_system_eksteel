@@ -33,7 +33,7 @@ const HANDLE_STORE = "handles";
 const LINKED_FILE_HANDLE_STORE = "linkedFileHandles";
 const DB_VERSION = 3;
 
-export type DocKind = "modelador" | "montagem";
+export type DocKind = "modelador" | "montagem" | "simulacao";
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -112,6 +112,7 @@ export async function clearDraft(kind: DocKind): Promise<void> {
 const FILE_HANDLE_KEY: Record<DocKind, string> = {
   modelador: "currentProjectFile",
   montagem: "currentAssemblyFile",
+  simulacao: "currentSimulationFile",
 };
 
 export async function rememberCurrentFileHandle(kind: DocKind, handle: FileSystemFileHandle | null): Promise<void> {

@@ -1,5 +1,4 @@
 "use client";
-import { disconnectCustomerSupabase } from "@/lib/project/supabaseConnection";
 import { redefineSketchPlane } from "@/lib/features/redefineSketchPlane";
 import { ProfilePicker } from "./ProfilePicker";
 import { attachFlangeReferences, editFlangeWithDependents } from "@/lib/replicad/build-model";
@@ -9,6 +8,7 @@ import { hasHiddenImportedBodies, rebuildVisibleModel } from "@/lib/replicad/vis
 import { activeFeatures } from "@/lib/features/suppression";
 import { flattenEligibility } from "@/lib/features/flattenEligibility";
 import { sheetIsUnfolded } from "@/lib/features/sheetState";
+import { AccountBadge, MenuDivider, WorkspaceSwitcher } from "@/components/layout/WorkspaceChrome";
 import { ApplicationFileMenu } from "./ApplicationFileMenu";
 import { HeaderIcon } from "@/components/icons/HeaderIcon";
 import { CadToolButton } from "@/components/ui/CadToolButton";
@@ -18,7 +18,6 @@ import { exportSolidStl } from "@/lib/replicad/stlExport";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import type { ShapeMesh, Solid } from "replicad";
-import { createClient } from "@/lib/supabase/client";
 import { DEFAULT_LAYERS } from "@/lib/sketch/layers";
 import { CloudProjectsButton } from "./CloudProjectsButton";
 import { ReconstructionButton } from "./ReconstructionButton";
@@ -27,6 +26,7 @@ import { AdvancedFeaturePanel } from "./AdvancedFeaturePanel";
 import type { LoftFeature, ShellFeature } from "@/lib/features/types";
 import { SketchToolPalette } from "@/components/sketch/SketchToolPalette";
 import { useSketchKeyboardShortcuts } from "@/lib/sketch/useSketchKeyboardShortcuts";
+import { MaterialEditor } from "@/components/materials/MaterialEditor";
 import { Viewer3D } from "@/components/viewer/Viewer3D";
 import { DrawingSheetWorkspace } from "@/components/drawing/DrawingSheetWorkspace";
 import {
@@ -40,7 +40,6 @@ import {
   IconFlatten,
   IconHelix,
   IconHole,
-  IconLogout,
   IconPatternCircular,
   IconPatternRect,
   IconPlane,
@@ -62,7 +61,7 @@ import { sketchPlaneFromHit, worldToLocalPoint, offsetOrigin, STANDARD_PLANES, S
 import { isPatternable } from "@/lib/replicad/pattern";
 import { useFeatureStore } from "@/lib/features/store";
 import { usePartPropertiesStore } from "@/lib/features/propertiesStore";
-import { MATERIAL_PRESETS, type PartProperties } from "@/lib/project/partProperties";
+import { type PartProperties } from "@/lib/project/partProperties";
 import {
   convertArea,
   convertVolume,
@@ -2292,14 +2291,6 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     showNotice,
   ]);
 
-  const handleLogout = useCallback(async () => {
-    const supabase = createClient();
-    await disconnectCustomerSupabase().catch(() => undefined);
-    await supabase.auth.signOut();
-    router.push("/login");
-    router.refresh();
-  }, [router]);
-
   const handleSelectFolder = useCallback(async () => {
     if (!isFileSystemAccessSupported()) {
       showNotice("Este navegador não suporta escolher pasta (funciona no Chrome/Edge) — salvar continua funcionando por download.");
@@ -2629,7 +2620,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     <div className="cad-workspace flex h-dvh min-w-0 flex-col overflow-hidden bg-background text-foreground">
       <header className="cad-header flex shrink-0 items-center gap-2 overflow-x-auto border-b border-chrome-border bg-chrome-bg px-3 py-1.5 text-chrome-text">
         <div className="flex items-center gap-3">
-          <ApplicationFileMenu>
+          <ApplicationFileMenu current="modelador">
           <button
             type="button"
             onClick={handleSelectFolder}
@@ -2637,14 +2628,6 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             className="max-w-[9rem] truncate rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
           >
             <HeaderIcon kind="folder" /><span className="">Selecionar pasta do projeto</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleCloseProject}
-            title="Fechar a peça atual (volta pro Modelador vazio)"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            <HeaderIcon kind="close" /><span className="">Fechar peça</span>
           </button>
           <button
             type="button"
@@ -2711,12 +2694,16 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           >
             <HeaderIcon kind="dxf" /><span className="">DXF</span>
           </button>
-          <div aria-hidden="true" className="my-1 h-px w-full bg-chrome-border" />
-          </ApplicationFileMenu>
-          <button type="button" onClick={handleCloseProject} title="Fechar peça atual" aria-label="Fechar peça atual"
+          <MenuDivider />
+          <button type="button" onClick={() => setPropertiesOpen(true)} title="Código, material, massa e responsáveis da peça"
             className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt">
-            <HeaderIcon kind="close" /><span className="sr-only">Fechar peça</span>
+            <HeaderIcon kind="properties" /><span className="">Propriedades da peça</span>
           </button>
+          <button type="button" onClick={handleCloseProject} title="Fechar a peça atual (volta pro Modelador vazio)"
+            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt">
+            <HeaderIcon kind="close" /><span className="">Fechar peça</span>
+          </button>
+          </ApplicationFileMenu>
           <div className="hidden h-7 w-px bg-chrome-border sm:block" />
           <span
             className="hidden text-sm font-semibold uppercase tracking-wide text-chrome-text-muted 2xl:inline"
@@ -2764,16 +2751,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             >
               ↩ Voltar pra Montagem
             </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => router.push("/montagem")}
-              title="Ir para o ambiente de Montagem"
-              className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-            >
-              Abrir Montagem
-            </button>
-          )}
+          ) : null}
+          <WorkspaceSwitcher current="modelador" />
           <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
           <div className="flex items-center gap-0.5 rounded-lg bg-chrome-surface-alt p-0.5">
             <button
@@ -2822,23 +2801,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           >
             <IconRedo />
           </button>
-          {userEmail && (
-            <div className="ml-1 flex shrink-0 items-center gap-2 rounded-xl border border-chrome-border bg-chrome-surface-alt px-2 py-1">
-              <div className="flex flex-col whitespace-nowrap text-xs leading-tight">
-                <span className="text-chrome-text-subtle">Bem-vindo! Conectado como</span>
-                <span className="font-semibold text-chrome-text">{userEmail}</span>
-              </div>
-              <button
-                type="button"
-                onClick={handleLogout}
-                title="Sair da conta"
-                className="flex items-center gap-1.5 rounded-xl border border-chrome-border bg-chrome-surface-alt px-2.5 py-1.5 text-xs font-semibold text-chrome-text-muted transition hover:bg-chrome-border"
-              >
-                <IconLogout />
-                <span>Sair</span>
-              </button>
-            </div>
-          )}
+          <AccountBadge userEmail={userEmail} />
         </div>
       </header>
 
@@ -4182,6 +4145,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         />
         <div className={`min-h-0 flex-1 md:order-3 md:!block ${mobileTab === "viewer" ? "" : "hidden"}`}>
           <Viewer3D
+            appearance={partProperties.materialDefinition?.appearance}
             mesh={bodyVisible ? mesh : null}
             pickMode={
               measuring3d || pickingPlane ||
@@ -4357,36 +4321,7 @@ function PartPropertiesDialog({
             <input value={properties.description} onChange={(e) => onChange({ description: e.target.value })} className={field} />
           </label>
 
-          <label className="col-span-1">
-            Material
-            <input
-              list="material-presets"
-              value={properties.material}
-              onChange={(e) => {
-                const preset = MATERIAL_PRESETS.find((m) => m.name === e.target.value);
-                // Escolher um material da lista já preenche a densidade
-                // correspondente — digitar um material livre mantém a
-                // densidade que estiver lá (pode ser ajustada à mão).
-                onChange(preset ? { material: e.target.value, density: preset.density } : { material: e.target.value });
-              }}
-              className={field}
-            />
-            <datalist id="material-presets">
-              {MATERIAL_PRESETS.map((m) => (
-                <option key={m.name} value={m.name} />
-              ))}
-            </datalist>
-          </label>
-          <label className="col-span-1">
-            Densidade (kg/m³)
-            <input
-              type="number"
-              step={10}
-              value={properties.density}
-              onChange={(e) => onChange({ density: Math.max(0, Number(e.target.value)) })}
-              className={field}
-            />
-          </label>
+          <MaterialEditor properties={properties} onChange={onChange}/>
 
           <label className="col-span-1">
             Desenhista

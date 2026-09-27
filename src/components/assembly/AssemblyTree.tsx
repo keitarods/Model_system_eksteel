@@ -22,6 +22,8 @@ export function AssemblyTree({
   onInsertPart,
   onStartConstraint,
   onEditInstance,
+  onMaterialInstance,
+  materialNames,
   constraintPickCount,
 }: {
   instances: ComponentInstance[];
@@ -42,6 +44,10 @@ export function AssemblyTree({
   // Duplo clique numa peça — ao estilo Inventor, abre ela pra editar (ver
   // src/lib/project/editInContext.ts).
   onEditInstance: (id: string) => void;
+  // Material da peça + substituição de aparência da ocorrência (ver ComponentMaterialDialog).
+  onMaterialInstance: (id: string) => void;
+  // Nome do material de cada peça resolvida, exibido na árvore como no Inventor.
+  materialNames?: Record<string, string>;
   // 0 = nenhuma restrição em andamento; 1 = já escolheu a 1ª face, esperando
   // a 2ª — mostrado como dica no botão "Nova Restrição".
   constraintPickCount: number;
@@ -97,6 +103,12 @@ export function AssemblyTree({
                   </span>
                 )}
               </div>
+              {(materialNames?.[instance.id] || instance.appearanceOverride) && (
+                <p className="mt-0.5 truncate text-[10px] text-primary-500">
+                  {materialNames?.[instance.id] ?? "Sem material"}
+                  {instance.appearanceOverride ? ` · aparência: ${instance.appearanceOverride.name ?? "personalizada"}` : ""}
+                </p>
+              )}
               <div className="mt-1 flex flex-wrap gap-1">
                 <button
                   type="button"
@@ -128,6 +140,18 @@ export function AssemblyTree({
                 >
                   {instance.suppressed ? "Ativar" : "Suprimir"}
                 </button>
+                {linked && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onMaterialInstance(instance.id);
+                    }}
+                    className="rounded bg-primary-100 px-1.5 py-0.5 text-primary-700 hover:bg-primary-200"
+                  >
+                    Material
+                  </button>
+                )}
                 {!linked && (
                   <button
                     type="button"

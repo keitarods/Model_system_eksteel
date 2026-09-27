@@ -1,3 +1,4 @@
+import {validateMaterial,type MaterialDefinition} from "@/lib/materials/library";
 // "iProperties" da peça, ao estilo Inventor: dados que descrevem a peça mas
 // não são geometria (código, descrição, material/densidade, responsáveis).
 // Ficam salvos DENTRO do .eks3d (ver nativeFormat.ts), pra que uma montagem
@@ -16,6 +17,7 @@ export type PartProperties = {
   partNumber: string;
   description: string;
   material: string;
+  materialDefinition?: MaterialDefinition;
   // kg/m³. 0 = desconhecida — a coluna de massa mostra "—" em vez de 0.
   density: number;
   designer: string;
@@ -26,24 +28,6 @@ export type PartProperties = {
   vendor: string;
   notes: string;
 };
-
-// Densidades em kg/m³ dos materiais mais comuns numa serralheria/estrutura
-// metálica — só um atalho pra preencher o campo, o valor continua editável
-// à mão depois de escolher (ligas variam, e cada projeto pode ter a sua
-// referência).
-export const MATERIAL_PRESETS: { name: string; density: number }[] = [
-  { name: "Aço carbono (ASTM A36)", density: 7850 },
-  { name: "Aço carbono (SAE 1020)", density: 7870 },
-  { name: "Aço inoxidável (AISI 304)", density: 7900 },
-  { name: "Aço inoxidável (AISI 316)", density: 8000 },
-  { name: "Alumínio (6061)", density: 2700 },
-  { name: "Alumínio (5052)", density: 2680 },
-  { name: "Cobre", density: 8960 },
-  { name: "Latão", density: 8500 },
-  { name: "Ferro fundido", density: 7200 },
-  { name: "Polietileno (PEAD)", density: 950 },
-  { name: "Nylon (PA6)", density: 1140 },
-];
 
 export function createEmptyPartProperties(): PartProperties {
   return {
@@ -73,6 +57,7 @@ export function normalizePartProperties(raw: unknown): PartProperties {
   return {
     partNumber: typeof source.partNumber === "string" ? source.partNumber : base.partNumber,
     description: typeof source.description === "string" ? source.description : base.description,
+    ...(source.materialDefinition ? {materialDefinition:validateMaterial(source.materialDefinition)} : {}),
     material: typeof source.material === "string" ? source.material : base.material,
     density: typeof source.density === "number" && Number.isFinite(source.density) ? source.density : base.density,
     designer: typeof source.designer === "string" ? source.designer : base.designer,

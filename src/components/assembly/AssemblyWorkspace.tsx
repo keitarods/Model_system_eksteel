@@ -1,13 +1,14 @@
 "use client";
-import { disconnectCustomerSupabase } from "@/lib/project/supabaseConnection";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as THREE from "three";
 import type { Solid, ShapeMesh } from "replicad";
-import { createClient } from "@/lib/supabase/client";
-import { IconLogout, IconRedo, IconUndo } from "@/components/icons/ToolIcons";
+import { ApplicationFileMenu } from "@/components/modelador/ApplicationFileMenu";
+import { HeaderIcon } from "@/components/icons/HeaderIcon";
+import { IconRedo, IconUndo } from "@/components/icons/ToolIcons";
 import { AssemblyViewer3D, type AssemblyBody, type FacePick, type PickMarker } from "./AssemblyViewer3D";
+import { AssemblyModelingRibbon } from "./AssemblyModelingRibbon";
 import { AssemblyTree } from "./AssemblyTree";
 import { ConstraintDialog } from "./ConstraintDialog";
 import { useAssemblyStore } from "@/lib/assembly/store";
@@ -31,6 +32,9 @@ import {
   type VolumeUnit,
 } from "@/lib/replicad/physicalProperties";
 import { CloudProjectsButton } from "@/components/modelador/CloudProjectsButton";
+import { AccountBadge, MenuDivider, WorkspaceSwitcher } from "@/components/layout/WorkspaceChrome";
+import { ComponentMaterialDialog, type ComponentMaterialChange } from "./ComponentMaterialDialog";
+import { sameSourceInstanceIds, savePartProperties } from "@/lib/assembly/componentMaterial";
 import { portableAssembly } from "@/lib/project/portableAssembly";
 import { parseProject } from "@/lib/project/nativeFormat";
 import { pickAndLinkFile, resolveLinkedFile, loadLinkedFileHandle, ensureReadPermission } from "@/lib/project/linkedFiles";
@@ -127,9 +131,13 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
   // ambiente de Desenho do Modelador, com a montagem inteira como fonte de
   // geometria e a Lista de Peças habilitada) — mesma divisão de modos que o
   // ModeladorWorkspace já usa pra peça.
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
+  const [treeWidth, setTreeWidth] = useState(256);
+  const treeResize = useRef<{x:number;width:number}|null>(null);
   const [mobilePanel, setMobilePanel] = useState<"viewer" | "tree">("viewer");
   const [mode, setMode] = useState<"modelo" | "desenho">("modelo");
   const [propertiesOpen, setPropertiesOpen] = useState(false);
+  const [materialDialog, setMaterialDialog] = useState<{ instanceId: string; occurrences: number } | null>(null);
   const [placements, setPlacements] = useState<Record<string, ComponentPlacement>>({});
   const solidsRef = useRef<Record<string, Solid | null>>({});
   const generationRef = useRef(0);
@@ -228,7 +236,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
   // disparava uma reconstrução completa via OpenCascade a cada frame do
   // arrasto.
   const structuralKey = useMemo(
-    () => instances.map((i) => `${i.id}:${i.linkKey}:${i.suppressed ? 1 : 0}`).join("|"),
+    () => instances.map((i) => `${i.id}:${i.linkKey}:${i.suppressed ? 1 : 0}:${i.embeddedPart ?? ""}:${JSON.stringify(i.assemblyFeatures ?? [])}`).join("|"),
     [instances]
   );
 
@@ -281,7 +289,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
         }
 
         try {
-          const solid = rebuildModel(resolution.features, {});
+          const solid = rebuildModel([...resolution.features, ...(instance.assemblyFeatures ?? [])], {});
           nextSolids[instance.id] = solid;
           nextMeshes[instance.id] = solid ? solid.mesh() : null;
         } catch (err) {
@@ -343,8 +351,11 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
           placement: placements[i.id] ?? i.placementSeed,
           visible: i.visible,
           grounded: i.grounded,
+          // Substituição da ocorrência (montagem) tem prioridade sobre o material da peça, como no Inventor.
+          appearance: i.appearanceOverride ?? partProperties[i.id]?.materialDefinition?.appearance,
+          color: i.weld ? "#b89b55" : undefined,
         })),
-    [instances, meshes, placements]
+    [instances, meshes, placements, partProperties]
   );
 
   const pickMarkers: PickMarker[] = useMemo(() => {
@@ -442,6 +453,48 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
     [constraintMode, instances, linkStatus, router, showNotice]
   );
 
+  const handleOpenMaterial = useCallback(
+    async (id: string) => {
+      const instance = instances.find((i) => i.id === id);
+      if (!instance) return;
+      if (!linkStatus[id] || !partProperties[id]) {
+        showNotice(`"${instance.label}" não está vinculada — religue o arquivo antes de alterar o material.`);
+        return;
+      }
+      try {
+        const ids = await sameSourceInstanceIds(instances, instance);
+        setMaterialDialog({ instanceId: id, occurrences: ids.length });
+      } catch (err) {
+        setErrorMessage(err instanceof Error ? err.message : "Erro ao abrir o material do componente.");
+      }
+    },
+    [instances, linkStatus, partProperties, showNotice]
+  );
+
+  const handleSaveMaterial = useCallback(
+    async (id: string, change: ComponentMaterialChange) => {
+      const instance = useAssemblyStore.getState().instances.find((i) => i.id === id);
+      if (!instance) return;
+      if (change.properties) {
+        const patches = await savePartProperties(useAssemblyStore.getState().instances, instance, change.properties);
+        for (const [instanceId, patch] of Object.entries(patches)) updateInstance(instanceId, patch);
+        // Arquivo vinculado gravado: relê os vínculos para todas as ocorrências da peça.
+        if (Object.keys(patches).length === 0) setRefreshToken((t) => t + 1);
+      }
+      const current = instance.appearanceOverride ?? null;
+      if (JSON.stringify(current) !== JSON.stringify(change.appearanceOverride)) {
+        updateInstance(id, { appearanceOverride: change.appearanceOverride ?? undefined });
+      }
+      showNotice(change.properties ? `Material de "${instance.label}" gravado na peça.` : "Aparência do componente atualizada.");
+    },
+    [updateInstance, showNotice]
+  );
+
+  const materialNames = useMemo(
+    () => Object.fromEntries(Object.entries(partProperties).filter(([, p]) => p.material).map(([id, p]) => [id, p.material])),
+    [partProperties]
+  );
+
   const handleStartConstraint = useCallback(() => {
     setMobilePanel("viewer");
     setConstraintMode(true);
@@ -530,14 +583,6 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
     [placements, instances, updateInstance]
   );
 
-  const handleLogout = useCallback(async () => {
-    const supabase = createClient();
-    await disconnectCustomerSupabase().catch(() => undefined);
-    await supabase.auth.signOut();
-    router.push("/login");
-    router.refresh();
-  }, [router]);
-
   // Peças posicionadas (sólido + placement resolvido) — base tanto da
   // exportação STEP quanto das vistas da folha de montagem.
   const placedParts = useMemo(
@@ -584,7 +629,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
       // olha features): mover um componente muda a vista projetada da
       // montagem, então a vista fica mesmo desatualizada.
       signature: JSON.stringify(
-        instances.map((i) => ({ id: i.id, s: i.suppressed, p: placements[i.id] ?? i.placementSeed }))
+        instances.map((i) => ({ id: i.id, s: i.suppressed, f: i.assemblyFeatures, e: i.embeddedPart, p: placements[i.id] ?? i.placementSeed }))
       ),
       supportsFlatten: false,
       emptyMessage: "Nenhuma peça vinculada ainda — insira peças na montagem antes de adicionar uma vista.",
@@ -711,6 +756,11 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
     function handleKeyDown(e: KeyboardEvent) {
       const isMac = navigator.platform.toLowerCase().includes("mac");
       const mod = isMac ? e.metaKey : e.ctrlKey;
+      const typing = e.target instanceof HTMLElement && (e.target.isContentEditable || ["INPUT","TEXTAREA","SELECT"].includes(e.target.tagName));
+      if (mod && !typing && !document.querySelector('[aria-modal="true"]')) {
+        if (e.key.toLowerCase() === "z") { e.preventDefault(); if(e.shiftKey) redoModel(); else undoModel(); return; }
+        if (e.key.toLowerCase() === "y") { e.preventDefault(); redoModel(); return; }
+      }
       if (!mod || e.key.toLowerCase() !== "s") return;
       e.preventDefault();
       if (e.shiftKey) handleSaveAssemblyAs();
@@ -722,57 +772,9 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
 
   return (
     <div className="cad-workspace flex h-dvh min-w-0 flex-col overflow-hidden bg-background text-foreground">
-      <header className="cad-header flex flex-wrap items-center gap-3 border-b border-chrome-border bg-chrome-bg px-4 py-2 text-chrome-text">
-        <div className="flex items-center gap-3">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/images/Eksteel-logo.png" alt="Eksteel" className="h-9 w-auto object-contain" />
-          <div className="hidden h-7 w-px bg-chrome-border sm:block" />
-          <span
-            className="hidden text-sm font-semibold uppercase tracking-wide text-chrome-text-muted sm:inline"
-            style={{ fontFamily: "var(--font-oswald)" }}
-          >
-            Montagem
-          </span>
-        </div>
-        {currentFileName && (
-          <span className="max-w-[10rem] truncate text-sm font-medium text-chrome-text-muted">{currentFileName}</span>
-        )}
-
-        {/* Montagem 3D x Folha de desenho da montagem — mesma divisão de
-            modos do Modelador (modelo x desenho). */}
-        <div className="flex items-center gap-0.5 rounded-lg bg-chrome-surface-alt p-0.5">
-          {(["modelo", "desenho"] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setMode(m)}
-              className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
-                mode === m ? "bg-primary text-primary-foreground" : "text-chrome-text-muted hover:bg-chrome-border"
-              }`}
-            >
-              {m === "modelo" ? "Montagem" : "Folha"}
-            </button>
-          ))}
-        </div>
-        <button
-          type="button"
-          onClick={() => setPropertiesOpen(true)}
-          title="Propriedades físicas da montagem (massa total por componente)"
-          className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-        >
-          Propriedades
-        </button>
-
-        <div className="ml-auto flex flex-wrap items-center gap-1">
-          <button
-            type="button"
-            onClick={() => router.push("/modelador")}
-            title="Ir para o Modelador de peça"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Abrir Modelador
-          </button>
-          <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
+      <header className="cad-header flex shrink-0 items-center gap-2 overflow-x-auto border-b border-chrome-border bg-chrome-bg px-2 py-1 text-chrome-text">
+        <ApplicationFileMenu current="montagem">
+          <button type="button" onClick={handleOpenAssembly} className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"><HeaderIcon kind="open"/>Abrir montagem</button>
           <CloudProjectsButton documentKind="assembly" suggestedName={currentFileName ?? "montagem.eks3dasm"}
             disabled={constraintMode || !!constraintDraft}
             getProject={() => portableAssembly(instances, constraints, assemblySheets, async instance => {
@@ -787,88 +789,26 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
               setCurrentFileHandle(null);setCurrentFileName(name);rememberCurrentFileHandle("montagem",null);setRefreshToken(t=>t+1);
               showNotice("Montagem da nuvem aberta com cópias das peças incorporadas.");
             }} />
-          <button
-            type="button"
-            onClick={handleCloseAssembly}
-            title="Fechar a montagem atual (volta pra uma Montagem vazia)"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Fechar montagem
-          </button>
-          <button
-            type="button"
-            onClick={handleOpenAssembly}
-            title={`Abrir montagem (${ASSEMBLY_FILE_EXTENSION})`}
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Abrir
-          </button>
-          <button
-            type="button"
-            onClick={handleSaveAssembly}
-            title="Salvar (Ctrl+S)"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Salvar
-          </button>
-          <button
-            type="button"
-            onClick={handleSaveAssemblyAs}
-            title="Salvar como um novo arquivo (Ctrl+Shift+S)"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Salvar Como
-          </button>
-          <button
-            type="button"
-            onClick={() => setRefreshToken((t) => t + 1)}
-            title="Reler todas as peças vinculadas"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt"
-          >
-            Atualizar Peças
-          </button>
-          <button
-            type="button"
-            onClick={handleExportStep}
-            disabled={instances.length === 0}
-            title="Exportar a montagem inteira (todas as peças posicionadas) como um único STEP"
-            className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            STEP
-          </button>
-          <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
-          <button
-            type="button"
-            onClick={undoModel}
-            disabled={!canUndo}
-            title="Desfazer (Ctrl+Z)"
-            className="rounded-lg p-1.5 text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-30"
-          >
-            <IconUndo />
-          </button>
-          <button
-            type="button"
-            onClick={redoModel}
-            disabled={!canRedo}
-            title="Refazer (Ctrl+Y)"
-            className="rounded-lg p-1.5 text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-30"
-          >
-            <IconRedo />
-          </button>
-          {userEmail && (
-            <div className="ml-1 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 py-1 pl-3 pr-1 backdrop-blur-sm">
-              <span className="max-w-[10rem] truncate text-xs font-semibold text-chrome-text-muted">{userEmail}</span>
-              <button
-                type="button"
-                onClick={handleLogout}
-                title="Sair da conta"
-                className="flex items-center gap-1.5 rounded-xl border border-chrome-border bg-chrome-surface-alt px-2.5 py-1.5 text-xs font-semibold text-chrome-text-muted transition hover:bg-chrome-border"
-              >
-                <IconLogout />
-                Sair
-              </button>
-            </div>
-          )}
+          <button type="button" onClick={()=>setRefreshToken(t=>t+1)} className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"><HeaderIcon kind="reconstruct"/>Atualizar peças vinculadas</button>
+          <MenuDivider />
+          <button type="button" onClick={handleSaveAssembly} className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"><HeaderIcon kind="save"/>Salvar</button>
+          <button type="button" onClick={handleSaveAssemblyAs} className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"><HeaderIcon kind="saveAs"/>Salvar como</button>
+          <MenuDivider />
+          <button type="button" onClick={handleExportStep} disabled={instances.length===0} className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"><HeaderIcon kind="step"/>STEP</button>
+          <MenuDivider />
+          <button type="button" onClick={()=>setPropertiesOpen(true)} className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"><HeaderIcon kind="properties"/>Propriedades da montagem</button>
+          <button type="button" onClick={handleCloseAssembly} className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"><HeaderIcon kind="close"/>Fechar montagem</button>
+        </ApplicationFileMenu>
+        <button type="button" onClick={handleSaveAssembly} title="Salvar (Ctrl+S)" aria-label="Salvar montagem" className="rounded p-2 hover:bg-chrome-surface-alt"><HeaderIcon kind="save"/></button>
+        <button type="button" onClick={undoModel} disabled={!canUndo} title="Desfazer (Ctrl+Z)" aria-label="Desfazer" className="rounded p-2 hover:bg-chrome-surface-alt disabled:opacity-30"><IconUndo/></button>
+        <button type="button" onClick={redoModel} disabled={!canRedo} title="Refazer (Ctrl+Y)" aria-label="Refazer" className="rounded p-2 hover:bg-chrome-surface-alt disabled:opacity-30"><IconRedo/></button>
+        <div className="flex shrink-0 items-center gap-0.5 rounded-lg bg-chrome-surface-alt p-0.5">
+          {(["modelo", "desenho"] as const).map(m=><button key={m} type="button" aria-pressed={mode===m} onClick={()=>setMode(m)} className={`rounded-md px-2.5 py-1 text-xs font-semibold ${mode===m?'bg-primary text-primary-foreground':'text-chrome-text-muted hover:bg-chrome-border'}`}>{m==='modelo'?'Montagem':'Folha'}</button>)}
+        </div>
+        <span title={currentFileName??'Montagem sem título'} className="hidden min-w-0 truncate text-xs text-chrome-text-muted sm:block">{currentFileName??'Montagem sem título'}</span>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <WorkspaceSwitcher current="montagem" />
+          <AccountBadge userEmail={userEmail} />
         </div>
       </header>
 
@@ -907,6 +847,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
         <DrawingSheetWorkspace useStore={useAssemblyDrawingStore} source={assemblySheetSource} onClose={() => setMode("modelo")} />
       ) : (
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <AssemblyModelingRibbon treeCollapsed={treeCollapsed} onToggleTree={()=>setTreeCollapsed(v=>!v)} selectedId={selectedInstanceId} onSelect={setSelectedInstanceId} onInsert={handleInsertPart} onConstraint={handleStartConstraint} onEdit={handleEditInstance} onMaterial={handleOpenMaterial} onError={setErrorMessage} />
         <div className="flex shrink-0 border-b border-primary-100 bg-white md:hidden">
           {(["viewer", "tree"] as const).map(panel => <button key={panel} type="button"
             aria-pressed={mobilePanel === panel} onClick={() => setMobilePanel(panel)}
@@ -915,9 +856,10 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
           </button>)}
         </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
-        <div className={`min-h-0 min-w-0 flex-1 md:order-1 md:block ${mobilePanel === "viewer" ? "" : "hidden"}`}>
+        <div className={`min-h-0 min-w-0 flex-1 md:order-3 md:block ${mobilePanel === "viewer" ? "" : "hidden"}`}>
           <AssemblyViewer3D
             bodies={bodies}
+            sketches={selectedInstance && selectedInstance.visible && !selectedInstance.suppressed ? (selectedInstance.assemblyFeatures ?? []).filter((f): f is import("@/lib/features/types").SketchFeature => f.type === "sketch").map(sketch => ({sketch,placement:placements[selectedInstance.id] ?? selectedInstance.placementSeed})) : []}
             pickMode={constraintMode}
             pickModeHint={
               pendingFace
@@ -933,7 +875,13 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
             onEditInstance={handleEditInstance}
           />
         </div>
-        <div className={`min-h-0 w-full flex-1 overflow-y-auto md:flex-none md:order-2 md:w-72 md:block ${mobilePanel === "tree" ? "" : "hidden"}`}>
+        <div role="separator" aria-label="Largura do painel de componentes" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={480} aria-valuenow={treeWidth} tabIndex={0}
+          onKeyDown={e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();setTreeWidth(w=>Math.max(200,Math.min(480,w+(e.key==='ArrowRight'?16:-16))));}}}
+          onPointerDown={e=>{if(e.button!==0)return;e.preventDefault();treeResize.current={x:e.clientX,width:treeWidth};e.currentTarget.setPointerCapture(e.pointerId);}}
+          onPointerMove={e=>{const drag=treeResize.current;if(drag)setTreeWidth(Math.max(200,Math.min(480,window.innerWidth*0.45,drag.width+e.clientX-drag.x)));}}
+          onPointerUp={()=>{treeResize.current=null;}} onLostPointerCapture={()=>{treeResize.current=null;}} onPointerCancel={()=>{treeResize.current=null;}}
+          className={`hidden w-1.5 shrink-0 touch-none cursor-col-resize bg-primary-100 hover:bg-primary-300 focus-visible:bg-primary-300 focus-visible:outline-none md:order-2 ${treeCollapsed?'':'md:block'}`}/>
+        <div id="assembly-component-tree" style={{'--assembly-tree-width':`${treeWidth}px`} as React.CSSProperties} className={`min-h-0 w-full flex-1 overflow-y-auto md:flex-none md:order-1 md:w-[var(--assembly-tree-width)] ${treeCollapsed?'md:!hidden':'md:!block'} ${mobilePanel === "tree" ? "" : "hidden"}`}>
           <AssemblyTree
             instances={instances}
             constraints={constraints}
@@ -952,6 +900,8 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
             onInsertPart={handleInsertPart}
             onStartConstraint={handleStartConstraint}
             onEditInstance={handleEditInstance}
+            onMaterialInstance={handleOpenMaterial}
+            materialNames={materialNames}
             constraintPickCount={pendingFace ? 1 : 0}
           />
           {constraintMode && (
@@ -969,6 +919,20 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
       </div>
       </div>
       )}
+
+      {materialDialog && (() => {
+        const instance = instances.find((i) => i.id === materialDialog.instanceId);
+        const properties = partProperties[materialDialog.instanceId];
+        return instance && properties ? (
+          <ComponentMaterialDialog
+            instance={instance}
+            properties={properties}
+            occurrences={materialDialog.occurrences}
+            onClose={() => setMaterialDialog(null)}
+            onSave={(change) => handleSaveMaterial(instance.id, change)}
+          />
+        ) : null;
+      })()}
 
       {propertiesOpen && (
         <AssemblyPropertiesDialog onMeasure={handleMeasureAssembly} onClose={() => setPropertiesOpen(false)} />
@@ -1056,7 +1020,7 @@ function AssemblyPropertiesDialog({
         {physical && physical.partsWithoutMass > 0 && (
           <p className="mb-2 rounded-lg bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">
             {physical.partsWithoutMass} peça(s) sem densidade ou sem vínculo resolvido não entraram no total — abra a
-            peça no Modelador e preencha o material/densidade em &quot;Propriedades&quot;.
+            componente na montagem e use &quot;Material&quot; (ou preencha em &quot;Propriedades&quot; no Modelador).
           </p>
         )}
 

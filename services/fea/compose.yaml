@@ -1,0 +1,14 @@
+services:
+  fea:
+    build: .
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      FEA_API_TOKEN: ${FEA_API_TOKEN:?Defina o mesmo token privado usado no Next.js}
+    mem_limit: 4g
+    cpus: 2
+    pids_limit: 128
+    read_only: true
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
+    restart: unless-stopped

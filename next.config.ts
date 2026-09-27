@@ -2,6 +2,8 @@ import type { NextConfig } from "next";
 import { existsSync } from "node:fs";
 
 const nextConfig: NextConfig = {
+  // The Python solver is deployed separately; never bundle its local runtime.
+  outputFileTracingExcludes: { "/*": ["./services/fea/**/*"] },
   outputFileTracingIncludes: {
     "/api/project-database": ["./database/*.sql", "./supabase/migrations/*.sql"].filter(pattern => existsSync(pattern.split("/*")[0])),
   },

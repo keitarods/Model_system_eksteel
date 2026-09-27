@@ -70,6 +70,12 @@ export function parseAssembly(json: string): ParsedAssembly {
   const file = data as AssemblyFile;
   for (const instance of file.instances) {
     if (!instance || typeof instance !== "object") throw new Error("Componente inválido na montagem.");
+    if (instance.assemblyFeatures !== undefined && (!Array.isArray(instance.assemblyFeatures) || instance.assemblyFeatures.some(f => !f || typeof f !== "object" || typeof f.id !== "string" || typeof f.type !== "string"))) throw new Error("Histórico de operações da montagem inválido.");
+    if (instance.weld !== undefined && (!instance.weld || typeof instance.weld.process !== "string" || !Number.isFinite(instance.weld.size) || instance.weld.size <= 0 || !Number.isFinite(instance.weld.length) || instance.weld.length <= 0)) throw new Error("Parâmetros de soldagem inválidos.");
+    if (instance.appearanceOverride !== undefined) {
+      const a = instance.appearanceOverride;
+      if (!a || !/^#[0-9a-f]{6}$/i.test(a.color) || ![a.metalness, a.roughness, a.opacity].every(n => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1) || (a.name !== undefined && (typeof a.name !== "string" || a.name.length > 200))) throw new Error("Aparência de componente inválida.");
+    }
     if (instance.embeddedPart !== undefined) {
       if (typeof instance.embeddedPart !== "string") throw new Error("Peça incorporada inválida.");
       parseProject(instance.embeddedPart);

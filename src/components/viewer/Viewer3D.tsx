@@ -8,6 +8,8 @@ import type { ShapeMesh } from "replicad";
 import { SketchOverlay3D } from "./SketchOverlay3D";
 import { PlanePicker3D } from "./PlanePicker3D";
 import { PlaneOffsetDragger3D } from "./PlaneOffsetDragger3D";
+import { MaterialLighting } from "@/components/materials/MaterialLighting";
+import type { Appearance } from "@/lib/materials/library";
 import { SolidMesh } from "./SolidMesh";
 import { planeBasisQuaternion } from "./planeBasis";
 import { planeYDir } from "@/lib/replicad/plane";
@@ -373,6 +375,7 @@ function PlaneFocusCameraRig({
 }: {
   plane: SketchPlane | null;
   mesh: ShapeMesh | null;
+  appearance?: Appearance;
   token: number;
   onTargetChange: (target: [number, number, number]) => void;
 }) {
@@ -420,6 +423,7 @@ function HomeKeyHandler({
   onTargetChange,
 }: {
   mesh: ShapeMesh | null;
+  appearance?: Appearance;
   orbitTarget: [number, number, number];
   onTargetChange: (target: [number, number, number]) => void;
 }) {
@@ -474,6 +478,7 @@ function HomeKeyHandler({
 
 export function Viewer3D({
   mesh,
+  appearance,
   pickMode = false,
   onPickPlane,
   onPickStandardPlane,
@@ -492,6 +497,7 @@ export function Viewer3D({
   onPickLinearEdge,
 }: {
   mesh: ShapeMesh | null;
+  appearance?: Appearance;
   pickMode?: boolean;
   onPickPlane?: (origin: [number, number, number], normal: [number, number, number], selection?: { faceId: number; endpoint: boolean; edge?: boolean; circle?: boolean }) => void;
   // Clique num dos 3 planos padrão (XY/XZ/YZ) mostrados durante a escolha
@@ -637,12 +643,14 @@ export function Viewer3D({
           shadows="basic"
         >
           <color attach="background" args={["#ffffff"]} />
+          <MaterialLighting/>
           <ambientLight intensity={0.7} />
           <directionalLight position={[120, -150, 220]} intensity={1} castShadow />
           <PlaneFocusCameraRig plane={focusPlane} mesh={mesh} token={focusToken} onTargetChange={setOrbitTarget} />
           <HomeKeyHandler mesh={mesh} orbitTarget={orbitTarget} onTargetChange={setOrbitTarget} />
           {mesh && (
             <SolidMesh
+              appearance={appearance}
               mesh={mesh}
               wireframe={wireframe}
               pickMode={pickMode && !linearEdgeMode}
