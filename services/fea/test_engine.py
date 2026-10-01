@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 import gmsh
 import numpy as np
-from engine import generate_mesh, prepare_analysis, solve, connected_bodies
+from engine import generate_mesh, prepare_analysis, solve, connected_bodies, mesh_options
 
 
 def box_step(folder):
@@ -44,6 +44,50 @@ class EngineTests(unittest.TestCase):
         self.assertAlmostEqual(result['summary']['maxVonMises'],10,places=3)
         np.testing.assert_allclose(result['summary']['reaction'],[-1000,0,0],atol=0.02)
         self.assertLess(result['summary']['balanceError'],0.02)
+        self.assertLess(result['summary']['momentBalanceError'],0.1)
+    def test_preparation_and_quality_report(self):
+        mesh=generate_mesh({'step':self.step,'size':5,
+            'preparation':{'heal':True,'removeSmall':True,'tolerance':0.001},
+            'meshControls':{'minimumSize':2,'curvature':16,'qualityTarget':0.4}},self.folder)
+        self.assertEqual(mesh['preparationReport']['preparedBodies'],1)
+        self.assertAlmostEqual(mesh['preparationReport']['volumeChangePercent'],0,places=6)
+        self.assertGreater(mesh['quality']['p05'],0)
+        self.assertGreaterEqual(mesh['quality']['belowTarget'],0)
+
+    def test_microgap_union(self):
+        gmsh.initialize(['test','-nopopup']);gmsh.option.setNumber('General.Terminal',0)
+        try:
+            gmsh.model.occ.addBox(0,0,0,50,10,10)
+            gmsh.model.occ.addBox(50.0001,0,0,50,10,10)
+            gmsh.model.occ.synchronize();gmsh.write(str(self.folder/'gap.step'))
+        finally:gmsh.finalize()
+        payload={'step':(self.folder/'gap.step').read_text(),'size':5,'geometryMode':'assemblyBonded'}
+        self.assertEqual(generate_mesh(payload,self.folder)['bodyCount'],2)
+        payload['preparation']={'unite':True,'closeGaps':True,'tolerance':0.001}
+        mesh=generate_mesh(payload,self.folder)
+        self.assertEqual(mesh['bodyCount'],1)
+        self.assertLess(abs(mesh['preparationReport']['volumeChangePercent']),0.01)
+
+    def test_curvature_refines_cylinder(self):
+        gmsh.initialize(['test','-nopopup']);gmsh.option.setNumber('General.Terminal',0)
+        try:
+            gmsh.model.occ.addCylinder(0,0,0,0,0,20,5)
+            gmsh.model.occ.synchronize();gmsh.write(str(self.folder/'cylinder.step'))
+        finally:gmsh.finalize()
+        payload={'step':(self.folder/'cylinder.step').read_text(),'size':5}
+        coarse=generate_mesh(payload,self.folder)
+        payload['meshControls']={'minimumSize':0.5,'curvature':32}
+        fine=generate_mesh(payload,self.folder)
+        self.assertGreater(len(fine['tetrahedra']),len(coarse['tetrahedra']))
+        self.assertEqual([f['id'] for f in fine['faces']],[f['id'] for f in coarse['faces']])
+
+    def test_invalid_meshing_controls(self):
+        for payload in ({'meshControls':{'minimumSize':20}},
+                        {'preparation':{'heal':'yes'}},
+                        {'preparation':{'tolerance':float('nan')}},
+                        {'meshControls':{'qualityTarget':2}}):
+            with self.assertRaises(ValueError):mesh_options(payload,5)
+
     def test_load_conservation_pressure_and_gravity(self):
         study=self.study();_,_,forces,_=prepare_analysis(self.mesh,study)
         np.testing.assert_allclose(forces.sum(axis=0),[1000,0,0],atol=1e-8)

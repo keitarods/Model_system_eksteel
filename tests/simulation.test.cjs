@@ -19,3 +19,26 @@ test('FEA cancellation while submitting cancels the created job instead of orpha
  global.fetch=async(url,options)=>{calls.push([url,options?.method]);if(options?.method==='POST'){c.abort();return {ok:true,json:async()=>({id:'job'})};}return {ok:true,json:async()=>({status:'cancelled'})};};
  try{await assert.rejects(runFeaJob({},c.signal,()=>{},()=>{}),{name:'AbortError'});assert.ok(calls.some(([url,method])=>url.includes('jobId=job')&&method==='DELETE'));}finally{global.fetch=original;}
 });
+test('preparation and mesh controls persist and reject unsafe tolerances',()=>{
+ const s={...emptyStudy(),preparation:{heal:true,removeSmall:false,unite:true,closeGaps:true,tolerance:.001},meshControls:{minimumSize:1,curvature:20,qualityTarget:.3}};
+ assert.deepEqual(parseStudy(serializeStudy(s)),s);
+ assert.throws(()=>parseStudy(serializeStudy({...s,preparation:{...s.preparation,tolerance:10}})),/Preparação/);
+ assert.throws(()=>parseStudy(serializeStudy({...s,preparation:{...s.preparation,unite:false}})),/Preparação/);
+ assert.throws(()=>parseStudy(serializeStudy({...s,meshControls:{...s.meshControls,minimumSize:100}})),/Controles/);
+});
+test('quadratic study validates all midside nodes and preserves legacy linear studies',()=>{
+ const old={...emptyStudy(),mesh};delete old.elementType;
+ assert.equal(parseStudy(serializeStudy(old)).elementType,'C3D4');
+ const q={...mesh,elementType:'C3D10',nodes:[...mesh.nodes,[.5,0,0],[.5,.5,0],[0,.5,0],[0,0,.5],[.5,0,.5],[0,.5,.5]],tetrahedra:[[0,1,2,3,4,5,6,7,8,9]],faces:[{...mesh.faces[0],triangles:[[0,6,4],[6,2,5],[4,5,1],[6,5,4]],elements:[0,0,0,0],loadTriangles:[[0,2,1,6,5,4]]}]};
+ validateMesh(q);
+ const study={...emptyStudy(),mesh:q};assert.deepEqual(parseStudy(serializeStudy(study)),study);
+ assert.throws(()=>validateMesh({...q,tetrahedra:[[0,1,2,3]]}),/Conectividade/);
+ assert.throws(()=>validateMesh({...q,faces:[{...q.faces[0],loadTriangles:undefined}]}),/quadrática/);
+});
+test('material regions partition the mesh and validate overrides',()=>{
+ const regionMesh={...mesh,regions:[{id:1,elements:[0],volume:1/6,center:[.25,.25,.25]}]};
+ const study={...emptyStudy(),materialMode:'regions',regionMaterials:{'1':emptyStudy().material},mesh:regionMesh};
+ assert.deepEqual(parseStudy(serializeStudy(study)),study);
+ assert.throws(()=>validateMesh({...regionMesh,regions:[...regionMesh.regions,{id:2,elements:[0],volume:1,center:[0,0,0]}]}),/elementos/);
+ assert.throws(()=>parseStudy(serializeStudy({...study,regionMaterials:{'99':study.material}})),/região/);
+});

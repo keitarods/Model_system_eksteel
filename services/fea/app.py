@@ -134,7 +134,7 @@ async def create_job(request:Request):
         else:
             mode=payload.get('geometryMode','part')
             if mode not in ('part','assemblyBonded'): raise HTTPException(400,'Tipo de geometria inválido.')
-            payload={k:payload.get(k) for k in ('action','step','size','refinements')}
+            payload={k:payload[k] for k in ('action','step','size','refinements','preparation','meshControls','elementType','materialMode') if k in payload}
             payload['geometryMode']=mode
             if not isinstance(payload['step'],str) or 'ISO-10303-21;' not in payload['step']:
                 raise HTTPException(400,'Geometria STEP inválida.')
