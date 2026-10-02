@@ -31,6 +31,10 @@ def invalid_constant(value):
 
 
 def authorize(request):
+    if getattr(request.app.state, 'local_authority', None) is not None:
+        owner = getattr(request.state, 'local_owner', None)
+        if not owner: raise HTTPException(401, 'Conexão local não autorizada.')
+        return owner
     if len(TOKEN)<24:
         raise HTTPException(503,'Configure FEA_API_TOKEN com pelo menos 24 caracteres.')
     if not hmac.compare_digest(request.headers.get('authorization',''),f'Bearer {TOKEN}'):
@@ -52,8 +56,22 @@ def find_job(job_id,owner):
 def terminate(job):
     process=job.get('process')
     if process and process.poll() is None:
-        try: os.killpg(process.pid,signal.SIGKILL)
+        try:
+            if os.name == 'nt':
+                subprocess.run(['taskkill','/PID',str(process.pid),'/T','/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW, timeout=10)
+                if process.poll() is None: process.kill()
+            else:
+                os.killpg(process.pid,signal.SIGKILL)
         except ProcessLookupError: pass
+        except (OSError,subprocess.SubprocessError):
+            if process.poll() is None:process.kill()
+
+
+def cancel_owner(owner):
+    with LOCK:
+        for job in JOBS.values():
+            if job['owner']==owner and job['status'] in ('queued','running'):
+                job['status']='cancelled';terminate(job)
 
 
 def run(job):
@@ -61,7 +79,7 @@ def run(job):
         if job['status']=='cancelled': return
         job['status']='running'
         with (job['folder']/'worker.log').open('w') as log:
-            job['process']=subprocess.Popen([sys.executable,str(Path(__file__).with_name('worker.py')),str(job['folder'])],stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env={**os.environ,'OPENBLAS_NUM_THREADS':'1','OMP_NUM_THREADS':'1'})
+            job['process']=subprocess.Popen(([sys.executable,'--worker',str(job['folder'])] if getattr(sys,'frozen',False) else [sys.executable,str(Path(__file__).with_name('worker.py')),str(job['folder'])]),stdout=log,stderr=subprocess.STDOUT,start_new_session=os.name!='nt',creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0,env={**os.environ,'OPENBLAS_NUM_THREADS':'1','OMP_NUM_THREADS':'1'})
     try:
         code=job['process'].wait(timeout=240)
         with LOCK:
@@ -136,7 +154,7 @@ async def create_job(request:Request):
             if mode not in ('part','assemblyBonded'): raise HTTPException(400,'Tipo de geometria inválido.')
             payload={k:payload[k] for k in ('action','step','size','refinements','preparation','meshControls','elementType','materialMode') if k in payload}
             payload['geometryMode']=mode
-            if not isinstance(payload['step'],str) or 'ISO-10303-21;' not in payload['step']:
+            if not isinstance(payload.get('step'),str) or 'ISO-10303-21;' not in payload['step']:
                 raise HTTPException(400,'Geometria STEP inválida.')
         job_id=str(uuid.uuid4());folder=ROOT/job_id;folder.mkdir()
         (folder/'request.json').write_text(json.dumps(payload,allow_nan=False))
@@ -149,7 +167,15 @@ async def create_job(request:Request):
 @app.get('/jobs/{job_id}')
 def status(job_id:str,request:Request):
     job=find_job(job_id,authorize(request))
-    return {k:job.get(k) for k in ('id','action','status','error')}
+    response={k:job.get(k) for k in ('id','action','status','error')}
+    try:
+        progress=json.loads((job['folder']/'progress.json').read_text())
+        if isinstance(progress.get('percent'),(int,float)) and 0<=progress['percent']<=100 and isinstance(progress.get('stage'),str):
+            response['progress']=progress
+    except (OSError,ValueError,AttributeError):pass
+    if job['status']=='queued':response['progress']={'percent':0,'stage':'Na fila de cálculo'}
+    if job['status']=='completed':response['progress']={'percent':100,'stage':'Cálculo concluído'}
+    return response
 
 
 @app.delete('/jobs/{job_id}')

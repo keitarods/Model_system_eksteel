@@ -71,7 +71,8 @@ def mesh_options(payload, size):
     return preparation, tolerance, minimum, curvature, quality
 
 
-def generate_mesh(payload, folder):
+def generate_mesh(payload, folder, progress=lambda percent, stage: None):
+    progress(5, "Preparando geometria")
     import gmsh
     step = payload.get('step', '')
     if not isinstance(step, str) or 'ISO-10303-21;' not in step or len(step.encode()) > 12_000_000:
@@ -170,7 +171,9 @@ def generate_mesh(payload, folder):
             field = gmsh.model.mesh.field.add('Min')
             gmsh.model.mesh.field.setNumbers(field, 'FieldsList', fields)
             gmsh.model.mesh.field.setAsBackgroundMesh(field)
+        progress(25, "Gerando malha volumétrica")
         gmsh.model.mesh.generate(3)
+        progress(60, "Otimizando elementos")
         gmsh.model.mesh.optimize('')
         gmsh.model.mesh.optimize('Netgen')
         tags, xyz, _ = gmsh.model.mesh.getNodes()
@@ -225,6 +228,7 @@ def generate_mesh(payload, folder):
             nodes, tetrahedra = elevate_mesh(nodes, tetrahedra, faces)
             if len(nodes) > MAX_NODES:
                 raise ValueError('Malha quadrática acima do limite de 30 mil nós. Aumente o tamanho.')
+        progress(85, "Verificando qualidade e superfícies")
         bodies = connected_bodies(tetrahedra)
         body_of = {n:i+1 for i,body in enumerate(bodies) for n in body}
         for face in faces:
@@ -416,7 +420,7 @@ def parse_displacements(text, count):
     return result
 
 
-def recover_results(mesh, study, displacement, history=None):
+def recover_results(mesh, study, displacement, history=None, progress=lambda percent, stage: None):
     nodes, fixed, forces, d = prepare_analysis(mesh, study)
     internal = np.zeros_like(nodes)
     # CalculiX .dat prints 7 significant digits. Bound force-recovery error
@@ -434,6 +438,8 @@ def recover_results(mesh, study, displacement, history=None):
     materials = element_materials(mesh, study)
     safety = []
     for index, tet in enumerate(mesh['tetrahedra']):
+        if index % max(1,len(mesh['tetrahedra'])//50)==0:
+            progress(80+14*index/len(mesh['tetrahedra']), f"Calculando resultados: {index}/{len(mesh['tetrahedra'])} elementos")
         material = materials[index]
         d = constitutive(material['young'], material['poisson'])
         stress_sum = np.zeros(6); strain_sum = np.zeros(6); vol = 0.; peak = 0.
@@ -487,7 +493,7 @@ def run_calculix(folder, count, timeout=180):
     (folder/'analysis.dat').unlink(missing_ok=True)
     with (folder/'solver.log').open('w') as output:
         try:
-            completed=subprocess.run([binary,'-i','analysis'],cwd=folder,env=env,stdout=output,stderr=subprocess.STDOUT,timeout=timeout)
+            completed=subprocess.run([binary,'-i','analysis'],cwd=folder,env=env,stdout=output,stderr=subprocess.STDOUT,timeout=timeout,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         except subprocess.TimeoutExpired as error:
             raise ValueError('Tempo limite de solução excedido.') from error
     log=(folder/'solver.log').read_text(errors='replace')
@@ -496,17 +502,22 @@ def run_calculix(folder, count, timeout=180):
     return parse_displacements((folder/'analysis.dat').read_text(),count)
 
 
-def solve(mesh, study, folder):
+def solve(mesh, study, folder, progress=lambda percent, stage: None):
+    progress(5, "Validando materiais, apoios e cargas")
     prepared=prepare_analysis(mesh,study)
+    progress(15, "Preparando contatos e sistema de equações")
     interfaces=build_bonds(mesh,study,connected_bodies(mesh['tetrahedra']),prepared[1])
     history=None
     unilateral = [b for b in interfaces if b['kind']=='frictionless']
     if unilateral:
         def run_linear(factor, active, remaining):
+            progress(25, f"Resolvendo contato: carga aplicada {factor*100:.0f}% (iterações em andamento)")
             write_deck(mesh,study,folder,factor,active,interfaces,prepared)
             return run_calculix(folder,len(mesh['nodes']),remaining)
         displacement,history=solve_incremental(mesh,unilateral,run_linear)
     else:
         write_deck(mesh,study,folder,interfaces=interfaces,prepared=prepared)
+        progress(25, "Resolvendo sistema no CalculiX")
         displacement=run_calculix(folder,len(mesh['nodes']))
-    return recover_results(mesh,study,displacement,history)
+    progress(80, "Calculando tensões, deslocamentos e equilíbrio")
+    return recover_results(mesh,study,displacement,history,progress)

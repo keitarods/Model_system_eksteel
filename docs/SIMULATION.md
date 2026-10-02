@@ -13,9 +13,11 @@ Acesse **Simulação** no cabeçalho do Modelador ou `/simulacao`. O documento d
 - Contatos aderidos entre faces planas coincidentes de corpos com malhas independentes (C3D4/C3D10), com seleção de pares e relatório de forças transmitidas.
 - Contato sem atrito por penalidade, com abertura/fechamento, folga inicial e histórico incremental; faces planas e pequenos deslizamentos.
 - Fixação independente de UX, UY e UZ nas faces selecionadas.
-- Força total distribuída por área nas faces, pressão normal e gravidade.
+- Força por componentes globais ou normal às faces, com intensidade em N, prévia das setas e opção de inverter o sentido; pressão normal e gravidade. No modo normal, o padrão é para dentro. A intensidade é a soma das magnitudes distribuídas por área, não a magnitude da resultante em superfícies curvas ou não paralelas. A cada cálculo/refinamento, a força normal é convertida em pressão equivalente usando a área dos triângulos de integração da malha atual, mantendo compatibilidade com o comunicador nativo.
 - Cálculo real pelo CalculiX, deslocamentos, tensões, deformações e reações.
-- Mapa de von Mises **por elemento**, deslocamento total, εxx e deformada com ampliação configurável.
+- Mapas de calor de von Mises **por elemento**, σxx/σyy/σzz, τxy/τyz/τxz, deslocamento total e X/Y/Z, εxx e fator de segurança (escoamento do material de cada região dividido por von Mises). O mapa de segurança limita a escala visual a 10, mostra valores menores que 1 em vermelho e trata tensão nula como ≥10; o resumo numérico permanece sem esse limite.
+- Visualização da deformada sem ampliação (real 1×), 2×, 3×, geometria original (0×) e ampliação personalizada. Faixa manual de tensões em MPa com saturação das cores fora dos limites, restauração automática e marcadores de extremos da superfície visível; as opções não alteram os resultados físicos. Marcadores de tensão identificam elementos, não a posição exata de um ponto de integração.
+- Barra de progresso por etapas reportadas pelo motor, com avanço por elementos no pós-processamento. Não estima tempo restante nem a fração interna da fatoração do CalculiX. Comunicadores anteriores mostram progresso indeterminado.
 - Arquivo `.eksfea` com STEP, material, condições, malha e resultados; rascunho automático separado em IndexedDB.
 - Exportação de resultados JSON e entrada `.inp` do último cálculo disponível no serviço.
 - Fila assíncrona, cancelamento e isolamento dos trabalhos por usuário.
@@ -34,7 +36,7 @@ Em outro, inicie o aplicativo com `npm run dev`. O serviço escuta apenas em `12
 
 ## Instalar em outra máquina Linux
 
-Instale Python 3.11 ou superior, CalculiX (`ccx`) e a biblioteca GLU. Em Debian/Ubuntu, os pacotes nativos são `calculix-ccx` e `libglu1-mesa`.
+Instale Python 3.11 ou superior, CalculiX (`ccx`) e a biblioteca GLU. Em Debian/Ubuntu, os pacotes nativos são `calculix-ccx`, `libglu1-mesa`, `libgl1`, `libxrender1`, `libxcursor1`, `libxft2`, `libfontconfig1` e `libxinerama1`. O pacote Gmsh pode exigir essas bibliotecas mesmo sem interface gráfica.
 
 ```sh
 python3 -m venv services/fea/.venv
@@ -169,3 +171,57 @@ Validação: dois corpos de 50 × 10 × 10 mm, E=210000 MPa e Poisson zero, apoi
 Grupos ligados por contatos aderidos podem compartilhar seus apoios; o contato sem atrito não é considerado apoio na verificação dos modos de corpo rígido. Mantêm-se as restrições de não repetir nós dependentes e de não usar um nó dependente como mestre de outro par. Assim, encontros de interfaces em arestas comuns podem exigir reorganização das faces. Faces planas e pequenos deslizamentos continuam sendo requisitos.
 
 Validação adicional: três barras de 50 × 10 × 10 mm em série, as duas primeiras aderidas e a terceira em contato sem atrito. Com as extremidades externas fixas e 1000 N na interface da terceira barra, a transmissão em compressão se aproxima de 333,33 N em ambos os pares; em separação, a força transmitida tende a zero. C3D4 e C3D10 são comparados à referência, além da conservação de forças, invariância à ordem dos pares e rejeição de apoios insuficientes.
+
+
+## Operação automática no site
+
+Os visitantes usam apenas o navegador. No modo **Servidor da instalação**, o serviço FEA deve ser implantado uma vez pelo administrador em um servidor que execute processos persistentes. No modo **Meu computador**, o comunicador desktop executa o mesmo motor localmente, sem VPS. `npm run dev` e `npm start` iniciam somente o Next.js; publicar o site não instala nem inicia o solver automaticamente.
+
+No servidor Linux com Docker, configure as variáveis privadas e execute:
+
+```sh
+docker compose --env-file .env.local -f services/fea/compose.yaml up --build -d
+```
+
+O container roda em segundo plano e a política `restart: unless-stopped` reinicia o processo após falhas e após reinicializar o servidor, desde que o Docker inicie no boot. Um container parado manualmente permanece parado até ser iniciado novamente. Não é necessário manter um terminal aberto. A imagem inclui todos os módulos FEA e uma verificação autenticada de saúde, sem imprimir o token. O contexto de build exclui ambientes locais, segredos e dados de trabalhos.
+
+Para conferir a operação, use `docker compose --env-file .env.local -f services/fea/compose.yaml ps` e `logs --tail=100 fea` com o mesmo prefixo. O healthcheck indica indisponibilidade, mas o Docker Compose não reinicia automaticamente um processo que continua vivo e apenas fica `unhealthy`; esse caso exige monitoramento e intervenção do administrador.
+
+A publicação do Next.js em hospedagem serverless exige um servidor separado para Gmsh/CalculiX. Configure `FEA_SERVICE_URL` com um endereço alcançável pelo servidor Next.js e mantenha o mesmo `FEA_API_TOKEN` nos dois serviços. `127.0.0.1` aponta para o próprio ambiente de execução: não alcança outro servidor ou container. O Compose fornecido publica a porta somente no loopback do host; acesso remoto exige configurar rede privada ou um proxy HTTPS autenticado. Nunca coloque o token em variáveis `NEXT_PUBLIC_`.
+
+A configuração está preparada no repositório; ativação em produção depende do servidor escolhido. Em caso de indisponibilidade, o site orienta o visitante a tentar novamente ou contatar o administrador, sem solicitar comandos de instalação.
+
+
+## Comunicador local — Windows e Linux
+
+O executor padrão é **Meu computador**. O usuário instala/extraí o pacote completo e abre o comunicador; ele inicia o serviço automaticamente. No site, basta clicar em **Conectar ao meu computador** e aceitar a janela do comunicador. Não é necessário digitar endereço, copiar código, executar terminal ou configurar Python/Docker. A janela mostra a origem exata que solicitou acesso e oferece **Permitir**, **Recusar** e a opção **Lembrar este site**. A primeira aprovação é sempre explícita. O navegador também pode pedir permissão de acesso local, que não é contornada pelo aplicativo.
+
+Ao lembrar o site, a origem é salva no computador e as próximas visitas reconectam automaticamente, com nova sessão privada para cada aba. A consulta automática nunca abre um popup para sites desconhecidos: nesses casos, o usuário inicia a solicitação pelo botão Conectar. Fechar a janela de autorização equivale a recusar; o site permite cancelar uma solicitação pendente. Solicitações expiram em dois minutos. A opção **Esquecer sites e revogar acessos** remove as permissões salvas, invalida as sessões e cancela seus trabalhos.
+
+A abertura automática ao entrar no Windows/Linux é opcional, habilitada por uma caixa de seleção no aplicativo. Minimize a janela para manter os cálculos funcionando. Fechá-la cancela os trabalhos e encerra o serviço. Se o motor nativo não estiver incluído, o aplicativo indica que é necessário instalar o pacote completo, sem pedir comandos ao usuário. Não há download automático de executáveis desconhecidos.
+
+A comunicação vai diretamente da aba para `http://127.0.0.1:8091`; o Next.js/Vercel não retransmite geometria, malhas, resultados ou arquivos `.inp` no modo local. Salvar projetos na nuvem continua sendo um recurso separado. O serviço de servidor permanece na porta 8090 e pode ser selecionado explicitamente. Nunca há fallback automático de local para servidor.
+
+As sessões usam tokens aleatórios de 256 bits, válidos por até 12 horas e restritos à origem aprovada. Tokens ficam apenas na memória da aba, não em localStorage, IndexedDB nem no estudo. Apenas a lista de sites lembrados, o caminho local do CalculiX e a preferência de inicialização são persistidos em `settings.json`. Ao sair da página, o cliente tenta cancelar o trabalho e revogar a sessão com `keepalive`; em uma interrupção abrupta, as sessões remanescentes expiram ou podem ser revogadas no comunicador.
+
+O serviço valida Host numérico e origem HTTPS (HTTP apenas em localhost para desenvolvimento). Antes da aprovação, somente os endpoints de solicitação de conexão estão disponíveis por CORS, sempre com a origem exata, sem cookies nem curinga. Cada solicitação recebe um segredo aleatório, é vinculada à origem e não pode ser consultada por outro site. Não existe endpoint HTTP para aprovar ou lembrar sites: isso ocorre somente na interface desktop. Há no máximo oito solicitações temporárias, uma pendente por origem, doze novas solicitações por minuto, oito sessões ativas e 32 sites lembrados pela interface. Preflights de rede privada não concedem autorização para calcular.
+
+O comunicador escuta somente no loopback. Não instala certificado raiz nem desativa proteções do navegador. Referência: [permissão de acesso local do Chrome](https://developer.chrome.com/blog/local-network-access). O fluxo foi testado com página HTTPS em Chrome, incluindo aprovação na janela desktop e reconexão para site lembrado; outros navegadores e políticas empresariais podem exigir validação adicional.
+
+Cada trabalho mantém o executor escolhido no envio, inclusive para cancelamento e exportação. Trocar de executor/conexão invalida os identificadores temporários na interface, preservando o estudo; gere uma nova malha para recalcular. Persistem os limites de malha, fila e 240 segundos por trabalho. No Windows, cancelamento encerra a árvore de processos com `taskkill`; o limite de memória via `resource` é exclusivo de Linux. Temporários são removidos no encerramento normal; um encerramento abrupto pode deixá-los no disco.
+
+O pareamento antigo por código permanece somente como compatibilidade de protocolo para ferramentas técnicas/testes, fora da interface de uso normal.
+
+### Desenvolvimento e distribuição
+
+No ambiente Linux preparado, `npm run fea:local` abre a interface desktop. No Windows com ambiente Python configurado, execute o Python do ambiente virtual com `services/fea/communicator.py`. Esses comandos são para desenvolvimento; o pacote empacotado dispensa Python, terminal e Docker no computador do usuário.
+
+Compile **no próprio sistema-alvo** com Python 3.11+, Tk, as dependências de `requirements.txt` e `pyinstaller>=6.11,<7`. Forneça o CalculiX nativo confiável e suas DLLs/bibliotecas, licenças e informações do código-fonte correspondente:
+
+```sh
+python services/fea/packaging/build.py --calculix CAMINHO_DO_CCX --notices PASTA_DAS_LICENCAS --native-dir PASTA_DAS_DLLS_OU_SO
+```
+
+O script gera pasta portátil e ZIP em `dist/communicator`, fora do Git, com Python, Tk, Gmsh, CalculiX e os módulos FEA. A compilação inclui a biblioteca Gmsh identificada no ambiente e suas dependências. No Windows, o executável deve ser compilado no Windows; para gerar o instalador por usuário, compile `services/fea/packaging/windows.iss` com Inno Setup após criar o pacote. A desinstalação remove o registro de inicialização automática. Assinatura de código, distribuição pública e validação em Windows são etapas de lançamento; não se deve apresentar um pacote não testado como instalador homologado. As obrigações de licença/fontes das bibliotecas nativas também se aplicam à distribuição desktop.
+
+O modo `--headless --origin ORIGEM --pairing-file ARQUIVO` serve somente para integração e testes; o arquivo contém um segredo de pareamento e não deve ser publicado. O executável congelado utiliza `--worker` internamente para iniciar os cálculos sem abrir outra janela. Referência: [execução de aplicações PyInstaller](https://pyinstaller.org/en/stable/runtime-information.html).

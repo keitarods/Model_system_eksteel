@@ -20,7 +20,7 @@ export type Contact = BondedContact|FrictionlessContact;
 export type ContactResult = {id:string;kind?:'bonded'|'frictionless';contactPoints?:number;activePoints?:number;maxOpening?:number;maxPenetration?:number;maxPressure?:number;contactEnergy?:number;maxTangentialSlip?:number;bondedNodes:number;maxInitialGap:number;maxRelativeDisplacement:number;slaveForce:Vec3;masterForce:Vec3};
 export type Material = {name:string;young:number;poisson:number;density:number;yieldStress:number};
 export type Support = {id:string;faceIds:number[];axes:[boolean,boolean,boolean]};
-export type Load = {id:string;kind:'force'|'pressure'|'gravity';faceIds:number[];vector:Vec3;pressure:number};
+export type Load = {id:string;kind:'force'|'pressure'|'gravity';faceIds:number[];vector:Vec3;pressure:number;direction?:'vector'|'normal';magnitude?:number;inverted?:boolean};
 export type FeaResults = {
   nonlinearHistory?:{loadFactor:number;iterations:number;activePoints:number}[];
   contacts?:ContactResult[];nodalContactForces?:Vec3[];

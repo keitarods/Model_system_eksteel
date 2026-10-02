@@ -9,7 +9,8 @@
     "lint": "eslint",
     "test": "node --require ./scripts/register-tests.cjs --test tests/*.test.cjs",
     "typecheck": "tsc --noEmit",
-    "fea:dev": "python3 services/fea/dev.py"
+    "fea:dev": "python3 services/fea/dev.py",
+    "fea:local": "services/fea/.venv/bin/python services/fea/communicator.py"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",

@@ -38,7 +38,12 @@ class EngineTests(unittest.TestCase):
     def study(self):
         return {'material':{'young':210000,'poisson':0,'density':7850,'yieldStress':250},'supports':[{'faceIds':[self.left],'axes':[True,True,True]}],'loads':[{'kind':'force','faceIds':[self.right],'vector':[1000,0,0]}]}
     def test_axial_analytic_and_reactions(self):
-        result=solve(self.mesh,self.study(),self.folder)
+        stages=[]
+        result=solve(self.mesh,self.study(),self.folder,lambda p,s:stages.append((p,s)))
+        self.assertEqual(stages[0][0],5)
+        self.assertGreater(stages[-1][0],80)
+        self.assertLess(stages[-1][0],100)
+        self.assertEqual([p for p,_ in stages],sorted(p for p,_ in stages))
         expected=1000*100/(100*210000)
         self.assertAlmostEqual(result['summary']['maxDisplacement']/expected,1,places=4)
         self.assertAlmostEqual(result['summary']['maxVonMises'],10,places=3)

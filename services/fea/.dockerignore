@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!requirements.txt
+!app.py
+!worker.py
+!engine.py
+!elements.py
+!contacts.py
+!unilateral.py
+!healthcheck.py

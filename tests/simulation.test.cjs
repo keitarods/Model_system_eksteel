@@ -15,7 +15,7 @@ test('simulation import rejects invalid connectivity and incomplete result tenso
  assert.throws(()=>parseStudy(JSON.stringify({format:'eksteel-fea',version:999,study:emptyStudy()})),/reconhecido/);
 });
 test('FEA cancellation while submitting cancels the created job instead of orphaning it',async()=>{
- const {runFeaJob}=require('../src/lib/simulation/client.ts');const original=global.fetch;const calls=[];const c=new AbortController();
+ const {runFeaJob,setFeaTarget}=require('../src/lib/simulation/client.ts');await setFeaTarget('server');const original=global.fetch;const calls=[];const c=new AbortController();
  global.fetch=async(url,options)=>{calls.push([url,options?.method]);if(options?.method==='POST'){c.abort();return {ok:true,json:async()=>({id:'job'})};}return {ok:true,json:async()=>({status:'cancelled'})};};
  try{await assert.rejects(runFeaJob({},c.signal,()=>{},()=>{}),{name:'AbortError'});assert.ok(calls.some(([url,method])=>url.includes('jobId=job')&&method==='DELETE'));}finally{global.fetch=original;}
 });
@@ -41,4 +41,27 @@ test('material regions partition the mesh and validate overrides',()=>{
  assert.deepEqual(parseStudy(serializeStudy(study)),study);
  assert.throws(()=>validateMesh({...regionMesh,regions:[...regionMesh.regions,{id:2,elements:[0],volume:1,center:[0,0,0]}]}),/elementos/);
  assert.throws(()=>parseStudy(serializeStudy({...study,regionMaterials:{'99':study.material}})),/região/);
+});
+test('normal force persists, reverses and uses current mesh area without altering legacy forces',()=>{
+ const {solverLoads}=require('../src/lib/simulation/loads.ts');
+ const load={id:'n',kind:'force',faceIds:[1],vector:[0,0,0],pressure:0,direction:'normal',magnitude:100,inverted:false};
+ const study={...emptyStudy(),mesh,loads:[load]};
+ assert.deepEqual(parseStudy(serializeStudy(study)).loads,[load]);
+ assert.equal(solverLoads([load],mesh)[0].pressure,200);
+ assert.equal(solverLoads([{...load,inverted:true}],mesh)[0].pressure,-200);
+ const scaled={...mesh,nodes:mesh.nodes.map(p=>p.map(v=>v*2))};
+ assert.equal(solverLoads([load],scaled)[0].pressure,50);
+ const legacy={...load,direction:undefined,vector:[100,0,0]};
+ assert.deepEqual(solverLoads([legacy],mesh),[legacy]);
+ assert.equal(load.kind,'force');
+ assert.throws(()=>solverLoads([{...load,faceIds:[999]}],mesh),/Face/);
+ assert.throws(()=>parseStudy(serializeStudy({...study,loads:[{...load,magnitude:-1}]})),/intensidade/);
+});
+test('normal force distributes magnitude across selected faces and quadratic integration facets',()=>{
+ const {solverLoads}=require('../src/lib/simulation/loads.ts');
+ const load={id:'n',kind:'force',faceIds:[1,2],vector:[0,0,0],pressure:0,direction:'normal',magnitude:300};
+ const multiple={...mesh,faces:[mesh.faces[0],{...mesh.faces[0],id:2,triangles:[[0,1,3]]}]};
+ assert.equal(solverLoads([load],multiple)[0].pressure,300);
+ const quadratic={...mesh,faces:[{...mesh.faces[0],triangles:[],loadTriangles:[[0,2,1,4,5,6]]}]};
+ assert.equal(solverLoads([{...load,faceIds:[1]}],quadratic)[0].pressure,600);
 });

@@ -33,3 +33,7 @@ services/fea/.runtime/
 
 # Dados da biblioteca de materiais Autodesk: ficam no banco (ver docs/MATERIALS.md), nunca no Git
 /src/lib/materials/inventorLibrary*.json
+
+# Local communicator builds and private pairing artifacts
+/dist/
+services/fea/packaging/vendor/

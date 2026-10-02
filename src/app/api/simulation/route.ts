@@ -44,7 +44,7 @@ async function forward(request: Request) {
       body: body as BodyInit | undefined, cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(30000),
     });
     return new Response(upstream.body, { status: upstream.status, headers: { 'Content-Type': upstream.headers.get('content-type') ?? 'application/json', 'Cache-Control': 'no-store' } });
-  } catch { return reply('O serviço FEA está indisponível. Verifique se o serviço de cálculo está iniciado.', 502); }
+  } catch { return reply('O serviço de cálculo está temporariamente indisponível. Tente novamente em instantes. Se persistir, contate o administrador do site.', 502); }
 }
 export const GET = forward;
 export const POST = forward;
