@@ -20,3 +20,15 @@ test('drawing rejects incompatible versions, duplicate sheets and malformed coor
  sheet.dimensions.push({id:'d',x1:'invalid'});
  assert.throws(()=>serializeDrawing([sheet]),/Cota/);
 });
+
+test('centers, leader notes and balloons survive saving and reject incomplete coordinates',()=>{
+ const sheet=createSheetObject('Detalhamento');
+ for (const kind of ['centerline','centermark','leader','balloon']) {
+  sheet.annotations.push({id:kind,viewId:null,kind,x1:10,y1:20,x2:35,y2:40,text:kind==='balloon'?'12':'Nota'});
+ }
+ assert.deepEqual(parseDrawing(serializeDrawing([sheet]))[0].annotations,sheet.annotations);
+ for (const annotation of sheet.annotations) {
+  const invalid={...sheet,annotations:[{...annotation,x2:undefined,x:10,y:20}]};
+  assert.throws(()=>serializeDrawing([invalid]),/Anotação/);
+ }
+});

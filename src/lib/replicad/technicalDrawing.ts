@@ -1,3 +1,5 @@
+import {projectBends,type NativeDrawingBend} from "./drawingBends";
+import { circularArc, type ContourArc } from "@/lib/drawing/roundedContour";
 import { drawProjection, makeProjectedEdges, lookFromPlane, ProjectionCamera, drawRectangle, Plane as ReplicadPlane } from "replicad";
 import type { AnyShape, Drawing, ProjectionPlane, Solid } from "replicad";
 import type { DrawingView, SectionInfo, ViewBoxRect, ViewOrientation } from "@/lib/drawing/types";
@@ -74,18 +76,35 @@ function cameraFor(shape: AnyShape, orientation: ViewOrientation): ProjectionCam
 // Blueprint.toSVGPathD, replicad.js). Por isso só falta negar Y aqui — nada
 // de projeção manual contra xAxis/yAxis da câmera, e nada de reaproveitar
 // o Z (é só a profundidade que a projeção já achatou).
-function extractLineEdges(shape: AnyShape, camera: ProjectionCamera): { x1: number; y1: number; x2: number; y2: number }[] {
+function extractLineEdges(shape: AnyShape, camera: ProjectionCamera) {
   const { visible, hidden } = makeProjectedEdges(shape, camera, true);
   const lines: { x1: number; y1: number; x2: number; y2: number }[] = [];
+  const visibleLines: {x1:number;y1:number;x2:number;y2:number}[] = [];
+  const arcs: ContourArc[] = [];
+  const circles: {x:number;y:number;radius:number}[] = [];
   for (const edge of [...visible, ...hidden]) {
     if (edge.geomType === "LINE") {
       const p0 = edge.startPoint;
       const p1 = edge.endPoint;
-      lines.push({ x1: p0.x, y1: -p0.y, x2: p1.x, y2: -p1.y });
+      const line={ x1: p0.x, y1: -p0.y, x2: p1.x, y2: -p1.y };
+      lines.push(line);
+      if(visible.includes(edge)) visibleLines.push(line);
+    }
+    if (visible.includes(edge) && edge.geomType === "CIRCLE" && edge.isClosed) {
+      const a=edge.pointAt(0), b=edge.pointAt(0.5);
+      const circle={x:(a.x+b.x)/2,y:-(a.y+b.y)/2,radius:edge.length/(2*Math.PI)};
+      if(!circles.some(c=>Math.hypot(c.x-circle.x,c.y-circle.y)<1e-4&&Math.abs(c.radius-circle.radius)<1e-4)) circles.push(circle);
+      a.delete(); b.delete();
+    }
+    if(visible.includes(edge) && edge.geomType === "CIRCLE" && !edge.isClosed) {
+      const a=edge.pointAt(0),m=edge.pointAt(0.5),b=edge.pointAt(1);
+      const arc=circularArc({x:a.x,y:-a.y},{x:m.x,y:-m.y},{x:b.x,y:-b.y});
+      if(arc && !arcs.some(c=>Math.hypot(c.mid.x-arc.mid.x,c.mid.y-arc.mid.y)<1e-4&&Math.abs(c.radius-arc.radius)<1e-4)) arcs.push(arc);
+      a.delete();m.delete();b.delete();
     }
     edge.delete();
   }
-  return lines;
+  return {lines,circles,visibleLines,arcs};
 }
 
 // Gera uma DrawingView nova (HLR de verdade via OpenCascade, através de
@@ -99,7 +118,7 @@ export function buildDrawingView(
   shape: AnyShape,
   orientation: ViewOrientation,
   flattened: boolean,
-  options: { x?: number; y?: number; scale?: number; label?: string } = {}
+  options: { x?: number; y?: number; scale?: number; label?: string; bends?:NativeDrawingBend[] } = {}
 ): DrawingView {
   const camera = cameraFor(shape, orientation);
   const { visible, hidden } = drawProjection(shape, camera);
@@ -111,11 +130,12 @@ export function buildDrawingView(
   const hBox = drawingBox(hidden);
   const box = vBox && hBox ? unionViewBox(vBox, hBox) : vBox ?? hBox ?? EMPTY_BOX;
 
-  const lineEdges = extractLineEdges(shape, camera);
+  const {lines:lineEdges,circles,visibleLines,arcs} = extractLineEdges(shape, camera);
 
   return {
     id: createId(),
     orientation,
+    bendProfiles: flattened?[]:projectBends(options.bends??[],orientation),
     flattened,
     x: options.x ?? 0,
     y: options.y ?? 0,
@@ -126,6 +146,9 @@ export function buildDrawingView(
     hiddenPaths,
     box,
     lineEdges,
+    circles,
+    arcs,
+    visibleLineEdges:visibleLines,
   };
 }
 
@@ -247,7 +270,7 @@ export function buildSectionView(
     const vBox = drawingBox(visible);
     const hBox = drawingBox(hidden);
     const box = vBox && hBox ? unionViewBox(vBox, hBox) : vBox ?? hBox ?? EMPTY_BOX;
-    const lineEdges = extractLineEdges(cutSolid, sectionCamera);
+    const {lines:lineEdges} = extractLineEdges(cutSolid, sectionCamera);
 
     return {
       id: createId(),

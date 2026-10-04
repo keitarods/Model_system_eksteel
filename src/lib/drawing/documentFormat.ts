@@ -1,3 +1,4 @@
+import {isoFit} from "./isoFits";
 import type { DrawingSheet } from './types';
 export const DRAWING_EXTENSION = '.eksdesenho';
 export function serializeDrawing(sheets: DrawingSheet[]): string {
@@ -18,12 +19,25 @@ export function parseDrawing(json: string): DrawingSheet[] {
       typeof sheet.titleBlock !== 'object') throw new Error('Estrutura da folha inválida.');
     ids.add(sheet.id);
     for (const dimension of sheet.dimensions) {
-      if (!dimension || typeof dimension.id !== 'string' || ![dimension.x1, dimension.y1, dimension.x2, dimension.y2, dimension.offset].every(Number.isFinite))
+      if (!dimension || (dimension.value !== undefined && (!Number.isFinite(dimension.value) || dimension.value <= 0)) || typeof dimension.id !== 'string' || ![dimension.x1, dimension.y1, dimension.x2, dimension.y2, dimension.offset].every(Number.isFinite))
         throw new Error('Cota de desenho inválida.');
+      if(dimension.tolerancePrecision!==undefined&&(!Number.isInteger(dimension.tolerancePrecision)||dimension.tolerancePrecision<0||dimension.tolerancePrecision>6))throw new Error('Precisão de tolerância inválida.');
+      if(dimension.fitClass!==undefined){
+        if(dimension.angular)throw new Error('Ajuste ISO não se aplica a ângulo.');
+        const fit=isoFit(dimension.value,dimension.fitClass);
+        if(Math.abs((dimension.toleranceUpper??0)-fit.upper)>1e-9||Math.abs((dimension.toleranceLower??0)+fit.lower)>1e-9)throw new Error('Desvios incompatíveis com a classe ISO.');
+      }
+      if (dimension.angular && (![dimension.angular.start,dimension.angular.delta].every(Number.isFinite) || Math.abs(dimension.angular.delta)>Math.PI || Math.abs(dimension.angular.delta)<1e-6)) throw new Error('Cota angular inválida.');
+      if (dimension.precision !== undefined && (!Number.isInteger(dimension.precision) || dimension.precision<0 || dimension.precision>4)) throw new Error('Precisão de cota inválida.');
+      for (const value of [dimension.toleranceUpper,dimension.toleranceLower]) if(value !== undefined && (!Number.isFinite(value))) throw new Error('Tolerância inválida.');
+      for (const value of [dimension.prefix,dimension.suffix]) if(value !== undefined && (typeof value!=='string'||value.length>30)) throw new Error('Texto de cota inválido.');
+      for (const point of [dimension.reference1, dimension.reference2]) {
+        if (point !== undefined && (!point || ![point.x,point.y].every(Number.isFinite))) throw new Error('Referência de cota inválida.');
+      }
     }
     for (const annotation of sheet.annotations) {
-      if (!annotation || typeof annotation.text !== 'string' || !['text','chamfer','thread','weld'].includes(annotation.kind) ||
-        !(annotation.kind === 'weld' ? [annotation.x1,annotation.y1,annotation.x2,annotation.y2] : [annotation.x,annotation.y]).every(Number.isFinite))
+      if (!annotation || typeof annotation.text !== 'string' || !['text','chamfer','thread','weld','centerline','centermark','leader','balloon'].includes(annotation.kind) ||
+        !(['weld','centerline','centermark','leader','balloon'].includes(annotation.kind) ? [annotation.x1,annotation.y1,annotation.x2,annotation.y2] : [annotation.x,annotation.y]).every(Number.isFinite))
         throw new Error('Anotação de desenho inválida.');
     }
     if (sheet.bomTables !== undefined && !Array.isArray(sheet.bomTables)) throw new Error('Lista de peças inválida.');

@@ -1,6 +1,8 @@
 # Simulação estrutural
 
-Acesse **Simulação** no cabeçalho do Modelador ou `/simulacao`. O documento de estudo é independente da peça: o comando **Usar peça do Modelador** copia a geometria atual. Alterações posteriores no Modelador não atualizam silenciosamente uma análise existente.
+Acesse **Simulação** no cabeçalho do Modelador ou `/simulacao`. O comando **Usar peça do Modelador** cria um estudo vinculado à peça. Configurações, geometria de referência, malha e resultados são incorporados no `.eks3d` quando a peça é salva (arquivo local, Salvar Como ou nuvem). O rascunho local também é atualizado durante a simulação; isso não sobrescreve automaticamente o arquivo do disco. Use **Baixar peça com simulações** no ambiente FEA ou salve a peça no Modelador. Os estudos aparecem na árvore da peça e no seletor do ambiente de Simulação. São aceitos até 20 estudos por peça. Alterações posteriores no histórico do Modelador não modificam silenciosamente uma análise: um aviso identifica a versão antiga, e um novo estudo pode ser criado da geometria atual. Reabrir resultados dispensa o solver; recalcular exige uma malha na sessão atual. STEP, montagens e arquivos `.eksfea` sem vínculo continuam como estudos independentes.
+
+A seleção oferece pré-destaque ciano, faces selecionadas em azul, substituição por clique simples, Ctrl/Shift para alternar referências e modo Múltipla para toque. Esc, Limpar e clique no fundo limpam a seleção. O filtro de contornos usa os limites das triangulações de faces (não as diagonais internas), sem substituir uma topologia CAD exata; contornos podem selecionar explicitamente suas faces adjacentes. Condições FEA continuam restritas a faces. Os painéis listam referências removíveis e a área total selecionada.
 
 ## O que está implementado
 

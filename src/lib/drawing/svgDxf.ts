@@ -9,7 +9,7 @@ export function drawingSvgDxf(svg: SVGSVGElement): string {
   const rows = ['0','SECTION','2','HEADER','9','$ACADVER','1','AC1009','0','ENDSEC','0','SECTION','2','ENTITIES'];
   const n = (v: number) => { if (!Number.isFinite(v)) throw new Error('Coordenada inválida na folha.'); return v.toFixed(5); };
   for (const el of svg.querySelectorAll('path,line,polyline,polygon,rect,circle,ellipse,text')) {
-    if (el.closest('defs,clipPath,mask')) continue;
+    if (el.closest('defs,clipPath,mask,[data-drawing-ui]')) continue;
     let hidden = false;
     for (let parent: Element | null = el; parent && parent !== svg; parent = parent.parentElement) {
       const style = getComputedStyle(parent);
@@ -27,7 +27,7 @@ export function drawingSvgDxf(svg: SVGSVGElement): string {
       rows.push('0','TEXT','8','TEXTOS','10',n(p.x),'20',n(height-p.y),'40',n(size || 2.5),'1',(el.textContent || '').replace(/[\r\n]+/g,' '));
     } else if (el instanceof SVGGeometryElement) {
       const style = getComputedStyle(el);
-      if (style.stroke === 'none' || Number(style.strokeOpacity) === 0) continue;
+      if (style.stroke === 'none' || style.stroke === 'transparent' || /rgba\([^)]*,\s*0\)$/.test(style.stroke) || Number(style.strokeOpacity) === 0) continue;
       // Sample disconnected absolute SVG subpaths separately: never add a bridge across a move.
       const geometries: SVGGeometryElement[] = [];
       if (el instanceof SVGPathElement) {

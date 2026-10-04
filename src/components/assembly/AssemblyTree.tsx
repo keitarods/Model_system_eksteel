@@ -57,7 +57,7 @@ export function AssemblyTree({
   }
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto bg-primary-50 p-3">
+    <div className="inventor-browser flex h-full flex-col overflow-y-auto bg-primary-50 p-3">
       <div className="mb-2 flex items-center justify-between">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-500">Componentes</h2>
         <button

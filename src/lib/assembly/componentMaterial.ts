@@ -12,7 +12,7 @@ import { writeToFileHandle } from "@/lib/project/folder";
 /** Conteúdo da peça com novas propriedades, preservando features e folhas de desenho. */
 export function withPartProperties(partJson: string, properties: PartProperties): string {
   const part = parseProject(partJson);
-  return serializeProject(part.features, part.drawingSheets, properties);
+  return serializeProject(part.features, part.drawingSheets, properties,part.simulations);
 }
 
 /**

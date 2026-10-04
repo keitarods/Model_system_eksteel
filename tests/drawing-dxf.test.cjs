@@ -13,8 +13,9 @@ test('sheet DXF transforms geometry into paper coordinates and skips hidden cont
   const svg={viewBox:{baseVal:{height:100}},getScreenCTM:()=>({inverse:()=>({multiply:m=>m})})};
   const line=Object.assign(new global.SVGGeometryElement(),{tagName:'line',parentElement:svg,closest:()=>null,getScreenCTM:()=>matrix,getTotalLength:()=>5,getPointAtLength:t=>({x:t,y:0})});
   const hidden=Object.assign(new global.SVGGeometryElement(),line,{hidden:true});
-  global.getComputedStyle=el=>({display:'block',visibility:'visible',opacity:el.hidden?'0':'1',stroke:'black',strokeOpacity:'1',strokeDasharray:'none'});
-  svg.querySelectorAll=()=>[line,hidden];
+  global.getComputedStyle=el=>({display:'block',visibility:'visible',opacity:el.hidden?'0':'1',stroke:el.transparent?'rgba(0, 0, 0, 0)':'black',strokeOpacity:'1',strokeDasharray:'none'});
+  const hitTarget=Object.assign(new global.SVGGeometryElement(),line,{transparent:true});
+  svg.querySelectorAll=()=>[line,hidden,hitTarget];
   const dxf=drawingSvgDxf(svg);
   assert.equal((dxf.match(/\nLINE\n/g)||[]).length,1);
   assert.match(dxf,/10\n10\.00000\n20\n80\.00000\n11\n20\.00000\n21\n80\.00000/);

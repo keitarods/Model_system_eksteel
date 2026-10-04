@@ -55,6 +55,7 @@ export function parseStudy(json:string):Study {
   const data=JSON.parse(json);
   if(data?.format!=='eksteel-fea'||data.version!==1||!data.study)throw new Error('Arquivo de simulação não reconhecido.');
   const s=data.study as Study;
+  if(s.sourcePart!==undefined&&(!s.sourcePart||typeof s.sourcePart.documentId!=='string'||!s.sourcePart.documentId||s.sourcePart.documentId.length>100||typeof s.sourcePart.studyId!=='string'||!s.sourcePart.studyId||s.sourcePart.studyId.length>100))throw new Error('Vínculo da simulação inválido.');
   if(typeof s.name!=='string'||typeof s.sourceName!=='string'||typeof s.step!=='string'||s.step.length>12000000||(s.step&&!s.step.includes('ISO-10303-21;'))||!finite(s.size)||s.size<0.01)throw new Error('Geometria ou configuração inválida.');
   if(s.geometryMode!==undefined&&!['part','assemblyBonded'].includes(s.geometryMode))throw new Error('Tipo de geometria inválido.');
   if(s.components!==undefined&&(!Array.isArray(s.components)||s.components.length>128||s.components.some(c=>!c||typeof c.id!=='string'||typeof c.label!=='string')))throw new Error('Componentes da simulação inválidos.');

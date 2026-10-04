@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
-import { Line, OrbitControls } from "@react-three/drei";
+import { useThree, type ThreeEvent } from "@react-three/fiber";
+import { GizmoHelper, Line, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import type { SketchFeature } from "@/lib/features/types";
 import { localToWorldPoint } from "@/lib/replicad/plane";
 import type { ShapeMesh } from "replicad";
 import { orientCamera, type NavigationControls } from "@/components/viewer/cameraNavigation";
+import {CameraApiCapture,ViewCubeOrbitCatcher,ViewCubeRotationArrows,type CameraApi} from "@/components/viewer/ViewCubeNavigation";
 import { MaterialLighting } from "@/components/materials/MaterialLighting";
 import type { Appearance } from "@/lib/materials/library";
+import {CadSelectionCanvas,CadSelectionProvider,useCadSelection} from '@/components/viewer/CadSelection';
 import { SolidMesh } from "@/components/viewer/SolidMesh";
 import type { ComponentPlacement } from "@/lib/assembly/types";
 
@@ -23,6 +25,7 @@ const VIEW_PRESETS: Record<ViewPreset, [number, number, number]> = {
 
 export type AssemblyBody = {
   instanceId: string;
+  label?:string;
   mesh: ShapeMesh;
   placement: ComponentPlacement;
   visible: boolean;
@@ -198,6 +201,7 @@ export function AssemblyViewer3D({
   // Inventor, abre a peça pra editar (ver src/lib/project/editInContext.ts).
   onEditInstance?: (instanceId: string) => void;
 }) {
+  const cameraApiRef=useRef<CameraApi|null>(null);
   const [fitToken,setFitToken] = useState(0);
   const [wireframe, setWireframe] = useState(false);
   const [view, setView] = useState<ViewPreset>("isometrica");
@@ -205,7 +209,8 @@ export function AssemblyViewer3D({
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
-      <div aria-label="Visualização da montagem" className="pointer-events-none absolute inset-x-2 top-2 z-10 flex items-start justify-between gap-2">
+      <CadSelectionProvider assembly enabled={!pickMode&&!draggableInstanceId} resetKey={bodies} onClear={()=>onSelectInstance?.(null)} onActiveComponent={onSelectInstance}>
+      <div aria-label="Visualização da montagem" className="pointer-events-none z-10 flex shrink-0 items-start justify-between gap-2 px-2 py-1">
         <div className="pointer-events-auto flex shrink-0 items-center gap-0.5 rounded-lg border border-primary-100 bg-white/95 p-1 shadow-sm">
           {(Object.keys(VIEW_PRESETS) as ViewPreset[]).map(preset=><button key={preset} type="button" title={`Vista ${preset}`} aria-label={`Vista ${preset}`} aria-pressed={view===preset}
             onClick={()=>{setView(preset);setViewToken(t=>t+1);}}
@@ -226,8 +231,8 @@ export function AssemblyViewer3D({
         </div>
       </div>
       <div className={`relative min-h-0 flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
-        <Canvas camera={{ position: VIEW_PRESETS.isometrica, fov: 45, up: [0, 0, 1], near: 0.1, far: 100000 }}>
-          <color attach="background" args={["#ffffff"]} />
+        <CadSelectionCanvas camera={{ position: VIEW_PRESETS.isometrica, fov: 45, up: [0, 0, 1], near: 0.1, far: 100000 }}>
+          <color attach="background" args={["#d5dfe9"]} />
           <MaterialLighting/>
           <ambientLight intensity={0.7} />
           <directionalLight position={[1200, -1500, 2200]} intensity={1} />
@@ -259,8 +264,13 @@ export function AssemblyViewer3D({
           ))}
           <gridHelper args={[4000, 40]} rotation={[Math.PI / 2, 0, 0]} />
           <axesHelper args={[600]} />
+          <CameraApiCapture apiRef={cameraApiRef}/>
+          <GizmoHelper alignment="top-right" margin={[70,70]} onTarget={()=>cameraApiRef.current?.controls?.target.clone()??new THREE.Vector3()}>
+            <ViewCubeOrbitCatcher apiRef={cameraApiRef}/>
+          </GizmoHelper>
           <OrbitControls makeDefault enableZoom zoomToCursor zoomSpeed={1.2} minDistance={10} maxDistance={40000} />
-        </Canvas>
+        </CadSelectionCanvas>
+        <ViewCubeRotationArrows apiRef={cameraApiRef} orbitTarget={[0,0,0]}/>
 
         {bodies.length === 0 && sketches.length === 0 && !pickMode && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-primary-500">
@@ -273,6 +283,7 @@ export function AssemblyViewer3D({
           </div>
         )}
       </div>
+      </CadSelectionProvider>
     </div>
   );
 }
@@ -298,6 +309,7 @@ function AssemblyBodies({
   onDragInstance?: (instanceId: string, position: [number, number, number]) => void;
   onEditInstance?: (instanceId: string) => void;
 }) {
+  const selection=useCadSelection();
   const beginDrag = useBodyDrag((instanceId, position) => onDragInstance?.(instanceId, position));
 
   return (
@@ -318,7 +330,7 @@ function AssemblyBodies({
                 onSelectInstance?.(body.instanceId);
               }}
               onDoubleClick={
-                !pickMode
+                !pickMode&&(!selection?.enabled||selection.filter==='component')
                   ? (e: ThreeEvent<MouseEvent>) => {
                       e.stopPropagation();
                       onEditInstance?.(body.instanceId);
@@ -331,7 +343,7 @@ function AssemblyBodies({
                   : undefined
               }
             >
-              <SolidMesh
+              <SolidMesh selectionLabel={body.label??body.instanceId.slice(0,8)} selectionOwner={body.instanceId}
                 mesh={body.mesh}
                 wireframe={wireframe}
                 pickMode={pickMode}

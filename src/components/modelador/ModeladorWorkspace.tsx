@@ -1,4 +1,9 @@
 "use client";
+import {ToolbarResizeHandle,useToolbarSize} from "@/components/layout/ToolbarResizeHandle";
+import {ViewportLayoutControls,useViewportLayout} from "@/components/layout/ViewportLayoutControls";
+import {usePartStudiesStore} from '@/lib/simulation/partStudyStore';
+import {useSimulationStore} from '@/lib/simulation/store';
+import '@/components/layout/inventor-workspaces.css';
 import { redefineSketchPlane } from "@/lib/features/redefineSketchPlane";
 import { ProfilePicker } from "./ProfilePicker";
 import { attachFlangeReferences, editFlangeWithDependents } from "@/lib/replicad/build-model";
@@ -143,7 +148,7 @@ function isTextEntryTarget(target: EventTarget | null): boolean {
 // embaixo, mesma ideia do SketchToolPalette na aba de esboço.
 function FeaturePanel({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex shrink-0 flex-col items-center gap-1 rounded-lg border border-primary-200 bg-white/70 px-1.5 pb-1 pt-1.5">
+    <div className="inventor-command-group flex shrink-0 flex-col">
       <div className="flex flex-wrap items-start gap-1">{children}</div>
       <span className="text-[10px] font-semibold uppercase tracking-wide text-primary-400">{label}</span>
     </div>
@@ -231,6 +236,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const addFeature = useFeatureStore((s) => s.addFeature);
   const updateFeature = useFeatureStore((s) => s.updateFeature);
   const removeFeature = useFeatureStore((s) => s.removeFeature);
+  const partSimulations=usePartStudiesStore(s=>s.document);
   const drawingSheets = useDrawingStore((s) => s.sheets);
   // "iProperties" da peça (código/descrição/material/densidade/responsáveis)
   // — viajam no .eks3d e alimentam a Lista de Peças de qualquer MONTAGEM
@@ -328,6 +334,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // lado, um de cada vez via mobileTab) — por isso o style inline com essa
   // largura só é aplicado quando isDesktop, senão atropelaria o layout
   // empilhado (largura cheia) do mobile.
+  const viewportLayout=useViewportLayout();
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [historyPanelWidth, setHistoryPanelWidth] = useState(220);
   const [isDesktop, setIsDesktop] = useState(false);
@@ -362,29 +369,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
   // Altura da barra de ferramentas principal, ajustável arrastando a
   // divisória logo abaixo dela — mesma ideia da largura da árvore de
-  // histórico. 96 = altura inicial (equivalente ao antigo max-h-24 fixo).
+  // histórico, com alturas independentes para cada modo da barra.
   const [mobileToolsOpen, setMobileToolsOpen] = useState(true);
-  const [toolbarHeight, setToolbarHeight] = useState(76);
-
-  const handleToolbarResizeStart = useCallback(
-    (e: React.PointerEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startHeight = toolbarHeight;
-
-      function handleMove(moveEvent: PointerEvent) {
-        const next = startHeight + (moveEvent.clientY - startY);
-        setToolbarHeight(Math.min(320, Math.max(40, next)));
-      }
-      function handleUp() {
-        window.removeEventListener("pointermove", handleMove);
-        window.removeEventListener("pointerup", handleUp);
-      }
-      window.addEventListener("pointermove", handleMove);
-      window.addEventListener("pointerup", handleUp);
-    },
-    [toolbarHeight]
-  );
+  const toolbarSize=useToolbarSize("modelador",viewportLayout.compact,viewportLayout.compact?76:104);
 
   useSketchKeyboardShortcuts(sketching && mode === "modelar");
   // Qual SketchFeature da árvore o esboço ao vivo representa — null quando é
@@ -869,6 +856,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             useFeatureStore.setState({ features: loaded.features });
             useDrawingStore.getState().loadSheets(loaded.drawingSheets);
             usePartPropertiesStore.getState().load(loaded.properties);
+            usePartStudiesStore.getState().load(loaded.simulations);
             clearSketch();
             setEditingSketchId(null);
             setSketching(false);
@@ -890,6 +878,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             useFeatureStore.setState({ features: loaded.features });
             useDrawingStore.getState().loadSheets(loaded.drawingSheets);
             usePartPropertiesStore.getState().load(loaded.properties);
+            usePartStudiesStore.getState().load(loaded.simulations);
             showNotice("Rascunho automático restaurado (última alteração antes de fechar/atualizar a página).");
           }
           if (isFileSystemAccessSupported()) {
@@ -914,18 +903,18 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // manual — ver justificativa do guard em hasRestoredAutosaveRef acima.
   useEffect(() => {
     if (!hasRestoredAutosaveRef.current) return;
-    scheduleDraftSave("modelador", serializeProject(features, drawingSheets, partProperties));
-  }, [features, drawingSheets, partProperties]);
+    scheduleDraftSave("modelador", serializeProject(features, drawingSheets, partProperties,partSimulations));
+  }, [features, drawingSheets, partProperties,partSimulations]);
 
   // Flush imediato ao fechar/recarregar a aba — ver flushDraftSave.
   useEffect(() => {
     function handlePageHide() {
       if (!hasRestoredAutosaveRef.current) return;
-      flushDraftSave("modelador", serializeProject(features, drawingSheets, partProperties));
+      flushDraftSave("modelador", serializeProject(features, drawingSheets, partProperties,partSimulations));
     }
     window.addEventListener("pagehide", handlePageHide);
     return () => window.removeEventListener("pagehide", handlePageHide);
-  }, [features, drawingSheets, partProperties]);
+  }, [features, drawingSheets, partProperties,partSimulations]);
 
   // Reconstrói o sólido do zero sempre que o histórico de features muda —
   // mais simples e mais seguro do que tentar atualizar incrementalmente.
@@ -975,7 +964,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             visibleSolid = rebuildVisibleModel(effectiveFeatures, { flatten: flattenView });
             separateDisplay = true;
           }
-          nextMesh = visibleSolid ? visibleSolid.mesh() : null;
+          nextMesh = visibleSolid ? Object.assign(visibleSolid.mesh(),{cadEdges:visibleSolid.meshEdges()}) : null;
           nextEdgeLines = visibleSolid ? visibleSolid.meshEdges().lines : [];
           nextLinearEdges = visibleSolid ? listLinearEdges(visibleSolid) : [];
           const reference = visibleSolid ? visibleSolid.clone() as Solid : null;
@@ -2309,7 +2298,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // escolher pasta de verdade, então só pergunta o nome via prompt e cai no
   // download de sempre.
   const handleSaveProjectAs = useCallback(async () => {
-    const json = serializeProject(features, drawingSheets, partProperties);
+    const json = serializeProject(features, drawingSheets, partProperties,partSimulations);
     const suggestedName = currentFileName ?? `projeto${NATIVE_FILE_EXTENSION}`;
 
     if (isFileSystemAccessSupported()) {
@@ -2338,7 +2327,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     setEditingInContext(null);
     rememberCurrentFileHandle("modelador", null);
     showNotice(result === "folder" ? "Projeto salvo na pasta selecionada." : "Projeto baixado.");
-  }, [features, drawingSheets, partProperties, currentFileName, projectFolder, showNotice]);
+  }, [features, drawingSheets, partProperties,partSimulations, currentFileName, projectFolder, showNotice]);
 
   // "Salvar": grava direto no arquivo já aberto/salvo, sem perguntar nada —
   // é o que permite ir salvando à vontade enquanto edita sem risco de
@@ -2351,7 +2340,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     }
 
     try {
-      await writeToFileHandle(currentFileHandle, serializeProject(features, drawingSheets, partProperties));
+      await writeToFileHandle(currentFileHandle, serializeProject(features, drawingSheets, partProperties,partSimulations));
       showNotice(`"${currentFileHandle.name}" salvo.`);
     } catch {
       // Handle pode ter ficado inválido (arquivo movido/apagado fora do
@@ -2360,7 +2349,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       setCurrentFileHandle(null);
       await handleSaveProjectAs();
     }
-  }, [features, drawingSheets, partProperties, currentFileHandle, handleSaveProjectAs, showNotice]);
+  }, [features, drawingSheets, partProperties,partSimulations, currentFileHandle, handleSaveProjectAs, showNotice]);
 
   // Fecha a peça atual (ao estilo Inventor: descarta o documento aberto,
   // volta pra um Modelador vazio) — sem isso, a única forma de "largar" uma
@@ -2406,6 +2395,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     useFeatureStore.setState({ features: [] });
     useDrawingStore.getState().loadSheets([]);
     usePartPropertiesStore.getState().clear();
+    usePartStudiesStore.getState().load();
     clearSketch();
     resetModelHistory();
     setEditingSketchId(null);
@@ -2430,7 +2420,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     if (!editingInContext) return;
     if (currentFileHandle) {
       try {
-        await writeToFileHandle(currentFileHandle, serializeProject(features, drawingSheets, partProperties));
+        await writeToFileHandle(currentFileHandle, serializeProject(features, drawingSheets, partProperties,partSimulations));
       } catch (err) {
         const proceed = window.confirm(
           `Não foi possível salvar "${currentFileHandle.name}" automaticamente (${
@@ -2443,7 +2433,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     requestReturnSelection(editingInContext.instanceId);
     setEditingInContext(null);
     router.push("/montagem");
-  }, [editingInContext, currentFileHandle, features, drawingSheets, partProperties, router]);
+  }, [editingInContext, currentFileHandle, features, drawingSheets, partProperties,partSimulations, router]);
 
   // Ctrl+S salva no arquivo já aberto (ou pede onde salvar, na primeira
   // vez); Ctrl+Shift+S é "Salvar Como" — convenção padrão (Word, VSCode
@@ -2477,6 +2467,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       useFeatureStore.setState({ features: loaded.features });
       useDrawingStore.getState().loadSheets(loaded.drawingSheets);
       usePartPropertiesStore.getState().load(loaded.properties);
+            usePartStudiesStore.getState().load(loaded.simulations);
       clearSketch();
       setEditingSketchId(null);
       setSketching(false);
@@ -2499,6 +2490,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     useFeatureStore.setState({ features: loaded.features });
     useDrawingStore.getState().loadSheets(loaded.drawingSheets);
     usePartPropertiesStore.getState().load(loaded.properties);
+            usePartStudiesStore.getState().load(loaded.simulations);
     useUndoStore.setState({ past: [], future: [] });
     clearSketch();
     setEditingSketchId(null);
@@ -2563,7 +2555,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const partSheetSource = useMemo(
     () => ({
       kind: "peca" as const,
-      buildShape: ({ flatten }: { flatten: boolean }) => rebuildModel(features, { flatten }),
+      buildShape: ({ flatten, onBend }: { flatten: boolean; onBend?:(bend:import("@/lib/replicad/drawingBends").NativeDrawingBend)=>void }) => rebuildModel(features, { flatten, onFlange:(feature,link)=>onBend?.({id:feature.id,label:feature.label,link}) }),
+      bends: features.filter(f => f.type === "flange").map(f => ({id:f.id,label:f.label,length:f.length,angle:f.angle,innerRadius:f.innerRadius})),
       signature: JSON.stringify(features),
       supportsFlatten: features.some((f) => f.type === "sheetMetal"),
       emptyMessage: "Nenhum sólido modelado ainda — crie a peça no Modelador antes de adicionar uma vista.",
@@ -2617,7 +2610,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   }, [mode, sketching, measuring3d, pickingPlane, creatingPlane, pickingAxisFace, edgeToolMode, flangePicking, creatingSheetMetal, featureToolMode, advancedEditing, features, profile, isSheetMetal, centerLine, hasActiveSolid, holeCircles, handleCreateSketch, handleFinishSketch, handleStartFillet, showNotice]);
 
   return (
-    <div className="cad-workspace flex h-dvh min-w-0 flex-col overflow-hidden bg-background text-foreground">
+    <div data-cad-compact={viewportLayout.compact} data-cad-focus={mode !== "desenho" && viewportLayout.focused} className="inventor-workspace cad-workspace flex h-dvh min-w-0 flex-col overflow-hidden bg-background text-foreground">
       <header className="cad-header flex shrink-0 items-center gap-2 overflow-x-auto border-b border-chrome-border bg-chrome-bg px-3 py-1.5 text-chrome-text">
         <div className="flex items-center gap-3">
           <ApplicationFileMenu current="modelador">
@@ -2637,9 +2630,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           >
             <HeaderIcon kind="open" /><span className="">Abrir</span>
           </button>
+          {partSimulations.studies.length>0&&<details className="px-2 py-1 text-xs"><summary className="cursor-pointer">Simulações da peça ({partSimulations.studies.length})</summary>{partSimulations.studies.map(entry=><button type="button" key={entry.id} className="block w-full px-2 py-2 text-left hover:bg-slate-100" onClick={()=>{useSimulationStore.getState().setStudy(entry.study);router.push('/simulacao');}}>{entry.study.name} · {entry.study.results?'Com resultados':'Configurada'}</button>)}</details>}
           <CloudProjectsButton
             documentEpoch={cloudDocumentEpoch}
-            getProject={() => serializeProject(features, drawingSheets, partProperties)}
+            getProject={() => serializeProject(features, drawingSheets, partProperties,partSimulations)}
             onOpen={handleOpenCloudProject}
             suggestedName={currentFileName ?? "projeto.eks3d"}
             disabled={sketching || pickingPlane || !!featureToolMode || !!editingInContext}
@@ -2752,6 +2746,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               ↩ Voltar pra Montagem
             </button>
           ) : null}
+          {mode !== "desenho" && <ViewportLayoutControls layout={viewportLayout}/>}
           <WorkspaceSwitcher current="modelador" />
           <div className="mx-1 hidden h-6 w-px bg-chrome-border sm:block" />
           <div className="flex items-center gap-0.5 rounded-lg bg-chrome-surface-alt p-0.5">
@@ -2819,7 +2814,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       <div
         id="model-tools"
         data-mobile-open={mobileToolsOpen}
-        style={{ height: toolbarHeight }}
+        ref={element=>{toolbarSize.ref.current=element;}} style={toolbarSize.style}
         className="cad-model-tools flex shrink-0 items-start gap-x-2 gap-y-1 overflow-auto border-b border-primary-100 bg-primary-50 px-2 py-1 text-sm">
         {enabledFeatures.at(-1)?.type === "unfold" ? (
           <FeaturePanel label="Chapas — desdobrada">
@@ -3988,13 +3983,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           </>
         )}
       </div>
-      {/* Divisória arrastável da barra de ferramentas — mesma ideia da
-          divisória da árvore de histórico, só que na vertical. */}
-      <div
-        onPointerDown={handleToolbarResizeStart}
-        title="Arraste para redimensionar a barra de ferramentas"
-        className="hidden md:block h-1.5 shrink-0 cursor-row-resize bg-primary-100 transition hover:bg-primary-300 active:bg-primary-400"
-      />
+      <ToolbarResizeHandle toolbar={toolbarSize} label="Modelador"/>
 
       {fsAccessSupported === false && (
         <p className="bg-amber-100 px-4 py-2 text-sm text-amber-900">
@@ -4097,7 +4086,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
         <div
-          className={`min-h-0 flex-1 md:order-1 ${historyCollapsed ? "md:!hidden" : "md:!block"} ${mobileTab === "history" ? "" : "hidden"}`}
+          data-cad-panel="history" className={`min-h-0 flex-1 md:order-1 ${historyCollapsed ? "md:!hidden" : "md:!block"} ${mobileTab === "history" ? "" : "hidden"}`}
           style={isDesktop ? { width: historyPanelWidth, flex: "0 0 auto" } : undefined}
         >
           <FeatureHistoryPanel
@@ -4141,9 +4130,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         <div
           onPointerDown={handleHistoryResizeStart}
           title="Arraste para redimensionar"
-          className={`hidden w-1.5 shrink-0 cursor-col-resize bg-primary-100 transition hover:bg-primary-300 active:bg-primary-400 md:order-2 ${historyCollapsed ? "" : "md:block"}`}
+          data-cad-divider="history" className={`hidden w-1.5 shrink-0 cursor-col-resize bg-primary-100 transition hover:bg-primary-300 active:bg-primary-400 md:order-2 ${historyCollapsed ? "" : "md:block"}`}
         />
-        <div className={`min-h-0 flex-1 md:order-3 md:!block ${mobileTab === "viewer" ? "" : "hidden"}`}>
+        <div data-cad-viewport="model" className={`min-h-0 flex-1 md:order-3 md:!block ${mobileTab === "viewer" ? "" : "hidden"}`}>
           <Viewer3D
             appearance={partProperties.materialDefinition?.appearance}
             mesh={bodyVisible ? mesh : null}
@@ -4455,8 +4444,11 @@ function FeatureHistoryPanel({
   onOpenSketch: (feature: Extract<Feature, { type: "sketch" }>) => void;
   onEditFeature: (feature: Feature) => void;
 }) {
+  const simulations=usePartStudiesStore(s=>s.document.studies);
+  const router=useRouter();
   return (
-    <div className="flex h-full flex-col overflow-y-auto bg-primary-50 p-3">
+    <div className="inventor-browser flex h-full flex-col overflow-y-auto bg-primary-50 p-3">
+      {simulations.length>0&&<details open className="mb-3 rounded border border-slate-200 bg-white text-xs"><summary className="cursor-pointer px-2 py-2 font-semibold">Simulações ({simulations.length})</summary>{simulations.map(entry=><button key={entry.id} type="button" disabled={busy} className="block w-full px-3 py-2 text-left hover:bg-blue-50 disabled:opacity-40" onClick={()=>{useSimulationStore.getState().setStudy(entry.study);router.push('/simulacao');}}>{entry.study.name}<span className="block text-[10px] text-slate-500">{entry.study.results?'Resultados salvos':'Configurações salvas'}</span></button>)}</details>}
       <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-primary-500">
         Histórico
       </h2>

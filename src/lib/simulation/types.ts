@@ -30,6 +30,7 @@ export type FeaResults = {
   solver:string;elementType:ElementType;
 };
 export type Study = {
+  sourcePart?:{documentId:string;studyId:string};
   contacts?:Contact[];
   materialMode?:'uniform'|'regions';
   regionMaterials?:Record<string,Material>;

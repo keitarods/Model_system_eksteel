@@ -1,5 +1,7 @@
 "use client";
 
+import {ViewportLayoutControls,useViewportLayout} from "@/components/layout/ViewportLayoutControls";
+import '@/components/layout/inventor-workspaces.css';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as THREE from "three";
@@ -131,6 +133,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
   // ambiente de Desenho do Modelador, com a montagem inteira como fonte de
   // geometria e a Lista de Peças habilitada) — mesma divisão de modos que o
   // ModeladorWorkspace já usa pra peça.
+  const viewportLayout=useViewportLayout();
   const [treeCollapsed, setTreeCollapsed] = useState(false);
   const [treeWidth, setTreeWidth] = useState(256);
   const treeResize = useRef<{x:number;width:number}|null>(null);
@@ -291,7 +294,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
         try {
           const solid = rebuildModel([...resolution.features, ...(instance.assemblyFeatures ?? [])], {});
           nextSolids[instance.id] = solid;
-          nextMeshes[instance.id] = solid ? solid.mesh() : null;
+          nextMeshes[instance.id] = solid ? Object.assign(solid.mesh(),{cadEdges:solid.meshEdges()}) : null;
         } catch (err) {
           console.error(`Falha ao reconstruir a peça "${instance.label}":`, err);
           nextSolids[instance.id] = null;
@@ -347,6 +350,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
         .filter((i) => !i.suppressed && meshes[i.id])
         .map((i) => ({
           instanceId: i.id,
+          label:i.label,
           mesh: meshes[i.id]!,
           placement: placements[i.id] ?? i.placementSeed,
           visible: i.visible,
@@ -771,7 +775,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
   }, [handleSaveAssembly, handleSaveAssemblyAs]);
 
   return (
-    <div className="cad-workspace flex h-dvh min-w-0 flex-col overflow-hidden bg-background text-foreground">
+    <div data-cad-compact={viewportLayout.compact} data-cad-focus={mode !== "desenho" && viewportLayout.focused} className="inventor-workspace cad-workspace flex h-dvh min-w-0 flex-col overflow-hidden bg-background text-foreground">
       <header className="cad-header flex shrink-0 items-center gap-2 overflow-x-auto border-b border-chrome-border bg-chrome-bg px-2 py-1 text-chrome-text">
         <ApplicationFileMenu current="montagem">
           <button type="button" onClick={handleOpenAssembly} className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"><HeaderIcon kind="open"/>Abrir montagem</button>
@@ -807,6 +811,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
         </div>
         <span title={currentFileName??'Montagem sem título'} className="hidden min-w-0 truncate text-xs text-chrome-text-muted sm:block">{currentFileName??'Montagem sem título'}</span>
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          {mode !== "desenho" && <ViewportLayoutControls layout={viewportLayout}/>}
           <WorkspaceSwitcher current="montagem" />
           <AccountBadge userEmail={userEmail} />
         </div>
@@ -847,7 +852,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
         <DrawingSheetWorkspace useStore={useAssemblyDrawingStore} source={assemblySheetSource} onClose={() => setMode("modelo")} />
       ) : (
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <AssemblyModelingRibbon treeCollapsed={treeCollapsed} onToggleTree={()=>setTreeCollapsed(v=>!v)} selectedId={selectedInstanceId} onSelect={setSelectedInstanceId} onInsert={handleInsertPart} onConstraint={handleStartConstraint} onEdit={handleEditInstance} onMaterial={handleOpenMaterial} onError={setErrorMessage} />
+        <AssemblyModelingRibbon compact={viewportLayout.compact} treeCollapsed={treeCollapsed} onToggleTree={()=>setTreeCollapsed(v=>!v)} selectedId={selectedInstanceId} onSelect={setSelectedInstanceId} onInsert={handleInsertPart} onConstraint={handleStartConstraint} onEdit={handleEditInstance} onMaterial={handleOpenMaterial} onError={setErrorMessage} />
         <div className="flex shrink-0 border-b border-primary-100 bg-white md:hidden">
           {(["viewer", "tree"] as const).map(panel => <button key={panel} type="button"
             aria-pressed={mobilePanel === panel} onClick={() => setMobilePanel(panel)}
@@ -856,7 +861,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
           </button>)}
         </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
-        <div className={`min-h-0 min-w-0 flex-1 md:order-3 md:block ${mobilePanel === "viewer" ? "" : "hidden"}`}>
+        <div data-cad-viewport="assembly" className={`min-h-0 min-w-0 flex-1 md:order-3 md:block ${mobilePanel === "viewer" ? "" : "hidden"}`}>
           <AssemblyViewer3D
             bodies={bodies}
             sketches={selectedInstance && selectedInstance.visible && !selectedInstance.suppressed ? (selectedInstance.assemblyFeatures ?? []).filter((f): f is import("@/lib/features/types").SketchFeature => f.type === "sketch").map(sketch => ({sketch,placement:placements[selectedInstance.id] ?? selectedInstance.placementSeed})) : []}
@@ -875,13 +880,13 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
             onEditInstance={handleEditInstance}
           />
         </div>
-        <div role="separator" aria-label="Largura do painel de componentes" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={480} aria-valuenow={treeWidth} tabIndex={0}
+        <div data-cad-divider="components" role="separator" aria-label="Largura do painel de componentes" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={480} aria-valuenow={treeWidth} tabIndex={0}
           onKeyDown={e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();setTreeWidth(w=>Math.max(200,Math.min(480,w+(e.key==='ArrowRight'?16:-16))));}}}
           onPointerDown={e=>{if(e.button!==0)return;e.preventDefault();treeResize.current={x:e.clientX,width:treeWidth};e.currentTarget.setPointerCapture(e.pointerId);}}
           onPointerMove={e=>{const drag=treeResize.current;if(drag)setTreeWidth(Math.max(200,Math.min(480,window.innerWidth*0.45,drag.width+e.clientX-drag.x)));}}
           onPointerUp={()=>{treeResize.current=null;}} onLostPointerCapture={()=>{treeResize.current=null;}} onPointerCancel={()=>{treeResize.current=null;}}
           className={`hidden w-1.5 shrink-0 touch-none cursor-col-resize bg-primary-100 hover:bg-primary-300 focus-visible:bg-primary-300 focus-visible:outline-none md:order-2 ${treeCollapsed?'':'md:block'}`}/>
-        <div id="assembly-component-tree" style={{'--assembly-tree-width':`${treeWidth}px`} as React.CSSProperties} className={`min-h-0 w-full flex-1 overflow-y-auto md:flex-none md:order-1 md:w-[var(--assembly-tree-width)] ${treeCollapsed?'md:!hidden':'md:!block'} ${mobilePanel === "tree" ? "" : "hidden"}`}>
+        <div data-cad-panel="components" id="assembly-component-tree" style={{'--assembly-tree-width':`${treeWidth}px`} as React.CSSProperties} className={`min-h-0 w-full flex-1 overflow-y-auto md:flex-none md:order-1 md:w-[var(--assembly-tree-width)] ${treeCollapsed?'md:!hidden':'md:!block'} ${mobilePanel === "tree" ? "" : "hidden"}`}>
           <AssemblyTree
             instances={instances}
             constraints={constraints}

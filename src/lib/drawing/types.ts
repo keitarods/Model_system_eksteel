@@ -61,6 +61,10 @@ export type DrawingView = {
   // ficam de fora por ora — só linha reta entra no clique-pra-cotar (igual
   // Inventor: clicar uma aresta reta cota o comprimento dela; clicar 2
   // arestas retas cota a distância entre as duas).
+  bendProfiles?: import("../replicad/drawingBends").BendProfile[];
+  visibleLineEdges?: {x1:number;y1:number;x2:number;y2:number}[];
+  arcs?: import("./roundedContour").ContourArc[];
+  circles?: { x: number; y: number; radius: number }[];
   lineEdges: { x1: number; y1: number; x2: number; y2: number }[];
   // Bounding box da projeção bruta (escala 1:1, antes de aplicar `scale`),
   // em coordenadas SVG — usado pra centralizar a vista em (x,y) e pra
@@ -96,6 +100,21 @@ export type SectionInfo = {
 // move a cota (mesma limitação que colocar cota numa vista do Inventor
 // depois de mover ela sem atualizar — aqui é deliberado pra v1, não um bug).
 export type DrawingDimension = {
+  bendId?: string;
+  fitClass?: string;
+  tolerancePrecision?: number;
+  angular?: {start:number;delta:number};
+  precision?: number;
+  prefix?: string;
+  suffix?: string;
+  toleranceUpper?: number;
+  toleranceLower?: number;
+
+  /** Measured model mm, independent of the paper scale. Legacy dimensions omit this. */
+  value?: number;
+  automatic?: boolean;
+  reference1?: {x:number;y:number};
+  reference2?: {x:number;y:number};
   id: string;
   viewId: string;
   x1: number;
@@ -111,20 +130,14 @@ export type DrawingDimension = {
   offset: number;
 };
 
-// Anotações de simbologia comuns em desenho técnico — texto livre, chanfro
-// e rosca são todas "clica um ponto, digita o texto" (mesmo formato
-// visual, só muda o rótulo/placeholder da ferramenta e o ícone na barra);
-// solda é a única que precisa de 2 pontos (ponta da seta apontando pra
-// junta + posição da linha de referência), por isso tem seu próprio
-// formato. Simplificado de propósito: não é o sistema completo de símbolos
-// de solda da ISO 2553/AWS A2.4 (dezenas de tipos de junta, cauda,
-// "all-around" etc.) — só o glifo de solda em filete (o mais comum) com
-// texto de medida editável, que cobre a maioria do uso do dia a dia.
+// Anotações em coordenadas da folha. Centros, chamadas, balões e soldas
+// usam dois pontos; centros e identificação de itens são definidos manualmente.
+// A simbologia de solda é simplificada (filete), sem catálogo ISO/AWS completo.
 export type AnnotationKind = "text" | "chamfer" | "thread";
 
 export type DrawingAnnotation =
   | { id: string; viewId: string | null; kind: AnnotationKind; x: number; y: number; text: string }
-  | { id: string; viewId: string | null; kind: "weld"; x1: number; y1: number; x2: number; y2: number; text: string };
+  | { id: string; viewId: string | null; kind: "weld" | "centerline" | "centermark" | "leader" | "balloon"; x1: number; y1: number; x2: number; y2: number; text: string };
 
 // Linha da tabelinha de "tolerâncias não especificadas" que fica à esquerda
 // do bloco de título (ex.: "Chapas cortadas a laser e dobradas" → "m") —

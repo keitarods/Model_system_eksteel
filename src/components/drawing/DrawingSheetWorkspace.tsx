@@ -1,9 +1,16 @@
 "use client";
 
+import {layoutLeaders,leaderDragPatch} from "@/lib/drawing/leaderLayout";
+import {dimensionBounds,windowDimensions,draggedDimensionOffset} from "@/lib/drawing/dimensionSelection";
+import {isoFit} from "@/lib/drawing/isoFits";
+import {bendAngles,dimensionText,angleBetweenLines} from "@/lib/drawing/angularDimensions";
+
+import { autoDimensions, autoCircleNotes, autoRadiusNotes, bendSchedule, type DrawingBend } from "@/lib/drawing/autoDimensions";
 import { CloudProjectsButton } from "@/components/modelador/CloudProjectsButton";
 import { serializeDrawing, parseDrawing, DRAWING_EXTENSION } from "@/lib/drawing/documentFormat";
 import { drawingSvgDxf } from "@/lib/drawing/svgDxf";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { jsPDF } from "jspdf";
 import { svg2pdf } from "svg2pdf.js";
 import type { AnyShape } from "replicad";
@@ -44,6 +51,7 @@ import {
   DEFAULT_TOLERANCE_ROWS,
   type AnnotationKind,
   type DrawingAnnotation,
+  type DrawingDimension,
   type DrawingSheet,
   type DrawingView,
   type SheetSize,
@@ -134,9 +142,11 @@ type LineHit = { viewId: string; a: Point; b: Point };
 // — um único ref discriminado por `kind` evita duplicar toda a mecânica de
 // pointerdown/move/up só pra trocar o que exatamente está sendo movido.
 type DragState =
+  | {kind:"dimensionGroup";dimensions:DrawingDimension[];startClientX:number;startClientY:number}
+  | {kind:"selection";start:Point;end:Point;additive:boolean;startClientX:number;startClientY:number}
   | { kind: "view"; viewId: string; startClientX: number; startClientY: number; origX: number; origY: number }
   | { kind: "dimension"; dimensionId: string; nx: number; ny: number; startClientX: number; startClientY: number; startOffset: number }
-  | { kind: "annotation"; annotationId: string; startClientX: number; startClientY: number; orig: AnnotationPatch }
+  | { kind: "annotation"; annotationId: string; startClientX: number; startClientY: number; orig: AnnotationPatch; anchored?:boolean }
   | { kind: "bom"; tableId: string; startClientX: number; startClientY: number; origX: number; origY: number };
 
 // Store de folhas que esta instância do ambiente de Desenho manipula — o
@@ -153,12 +163,13 @@ export type SheetShapeSource = {
   // Constrói a shape a projetar. `flatten` só faz sentido pra peça de chapa
   // (planificada vs. dobrada); a montagem ignora. Devolver null = nada
   // modelado/vinculado ainda, e a mensagem de `emptyMessage` é mostrada.
-  buildShape: (options: { flatten: boolean }) => AnyShape | null;
+  buildShape: (options: { flatten: boolean; onBend?:(bend:import("@/lib/replicad/drawingBends").NativeDrawingBend)=>void }) => AnyShape | null;
   // Assinatura do modelo atual — carimbada em cada vista gerada e comparada
   // depois pra sinalizar "vista desatualizada" (ver isViewStale).
   signature: string;
   // Habilita o par planificada/dobrada no seletor de vista (só peça de chapa).
   supportsFlatten: boolean;
+  bends?: DrawingBend[];
   emptyMessage: string;
   // Só montagem: peças resolvidas (instância + sólido + iProperties) pra
   // montar/atualizar a Lista de Peças. Ausente = a ferramenta de lista nem
@@ -318,8 +329,57 @@ export function DrawingSheetWorkspace({
   useStore?: SheetStore;
   source: SheetShapeSource;
 }) {
-  const [mobileProperties, setMobileProperties] = useState(false);
   const { sheet: activeSheet, sheets } = useActiveSheet(useStore);
+  const [selectedDimensions,setSelectedDimensions]=useState<string[]>([]);
+  const [selectionMode,setSelectionMode]=useState(false);
+  const [selectionWindow,setSelectionWindow]=useState<{start:Point;end:Point}|null>(null);
+  const [groupOffsets,setGroupOffsets]=useState<Record<string,number>>({});
+  const groupOffsetsRef=useRef<Record<string,number>>({});
+  const suppressSheetClick=useRef(false);
+  useEffect(()=>{setSelectedDimensions([]);setSelectionWindow(null);setGroupOffsets({});groupOffsetsRef.current={};dragRef.current=null;},[activeSheet?.id]);
+  const [fitInput,setFitInput]=useState("H7");
+  const [fitError,setFitError]=useState<string|null>(null);
+  const [editingDimension,setEditingDimension] = useState<{sheetId:string;dimension:DrawingDimension}|null>(null);
+  useEffect(()=>{setFitInput(editingDimension?.dimension.fitClass??"H7");setFitError(null);},[editingDimension?.dimension.id]);
+  const [replaceAutoSheet, setReplaceAutoSheet] = useState(false);
+  const [autoPreview, setAutoPreview] = useState<DrawingSheet[] | null>(null);
+  const [autoDetails, setAutoDetails] = useState(true);
+  const [toolsExpanded, setToolsExpanded] = useState(false);
+  const [sheetZoom, setSheetZoom] = useState(1);
+  const [viewportSize, setViewportSize] = useState({width:900,height:600});
+  const viewportRef = useRef<HTMLDivElement>(null);
+  useEffect(()=>{
+    const element=viewportRef.current;
+    if(!element) return;
+    const observer=new ResizeObserver(entries=>{
+      const r=entries[0].contentRect;setViewportSize({width:r.width,height:r.height});
+    });
+    observer.observe(element);return ()=>observer.disconnect();
+  },[]);
+  useEffect(()=>{
+    const viewport=viewportRef.current;
+    if(!viewport)return;
+    const wheel=(event:WheelEvent)=>{
+      const svg=svgRef.current;
+      if(!svg)return;
+      event.preventDefault();
+      // Keep the current drag's paper coordinates stable until it ends.
+      if(dragRef.current)return;
+      const before=svg.getBoundingClientRect();
+      if(!before.width||!before.height)return;
+      const u=(event.clientX-before.left)/before.width;
+      const v=(event.clientY-before.top)/before.height;
+      const pixels=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?viewport.clientHeight:1);
+      const factor=Math.exp(-Math.max(-600,Math.min(600,pixels))*0.0015);
+      flushSync(()=>setSheetZoom(zoom=>Math.max(0.5,Math.min(4,zoom*factor))));
+      const after=svg.getBoundingClientRect();
+      viewport.scrollLeft+=after.left+u*after.width-event.clientX;
+      viewport.scrollTop+=after.top+v*after.height-event.clientY;
+    };
+    viewport.addEventListener('wheel',wheel,{passive:false});
+    return ()=>viewport.removeEventListener('wheel',wheel);
+  },[]);
+  const [mobileProperties, setMobileProperties] = useState(false);
   const addSheet = useStore((s) => s.addSheet);
   const removeSheet = useStore((s) => s.removeSheet);
   const setActiveSheet = useStore((s) => s.setActiveSheet);
@@ -354,12 +414,13 @@ export function DrawingSheetWorkspace({
   const [pendingFlattened, setPendingFlattened] = useState(false);
   const [computing, setComputing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [angularMode,setAngularMode] = useState(false);
   const [dimensionMode, setDimensionMode] = useState(false);
   const [pendingLinePick, setPendingLinePick] = useState<LineHit | null>(null);
   // "weld" é a única anotação de 2 cliques (ponta da seta + linha de
   // referência) — as outras 3 (texto/chanfro/rosca) são 1 clique só, sem
   // precisar de estado "pendente" entre cliques.
-  const [annotationMode, setAnnotationMode] = useState<AnnotationKind | "weld" | null>(null);
+  const [annotationMode, setAnnotationMode] = useState<DrawingAnnotation["kind"] | null>(null);
   const [pendingWeldPoint, setPendingWeldPoint] = useState<Point | null>(null);
   // Onde colocar a PRÓXIMA vista (null = centro da folha, com o cascade de
   // sempre) — setado ao abrir o seletor de vista pelo menu de botão direito
@@ -397,6 +458,9 @@ export function DrawingSheetWorkspace({
   const sheetDims = activeSheet ? sheetDimensionsMm(activeSheet) : { width: 297, height: 210 };
 
   function clearOtherModes() {
+    if(dragRef.current?.kind==="selection"||dragRef.current?.kind==="dimensionGroup"){dragRef.current=null;setGroupOffsets({});groupOffsetsRef.current={};}
+    setSelectedDimensions([]);setSelectionWindow(null);setSelectionMode(false);
+    setAngularMode(false);
     setDimensionMode(false);
     setPendingLinePick(null);
     setAnnotationMode(null);
@@ -408,12 +472,22 @@ export function DrawingSheetWorkspace({
     setPendingSectionPoint(null);
   }
 
+  useEffect(() => {
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key === "Escape") clearOtherModes();
+    };
+    window.addEventListener("keydown", cancel);
+    return () => window.removeEventListener("keydown", cancel);
+  }, []);
+
+  useEffect(() => { clearOtherModes(); }, [activeSheet?.id]);
+
   function setDimensionModeExclusive(on: boolean) {
     clearOtherModes();
     setDimensionMode(on);
   }
 
-  function setAnnotationModeExclusive(mode: AnnotationKind | "weld" | null) {
+  function setAnnotationModeExclusive(mode: DrawingAnnotation["kind"] | null) {
     clearOtherModes();
     setAnnotationMode(mode);
   }
@@ -440,12 +514,13 @@ export function DrawingSheetWorkspace({
     let solid = null;
     try {
       await loadOpenCascade();
-      solid = source.buildShape({ flatten: flattened });
+      const bends:import("@/lib/replicad/drawingBends").NativeDrawingBend[]=[];
+      solid = source.buildShape({ flatten: flattened,onBend:b=>bends.push(b) });
       if (!solid) {
         setErrorMessage(source.emptyMessage);
         return null;
       }
-      const raw = buildDrawingView(solid, orientation, flattened);
+      const raw = buildDrawingView(solid, orientation, flattened,{bends});
       const maxW = sheetDims.width - SHEET_MARGIN_MM * 2;
       const maxH = sheetDims.height - SHEET_MARGIN_MM * 2 - TITLE_BLOCK_HEIGHT_MM;
       const scale = suggestScale(raw.box, maxW * 0.9, maxH * 0.9);
@@ -468,6 +543,79 @@ export function DrawingSheetWorkspace({
   // Posição de destino: o ponto clicado com o botão direito (menu "Inserir
   // Vista"), se houver; senão o centro da folha, com o mesmo cascade de
   // sempre pra não empilhar vistas exatamente uma em cima da outra.
+  async function refreshAutomaticDimensions() {
+    if(!activeSheet) return;
+    setComputing(true);setErrorMessage(null);
+    try {
+      await new Promise(resolve=>setTimeout(resolve,30));
+      await loadOpenCascade();
+      const views:DrawingView[]=[];
+      for(const v of activeSheet.views) {
+        if(v.sectionInfo){views.push(v);continue;}
+        const bends:import("@/lib/replicad/drawingBends").NativeDrawingBend[]=[];
+        const shape=source.buildShape({flatten:v.flattened,onBend:b=>bends.push(b)});
+        if(!shape) throw new Error(source.emptyMessage);
+        try{const fresh=buildDrawingView(shape,v.orientation,v.flattened,{bends});views.push({...fresh,id:v.id,x:v.x,y:v.y,scale:v.scale,scaleLabel:v.scaleLabel,label:v.label,sourceSignature:featuresSignature});}
+        finally{shape.delete();}
+      }
+      const angles=views.flatMap(v=>bendAngles(v,(source.bends??[]).map(b=>b.angle)));
+      setReplaceAutoSheet(true);
+      setAutoPreview([layoutLeaders({...activeSheet,views,annotations:[...activeSheet.annotations.filter(a=>!a.id.startsWith("auto-radius-")),...views.flatMap(autoRadiusNotes)],dimensions:[...activeSheet.dimensions.filter(d=>!d.automatic),...views.flatMap(v=>autoDimensions(v,autoDetails)),...angles]})]);
+      if(source.bends?.length&&!angles.length&&!views.every(v=>v.flattened)) setErrorMessage("Não foi reconhecido um perfil de dobra adequado. Use Cota angular em duas arestas da vista de perfil. Confira também as cotas manuais após atualizar a geometria.");
+    }catch(err){setErrorMessage(err instanceof Error?err.message:"Erro ao atualizar cotas.");}
+    finally{setComputing(false);}
+  }
+
+  async function handleAutoDrawing() {
+    setReplaceAutoSheet(false);
+    clearOtherModes();
+    setComputing(true); setErrorMessage(null);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 30));
+      await loadOpenCascade();
+      const generated: DrawingSheet[] = [];
+      for (const flatten of (hasSheetMetal ? [true, false] : [false])) {
+        const bends:import("@/lib/replicad/drawingBends").NativeDrawingBend[]=[];
+        const shape = source.buildShape({flatten,onBend:b=>bends.push(b)});
+        if (!shape) throw new Error(source.emptyMessage);
+        try {
+          const sheet = createSheetObject(hasSheetMetal ? (flatten ? "Chapa · Planificada" : "Chapa · Dobrada") : "Cotagem automática");
+          sheet.size = "A3"; sheet.orientation = "landscape";
+          if (activeSheet) sheet.titleBlock = JSON.parse(JSON.stringify(activeSheet.titleBlock));
+          sheet.titleBlock.page = `${generated.length+1}/${hasSheetMetal ? 2 : 1}`;
+          const orthogonal = (["front", "top", "right"] as const).map(o => buildDrawingView(shape,o,flatten,{bends}));
+          // Place the broadest projection first: flat stock is not always modelled on XY.
+          orthogonal.sort((a,b)=>b.box.width*b.box.height-a.box.width*a.box.height);
+          const views = flatten ? [orthogonal[0], buildDrawingView(shape,"iso",true)] : [...orthogonal,buildDrawingView(shape,"iso",false)];
+          const cells = flatten ? [{x:115,y:125,w:155,h:170},{x:310,y:125,w:135,h:150}] : [{x:115,y:70,w:155,h:65},{x:310,y:70,w:135,h:65},{x:115,y:185,w:155,h:65},{x:310,y:185,w:135,h:65}];
+          const scale = Math.min(...views.map((v,i)=>Math.min(1,cells[i].w/Math.max(v.box.width,1),cells[i].h/Math.max(v.box.height,1))));
+          sheet.scale = scale;
+          sheet.views = views.map((v,i)=>({...v,x:cells[i].x,y:cells[i].y,scale,scaleLabel:scaleToLabel(scale),label:VIEW_ORIENTATION_LABELS[v.orientation],sourceSignature:featuresSignature}));
+          sheet.dimensions = sheet.views.flatMap(v=>[...autoDimensions(v,autoDetails),...bendAngles(v,(source.bends??[]).map(b=>b.angle))]);
+          sheet.annotations = sheet.views.flatMap(v=>[...autoCircleNotes(v),...autoRadiusNotes(v)]);
+          if (!flatten && source.bends?.length) {
+            // Reserve the fourth cell for the bend schedule instead of overlaying the isometric.
+            sheet.views = sheet.views.filter(v=>v.orientation !== "iso");
+            sheet.annotations.push(...bendSchedule(source.bends.slice(0, 14)));
+          }
+          generated.push(sheet);
+        } finally { shape.delete(); }
+      }
+      if (source.bends && source.bends.length > 14) {
+        for (let start=14; start<source.bends.length; start+=30) {
+          const extra=createSheetObject(`Dobras · Continuação ${Math.floor((start-14)/30)+1}`);
+          extra.size="A3"; extra.orientation="landscape";
+          if(activeSheet) extra.titleBlock=JSON.parse(JSON.stringify(activeSheet.titleBlock));
+          extra.annotations=bendSchedule(source.bends.slice(start,start+30),20,30);
+          generated.push(extra);
+        }
+      }
+      generated.forEach((sheet,index)=>{sheet.titleBlock.page=`${index+1}/${generated.length}`;});
+      setAutoPreview(generated.map(layoutLeaders));
+    } catch (err) { setErrorMessage(err instanceof Error ? err.message : "Erro na cotagem automática."); }
+    finally { setComputing(false); }
+  }
+
   async function handleAddView(orientation: ViewOrientation) {
     if (!activeSheet) return;
     const view = await computeView(orientation, pendingFlattened);
@@ -708,7 +856,10 @@ export function DrawingSheetWorkspace({
     if (kind === "dxf") return { filename, body: new Blob([drawingSvgDxf(svgRef.current)], { type: "application/dxf" }) };
     const orientation = sheetDims.width >= sheetDims.height ? "landscape" : "portrait";
     const pdf = new jsPDF({ orientation, unit: "mm", format: [sheetDims.width, sheetDims.height] });
-    await svg2pdf(svgRef.current, pdf, { x: 0, y: 0, width: sheetDims.width, height: sheetDims.height });
+    const overlays=Array.from(svgRef.current.querySelectorAll<SVGElement>('[data-drawing-ui]'));
+    const displays=overlays.map(el=>el.style.display);
+    try{overlays.forEach(el=>{el.style.display='none';});await svg2pdf(svgRef.current, pdf, { x: 0, y: 0, width: sheetDims.width, height: sheetDims.height });}
+    finally{overlays.forEach((el,i)=>{el.style.display=displays[i];});}
     return { filename, body: pdf.output("blob") };
   }
   async function handleExportPdf() {
@@ -779,17 +930,23 @@ export function DrawingSheetWorkspace({
   // aproxima a linha de cota da peça; não dá pra arrastar "de lado" (isso
   // exigiria decidir o que acontece com os pontos medidos em si, fora de
   // escopo — só a distância da linha de cota é ajustável).
-  function handleDimensionPointerDown(e: React.PointerEvent<SVGLineElement>, dim: { id: string; x1: number; y1: number; x2: number; y2: number; offset: number }) {
-    // Diferente da vista, arrastar uma cota não conflita com o modo Cota
-    // (o clique-clique de criar cota só reage a arestas da PEÇA —
-    // findNearestLine nunca olha pras próprias cotas já colocadas), então
-    // não precisa desligar o modo antes de reposicionar uma cota existente.
+  function handleDimensionPointerDown(e: React.PointerEvent<SVGElement>, dim: DrawingDimension) {
+    if(e.button!==0)return;
     e.stopPropagation();
-    (e.target as Element).setPointerCapture(e.pointerId);
-    const len = Math.hypot(dim.x2 - dim.x1, dim.y2 - dim.y1) || 1;
-    const nx = -(dim.y2 - dim.y1) / len;
-    const ny = (dim.x2 - dim.x1) / len;
-    dragRef.current = { kind: "dimension", dimensionId: dim.id, nx, ny, startClientX: e.clientX, startClientY: e.clientY, startOffset: dim.offset };
+    if(e.ctrlKey||e.metaKey||e.shiftKey){setSelectedDimensions(ids=>ids.includes(dim.id)?ids.filter(id=>id!==dim.id):[...ids,dim.id]);suppressSheetClick.current=true;return;}
+    const ids=selectedDimensions.includes(dim.id)?selectedDimensions:[dim.id];setSelectedDimensions(ids);
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    groupOffsetsRef.current={};setGroupOffsets({});
+    dragRef.current={kind:"dimensionGroup",dimensions:activeSheet?.dimensions.filter(d=>ids.includes(d.id))??[dim],startClientX:e.clientX,startClientY:e.clientY};
+  }
+  function handleSelectionStart(e:React.PointerEvent<SVGSVGElement>){
+    if(e.button!==0||dimensionMode||annotationMode||projectionMode||sectionMode||!svgRef.current)return;
+    if((e.target as Element).closest('[data-dimension-id]'))return;
+    if(!selectionMode&&e.target!==e.currentTarget)return;
+    e.stopPropagation();e.preventDefault();e.currentTarget.setPointerCapture(e.pointerId);
+    const point=toSheetPoint(e.currentTarget,e.clientX,e.clientY);
+    dragRef.current={kind:'selection',start:point,end:point,additive:e.ctrlKey||e.metaKey||e.shiftKey,startClientX:e.clientX,startClientY:e.clientY};
+    setSelectionWindow({start:point,end:point});
   }
 
   // Anotação translada inteira (1 ponto pras 3 de clique único, os 2 pontos
@@ -800,10 +957,10 @@ export function DrawingSheetWorkspace({
     e.stopPropagation();
     (e.target as Element).setPointerCapture(e.pointerId);
     const orig: AnnotationPatch =
-      annotation.kind === "weld"
+      "x1" in annotation
         ? { x1: annotation.x1, y1: annotation.y1, x2: annotation.x2, y2: annotation.y2 }
         : { x: annotation.x, y: annotation.y };
-    dragRef.current = { kind: "annotation", annotationId: annotation.id, startClientX: e.clientX, startClientY: e.clientY, orig };
+    dragRef.current = { kind: "annotation", annotationId: annotation.id, startClientX: e.clientX, startClientY: e.clientY, orig, anchored:annotation.kind==="leader"||annotation.kind==="balloon"||annotation.kind==="weld" };
   }
 
   function handleSheetPointerMove(e: React.PointerEvent<SVGSVGElement>) {
@@ -814,6 +971,13 @@ export function DrawingSheetWorkspace({
     const scaleFactor = svg.clientWidth > 0 ? sheetDims.width / svg.clientWidth : 1;
     const dx = (e.clientX - drag.startClientX) * scaleFactor;
     const dy = (e.clientY - drag.startClientY) * scaleFactor;
+    if (drag.kind === "selection") {
+      drag.end=toSheetPoint(svg,e.clientX,e.clientY);setSelectionWindow({start:drag.start,end:drag.end});return;
+    }
+    if(drag.kind === "dimensionGroup"){
+      const offsets=Object.fromEntries(drag.dimensions.map(d=>[d.id,draggedDimensionOffset(d,dx,dy)]));
+      groupOffsetsRef.current=offsets;setGroupOffsets(offsets);return;
+    }
     if (drag.kind === "view") {
       setDragPreview({ viewId: drag.viewId, x: drag.origX + dx, y: drag.origY + dy });
     } else if (drag.kind === "dimension") {
@@ -825,9 +989,9 @@ export function DrawingSheetWorkspace({
       const patch: AnnotationPatch =
         drag.orig.x !== undefined
           ? { x: drag.orig.x + dx, y: (drag.orig.y ?? 0) + dy }
-          : {
-              x1: (drag.orig.x1 ?? 0) + dx,
-              y1: (drag.orig.y1 ?? 0) + dy,
+          : drag.anchored ? leaderDragPatch({x1:drag.orig.x1??0,y1:drag.orig.y1??0,x2:drag.orig.x2??0,y2:drag.orig.y2??0},dx,dy) : {
+              x1: (drag.orig.x1 ?? 0) + (drag.anchored?0:dx),
+              y1: (drag.orig.y1 ?? 0) + (drag.anchored?0:dy),
               x2: (drag.orig.x2 ?? 0) + dx,
               y2: (drag.orig.y2 ?? 0) + dy,
             };
@@ -837,6 +1001,16 @@ export function DrawingSheetWorkspace({
 
   function handleSheetPointerUp() {
     const drag = dragRef.current;
+    if(drag?.kind==='selection'&&activeSheet){
+      const ids=windowDimensions(activeSheet.dimensions,drag.start,drag.end);
+      setSelectedDimensions(old=>drag.additive?[...new Set([...old,...ids])]:ids);
+      setSelectionWindow(null);suppressSheetClick.current=true;
+    }
+    if(drag?.kind==='dimensionGroup'&&activeSheet){
+      const offsets=groupOffsetsRef.current;
+      useStore.setState(state=>({sheets:state.sheets.map(sheet=>sheet.id===activeSheet.id?{...sheet,dimensions:sheet.dimensions.map(d=>offsets[d.id]!==undefined?{...d,offset:offsets[d.id]}:d)}:sheet)}));
+      setGroupOffsets({});groupOffsetsRef.current={};suppressSheetClick.current=true;
+    }
     if (drag?.kind === "view" && dragPreview && activeSheet) {
       moveView(activeSheet.id, drag.viewId, dragPreview.x, dragPreview.y);
     } else if (drag?.kind === "dimension" && dimensionDragPreview && activeSheet) {
@@ -873,6 +1047,7 @@ export function DrawingSheetWorkspace({
   // referência) — os 2 modos são mutuamente exclusivos (ver
   // setDimensionModeExclusive/setAnnotationModeExclusive).
   function handleSheetClick(e: React.MouseEvent<SVGSVGElement>) {
+    if(suppressSheetClick.current){suppressSheetClick.current=false;return;}
     if (!activeSheet || !svgRef.current) return;
     const point = toSheetPoint(svgRef.current, e.clientX, e.clientY);
 
@@ -882,6 +1057,18 @@ export function DrawingSheetWorkspace({
       if (!pendingLinePick) {
         if (hit) setPendingLinePick(hit);
         return;
+      }
+
+      if(angularMode) {
+        if(!hit||sameLine(pendingLinePick,hit)) return;
+        if(hit.viewId!==pendingLinePick.viewId){setErrorMessage("Selecione duas arestas da mesma vista.");return;}
+        const view=activeSheet.views.find(v=>v.id===hit.viewId);
+        if(view?.orientation==='iso'){setErrorMessage("Use uma vista ortogonal de perfil para cotar o ângulo.");return;}
+        const line=(p:LineHit)=>({x1:p.a.x,y1:p.a.y,x2:p.b.x,y2:p.b.y});
+        const dim=angleBetweenLines(hit.viewId,line(pendingLinePick),line(hit));
+        if(!dim){setErrorMessage("As arestas são paralelas; escolha duas direções diferentes.");return;}
+        addDimension(activeSheet.id,dim);setPendingLinePick(null);setErrorMessage(null);
+        setEditingDimension({sheetId:activeSheet.id,dimension:dim});return;
       }
 
       const owningView = activeSheet.views.find((v) => v.id === pendingLinePick.viewId);
@@ -896,14 +1083,17 @@ export function DrawingSheetWorkspace({
           y1: a.y,
           x2: b.x,
           y2: b.y,
+          value: distance(a,b)/(owningView?.scale??1),
           offset: DIM_OFFSET_MM * outwardSign(a, b, viewCenter),
         });
       } else {
+        if(hit.viewId!==pendingLinePick.viewId){setErrorMessage("Selecione arestas da mesma vista para medir na escala correta.");return;}
         const seg = lineToLineSegment(pendingLinePick, hit);
         addDimension(activeSheet.id, {
           id: createId(),
           viewId: pendingLinePick.viewId,
           ...seg,
+          value: Math.hypot(seg.x2-seg.x1,seg.y2-seg.y1)/(owningView?.scale??1),
           offset: DIM_OFFSET_MM * outwardSign({ x: seg.x1, y: seg.y1 }, { x: seg.x2, y: seg.y2 }, viewCenter),
         });
       }
@@ -914,16 +1104,19 @@ export function DrawingSheetWorkspace({
     if (annotationMode) {
       const viewId = findContainingView(activeSheet, point)?.id ?? null;
 
-      if (annotationMode === "weld") {
+      if (annotationMode === "weld" || annotationMode === "centerline" || annotationMode === "centermark" || annotationMode === "leader" || annotationMode === "balloon") {
         if (!pendingWeldPoint) {
           setPendingWeldPoint(point);
           return;
         }
         const start = pendingWeldPoint;
         setPendingWeldPoint(null);
-        const text = window.prompt("Medida da solda (ex.: 5):", "5");
+        if (Math.hypot(point.x - start.x, point.y - start.y) < 0.5) { setPendingWeldPoint(start); return; }
+        const text = annotationMode === "centerline" || annotationMode === "centermark" ? "" : window.prompt(
+          annotationMode === "weld" ? "Medida da solda:" : annotationMode === "balloon" ? "Identificação do item (texto manual):" : "Nota com chamada:",
+          annotationMode === "weld" ? "5" : annotationMode === "balloon" ? "1" : "Observação");
         if (text === null) return;
-        addAnnotation(activeSheet.id, { id: createId(), viewId, kind: "weld", x1: start.x, y1: start.y, x2: point.x, y2: point.y, text });
+        addAnnotation(activeSheet.id, { id: createId(), viewId, kind: annotationMode, x1: start.x, y1: start.y, x2: point.x, y2: point.y, text });
         return;
       }
 
@@ -968,8 +1161,21 @@ export function DrawingSheetWorkspace({
   const sizeButtons: SheetSize[] = ["A4", "A3"];
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="cad-drawing-tools flex flex-wrap items-center gap-1 border-b border-primary-100 bg-primary-50 px-3 py-2 text-sm">
+    <div className="inventor-drawing flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="inventor-pane-title flex shrink-0 items-center justify-between"><span>Desenho técnico · Documentação</span><span className="font-normal text-slate-500">{activeSheet?.name??'Nenhuma folha ativa'}</span></div>
+      <div className="drawing-view-controls">
+        <button type="button" aria-expanded={toolsExpanded} onClick={()=>setToolsExpanded(v=>!v)}>{toolsExpanded?'Recolher comandos':'Ferramentas ▾'}</button>
+        <select aria-label="Folha ativa" value={activeSheet?.id??''} onChange={e=>setActiveSheet(e.target.value)}>{sheets.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select>
+        <button type="button" aria-pressed={mobileProperties} onClick={()=>setMobileProperties(v=>!v)}>Propriedades</button>
+        <button type="button" aria-pressed={selectionMode} onClick={()=>{clearOtherModes();setSelectionMode(!selectionMode);}}>Selecionar cotas por janela</button>
+        <span>{selectedDimensions.length} cota(s) selecionada(s)</span>
+        {!!selectedDimensions.length&&<button type="button" onClick={()=>setSelectedDimensions([])}>Limpar seleção</button>}
+        <button type="button" onClick={()=>{setSheetZoom(1);viewportRef.current?.scrollTo({left:0,top:0});}}>Ajustar folha</button>
+        <button type="button" aria-label="Diminuir zoom" onClick={()=>setSheetZoom(v=>Math.max(0.5,v-0.25))}>−</button>
+        <span>{Math.round(sheetZoom*100)}%</span>
+        <button type="button" aria-label="Aumentar zoom" onClick={()=>setSheetZoom(v=>Math.min(4,v+0.25))}>＋</button>
+      </div>
+      <div style={{display:toolsExpanded?undefined:'none'}} className="cad-drawing-tools flex flex-wrap items-center gap-1 border-b border-primary-100 bg-primary-50 px-3 py-2 text-sm">
         <div className="flex items-center gap-1 overflow-x-auto">
           {sheets.map((s) => (
             <button
@@ -1063,7 +1269,7 @@ export function DrawingSheetWorkspace({
               title='Adicionar Vista — escolha a orientação num seletor de vistas (igual botão direito → "Inserir Vista", só que sempre no centro da folha)'
               className={toolButtonClass(viewPickerOpen)}
             >
-              <IconAddView />
+              <IconAddView /><span>Vista base</span>
             </button>
             <button
               type="button"
@@ -1071,7 +1277,7 @@ export function DrawingSheetWorkspace({
               className={toolButtonClass(dimensionMode)}
               title="Cota — clique numa aresta pra cotar o comprimento dela, ou em 2 arestas diferentes pra cotar a distância entre as duas"
             >
-              <IconDimension />
+              <IconDimension /><span>Cota linear</span>
             </button>
             <button
               type="button"
@@ -1079,7 +1285,7 @@ export function DrawingSheetWorkspace({
               className={toolButtonClass(projectionMode)}
               title="Vista Projetada — clique numa vista já na folha e depois num ponto pra cima/baixo/esquerda/direita pra projetar uma vista alinhada a partir dela"
             >
-              <IconProjectedView />
+              <IconProjectedView /><span>Projetada</span>
             </button>
             <button
               type="button"
@@ -1087,7 +1293,7 @@ export function DrawingSheetWorkspace({
               className={toolButtonClass(sectionMode)}
               title="Seção de Corte — clique numa vista, depois 2 pontos sobre ela pra desenhar a linha de corte (corta o sólido de verdade e gera a vista de seção)"
             >
-              <IconSectionView />
+              <IconSectionView /><span>Corte</span>
             </button>
 
             <div className="mx-0.5 h-6 w-px shrink-0 bg-primary-200" />
@@ -1097,7 +1303,7 @@ export function DrawingSheetWorkspace({
               className={toolButtonClass(annotationMode === "text")}
               title={`Texto — ${ANNOTATION_META.text.promptLabel}`}
             >
-              <IconTextTool />
+              <IconTextTool /><span>Texto</span>
             </button>
             <button
               type="button"
@@ -1105,7 +1311,7 @@ export function DrawingSheetWorkspace({
               className={toolButtonClass(annotationMode === "chamfer")}
               title={`Chanfro — ${ANNOTATION_META.chamfer.promptLabel}`}
             >
-              <IconChamfer />
+              <IconChamfer /><span>Chanfro</span>
             </button>
             <button
               type="button"
@@ -1113,7 +1319,7 @@ export function DrawingSheetWorkspace({
               className={toolButtonClass(annotationMode === "thread")}
               title={`Medida de Rosca — ${ANNOTATION_META.thread.promptLabel}`}
             >
-              <IconThreadTool />
+              <IconThreadTool /><span>Rosca</span>
             </button>
             <button
               type="button"
@@ -1121,10 +1327,18 @@ export function DrawingSheetWorkspace({
               className={toolButtonClass(annotationMode === "weld")}
               title="Simbologia de Solda — clique no ponto da junta, depois no fim da linha de referência"
             >
-              <IconWeldTool />
+              <IconWeldTool /><span>Solda</span>
             </button>
 
             <div className="mx-0.5 h-6 w-px shrink-0 bg-primary-200" />
+            <div className="drawing-annotation-group" role="group" aria-label="Centros e chamadas">
+              {EXTRA_ANNOTATIONS.map(tool => <button key={tool.kind} type="button"
+                aria-pressed={annotationMode === tool.kind} title={tool.hint}
+                className={toolButtonClass(annotationMode === tool.kind)}
+                onClick={() => setAnnotationModeExclusive(annotationMode === tool.kind ? null : tool.kind)}>
+                <span aria-hidden="true" className="text-lg">{tool.icon}</span><span>{tool.label}</span>
+              </button>)}
+            </div>
             <button type="button" className={toolButtonClass(false)} onClick={() => void handleDrawingFile("save")} title="Salvar todas as folhas editáveis em .eksdesenho">Salvar desenho</button>
 
             <button type="button" className={toolButtonClass(false)} onClick={() => void handleDrawingFile("dxf")} title="DXF em escala de folha; curvas aproximadas por segmentos, sem imagens">Exportar DXF</button>
@@ -1135,7 +1349,7 @@ export function DrawingSheetWorkspace({
               title="Salvar Modelo de Folha — tamanho + bloco de título (com logo/tolerâncias) reutilizável em outros projetos"
               className={toolButtonClass(false)}
             >
-              <IconSaveDoc />
+              <IconSaveDoc /><span>Salvar modelo</span>
             </button>
             <button
               type="button"
@@ -1143,7 +1357,7 @@ export function DrawingSheetWorkspace({
               title="Carregar Modelo de Folha — aplica um modelo salvo antes na folha atual"
               className={toolButtonClass(false)}
             >
-              <IconLoadDoc />
+              <IconLoadDoc /><span>Abrir modelo</span>
             </button>
             <button
               type="button"
@@ -1151,7 +1365,7 @@ export function DrawingSheetWorkspace({
               title="Exportar PDF — folha inteira (vistas, cotas, anotações e bloco de título), vetorial"
               className={toolButtonClass(false)}
             >
-              <IconExportPdf />
+              <IconExportPdf /><span>PDF</span>
             </button>
 
             <button
@@ -1167,22 +1381,88 @@ export function DrawingSheetWorkspace({
         )}
       </div>
 
+      {activeSheet && <div className="drawing-command-guide" role="status">
+        <span>{annotationMode ? (EXTRA_ANNOTATIONS.find(t => t.kind === annotationMode)?.hint ?? "Clique na folha para inserir a anotação.") : angularMode ? "Cota angular: selecione duas arestas da mesma vista de perfil. O ângulo será medido na projeção." : dimensionMode ? "Selecione uma aresta reta; clique novamente para cotar seu comprimento ou escolha outra aresta." : sectionMode ? "Selecione a vista e dois pontos para definir o corte." : projectionMode ? "Selecione a vista base e clique na direção da projeção." : "Arraste no espaço vazio para selecionar cotas. Ctrl/Shift adiciona ou remove. Arraste uma cota selecionada para mover o conjunto. Duplo clique edita cotas e anotações. Botão direito abre mais opções."}
+          {pendingWeldPoint && " Primeiro ponto definido. Clique no segundo ponto."}</span>
+        {(annotationMode || dimensionMode || sectionMode || projectionMode) && <button type="button" onClick={clearOtherModes}>Cancelar · Esc</button>}
+      </div>}
+      <div className="drawing-command-guide">
+        <button type="button" disabled={computing} onClick={() => void handleAutoDrawing()}>{computing ? "Gerando vistas…" : "Gerar cotas automaticamente"}</button>
+        <button type="button" disabled={!activeSheet || computing} onClick={()=>void refreshAutomaticDimensions()}>Atualizar e reorganizar cotas</button>
+        <button type="button" aria-pressed={angularMode} onClick={()=>{clearOtherModes();setDimensionMode(true);setAngularMode(true);}}>Cota angular · 2 arestas</button>
+        <select aria-label="Editar cota existente" value="" onChange={e=>{const dim=activeSheet?.dimensions.find(d=>d.id===e.target.value);if(dim&&activeSheet)setEditingDimension({sheetId:activeSheet.id,dimension:{...dim}});}}>
+          <option value="">Editar cota…</option>{activeSheet?.dimensions.map((d,i)=><option key={d.id} value={d.id}>{i+1}. {d.angular?'Ângulo':'Linear'} · {dimensionText(d,Math.hypot(d.x2-d.x1,d.y2-d.y1))}</option>)}
+        </select>
+        <label><input type="checkbox" checked={autoDetails} onChange={e=>setAutoDetails(e.target.checked)} /> Detalhamento seletivo de contorno e abas</label>
+        <span>{hasSheetMetal ? "Duas folhas: planificada e dobrada" : "Nova folha com vistas ortogonais e isométrica"}</span>
+      </div>
+      {editingDimension && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-label="Editar cota">
+        <form onKeyDown={e=>{if(e.key==="Escape"){e.stopPropagation();setEditingDimension(null);}}} className="max-h-[90vh] overflow-y-auto w-full max-w-lg rounded border border-slate-400 bg-slate-50 shadow-xl" onSubmit={e=>{e.preventDefault();updateDimension(editingDimension.sheetId,editingDimension.dimension.id,editingDimension.dimension);setEditingDimension(null);}}>
+          <header className="border-b bg-slate-200 px-4 py-3 font-semibold">Editar cota · {editingDimension.dimension.angular?'Angular':'Linear'}</header>
+          <div className="grid grid-cols-2 gap-3 p-4 text-sm">
+            <p className="col-span-2 rounded border bg-white p-3">Valor medido: <strong>{dimensionText({...editingDimension.dimension,prefix:'',suffix:'',toleranceUpper:undefined,toleranceLower:undefined},Math.hypot(editingDimension.dimension.x2-editingDimension.dimension.x1,editingDimension.dimension.y2-editingDimension.dimension.y1))}</strong></p>
+            {(['prefix','suffix'] as const).map(key=><label key={key}>{key==='prefix'?'Prefixo':'Sufixo'}<input className="mt-1 w-full rounded border bg-white p-2" autoFocus={key==='prefix'} maxLength={30} value={editingDimension.dimension[key]??''} onChange={e=>setEditingDimension({...editingDimension,dimension:{...editingDimension.dimension,[key]:e.target.value}})}/></label>)}
+            <label>Casas decimais<select className="mt-1 w-full rounded border bg-white p-2" value={editingDimension.dimension.precision??2} onChange={e=>setEditingDimension({...editingDimension,dimension:{...editingDimension.dimension,precision:Number(e.target.value)}})}>{[0,1,2,3,4].map(n=><option key={n}>{n}</option>)}</select></label>
+            <label>{editingDimension.dimension.angular?'Raio do arco (mm)':'Afastamento (mm)'}<input required type="number" step="0.5" min={editingDimension.dimension.angular?6:-100} max={100} className="mt-1 w-full rounded border bg-white p-2" value={editingDimension.dimension.offset} onChange={e=>setEditingDimension({...editingDimension,dimension:{...editingDimension.dimension,offset:Number(e.target.value)}})}/></label>
+            {!editingDimension.dimension.angular && <fieldset className="col-span-2 rounded border bg-white p-3">
+              <legend>Ajuste ISO 286 · furo/eixo</legend>
+              <div className="flex gap-2"><input aria-label="Classe de ajuste" list="fit-classes" className="w-24 rounded border p-2" value={fitInput} onChange={e=>{setFitInput(e.target.value);setFitError(null);}}/><datalist id="fit-classes">{['H','h','JS','js'].flatMap(f=>Array.from({length:18},(_,i)=><option key={f+i} value={f+(i+1)}/>))}</datalist>
+                <button type="button" className="rounded border px-3" onClick={()=>{try{
+                  const d=editingDimension.dimension;if(d.value===undefined)throw new Error("Cota antiga sem medida real. Gere novamente antes de aplicar ajuste ISO.");
+                  const fit=isoFit(d.value,fitInput.trim());setEditingDimension({...editingDimension,dimension:{...d,fitClass:fit.code,toleranceUpper:fit.upper,toleranceLower:-fit.lower,tolerancePrecision:6}});setFitError(null);
+                }catch(error){setFitError(error instanceof Error?error.message:'Classe inválida');}}}>Calcular</button>
+                <button type="button" onClick={()=>{setEditingDimension({...editingDimension,dimension:{...editingDimension.dimension,fitClass:undefined}});setFitError(null);}}>Manual</button>
+              </div>
+              <p className="mt-2 text-xs">H/JS: furo · h/js: eixo. Tabela disponível até 500 mm. Outras classes não são calculadas por aproximação.</p>
+              {fitError&&<p role="alert" className="text-xs text-red-700">{fitError}</p>}
+              {editingDimension.dimension.fitClass&&<p className="mt-2 text-xs">Limites: {((editingDimension.dimension.value??0)-(editingDimension.dimension.toleranceLower??0)).toFixed(6)} a {((editingDimension.dimension.value??0)+(editingDimension.dimension.toleranceUpper??0)).toFixed(6)} mm</p>}
+            </fieldset>}
+            <label>Decimais da tolerância<select className="w-full rounded border p-2" value={editingDimension.dimension.tolerancePrecision??4} onChange={e=>setEditingDimension({...editingDimension,dimension:{...editingDimension.dimension,tolerancePrecision:Number(e.target.value)}})}>{[0,1,2,3,4,5,6].map(n=><option key={n}>{n}</option>)}</select></label>
+            {(['toleranceUpper','toleranceLower'] as const).map(key=><label key={key}>Desvio {key==='toleranceUpper'?'superior':'inferior'} (assinado)<input type="number" step="any" disabled={!!editingDimension.dimension.fitClass} className="mt-1 w-full rounded border bg-white p-2 disabled:bg-slate-100" value={editingDimension.dimension[key]===undefined?'':(key==='toleranceLower'?-1:1)*editingDimension.dimension[key]!} onChange={e=>setEditingDimension({...editingDimension,dimension:{...editingDimension.dimension,[key]:e.target.value===''?undefined:(key==='toleranceLower'?-1:1)*Number(e.target.value)}})}/></label>)}
+            <p className="col-span-2 text-xs text-slate-600">O valor geométrico é preservado. A cota angular mede a abertura entre as laterais no perfil, não o giro da operação de dobra.</p>
+          </div>
+          <footer className="flex justify-end gap-2 border-t p-3"><button type="button" className="mr-auto text-red-700" onClick={()=>{removeDimension(editingDimension.sheetId,editingDimension.dimension.id);setEditingDimension(null);}}>Excluir</button><button type="button" className="rounded border px-3 py-1" onClick={()=>setEditingDimension(null)}>Cancelar</button><button className="rounded bg-blue-700 px-4 py-1 text-white">Aplicar</button></footer>
+        </form>
+      </div>}
+      {autoPreview && <div className="fixed inset-0 z-50 overflow-auto bg-black/50 p-4" role="dialog" aria-modal="true" aria-label="Prévia da cotagem automática">
+        <div className="mx-auto max-w-5xl rounded bg-white p-4 text-slate-800">
+          <h2 className="text-lg font-semibold">Revisar cotagem automática</h2>
+          {!!source.bends?.length && autoPreview.some(s=>s.views.some(v=>!v.flattened)) && <div className="my-2 rounded border bg-slate-50 p-3 text-sm">
+            <strong>Conferência das dobras do modelo</strong>
+            {source.bends.map((bend,index)=>{
+              const found=autoPreview.some(s=>s.dimensions.some(d=>d.bendId===bend.id && !!bend.id));
+              return <p key={bend.id??index} className={found?'text-green-800':'text-amber-800'}>{found?'✓':'⚠'} {bend.label}: {found?'cota angular vinculada':'sem cota angular — precisa de vista de perfil adequada ou cotagem manual'}</p>;
+            })}
+          </div>}
+          <p className="my-2 text-sm">Cotas gerais e trechos principais do contorno visível em mm. Detalhes pequenos ou sem espaço são deixados para cotagem manual. Posições de furos e tolerâncias precisam de revisão e complementação. Dobras nativas incluem tabela com comprimento de aba e ângulo da operação; ângulos não são inferidos de uma projeção. As cotas são editáveis e representam a geometria no momento da geração.</p>
+          {autoPreview.map(sheet=><div key={sheet.id}><h3>{sheet.name} · {sheet.dimensions.length} cotas</h3>
+            <svg viewBox="0 0 420 297" className="my-2 w-full border bg-white">
+              <rect x="8" y="8" width="404" height="281" fill="none" stroke="#aaa" strokeWidth="0.3" />
+              {sheet.views.map(v=><g key={v.id} transform={`translate(${v.x} ${v.y}) scale(${v.scale}) translate(${-v.box.minX-v.box.width/2} ${-v.box.minY-v.box.height/2})`} fill="none" stroke="#263238" strokeWidth={0.3/v.scale}>{v.visiblePaths.map((d,i)=><path key={i} d={d}/>)}</g>)}
+              {sheet.annotations.map(annotation=><AnnotationSvg key={annotation.id} annotation={annotation} effectivePatch={null} onDragStart={()=>{}} onRemove={()=>{}} />)}
+              {sheet.dimensions.map(dim=><DimensionSvg key={dim.id} dim={dim} effectiveOffset={null} onDragStart={()=>{}} onRemove={()=>{}} />)}
+            </svg></div>)}
+          <div className="sticky bottom-0 flex gap-3 border-t bg-white py-3">
+            <button className="rounded bg-blue-700 px-4 py-2 text-white" onClick={()=>{if(replaceAutoSheet) useStore.setState(state=>({sheets:state.sheets.map(sheet=>autoPreview.find(p=>p.id===sheet.id)??sheet)}));else autoPreview.forEach(addSheet);setAutoPreview(null);}}>{replaceAutoSheet?"Aplicar à folha atual":`Inserir ${autoPreview.length} folha(s)`}</button>
+            <button onClick={()=>setAutoPreview(null)}>Descartar</button>
+          </div>
+        </div>
+      </div>}
       {errorMessage && (
         <p className="border-b border-error/20 bg-error/10 px-3 py-2 text-sm text-error">{errorMessage}</p>
       )}
 
-      <button type="button" className="shrink-0 border-b bg-white px-3 py-2 text-sm text-primary-700 md:hidden"
-        disabled={!activeSheet} aria-expanded={mobileProperties} onClick={() => setMobileProperties(value => !value)}>
-        {mobileProperties ? "Voltar à folha" : "Propriedades da folha"}
-      </button>
       <div className="flex min-h-0 flex-1">
-        <div className={`min-h-0 min-w-0 flex-1 overflow-auto bg-primary-100/40 p-2 md:p-6 md:block ${mobileProperties && activeSheet ? "hidden" : ""}`}>
+        <nav id="drawing-sheet-browser" className="inventor-sheet-browser" aria-label="Navegador de folhas"><div className="inventor-pane-title">Desenho · Folhas</div>{sheets.map(sheet=><div key={sheet.id}><button type="button" aria-current={sheet.id===activeSheet?.id?'page':undefined} onClick={()=>setActiveSheet(sheet.id)}><span aria-hidden="true">▱</span>{sheet.name}</button><small>{sheet.views.length} vista(s)</small></div>)}<button type="button" onClick={()=>addSheet(createSheetObject(`Folha ${sheets.length+1}`))}>＋ Nova folha</button></nav>
+        <div ref={viewportRef} title="Roda do mouse: aproximar ou afastar a folha" className="inventor-drawing-canvas min-h-0 min-w-0 flex-1 overflow-auto bg-primary-100/40 p-2">
           {activeSheet ? (
             <svg
               ref={svgRef}
               viewBox={`0 0 ${sheetDims.width} ${sheetDims.height}`}
               className="mx-auto block touch-none bg-white shadow-lg"
-              style={{ width: "100%", maxWidth: sheetDims.width * 3.5 }}
+              style={{ width: Math.max(100,Math.min(viewportSize.width-16,(viewportSize.height-16)*sheetDims.width/sheetDims.height))*sheetZoom, maxWidth:"none" }}
+              onPointerDownCapture={handleSelectionStart}
+              onPointerCancel={()=>{dragRef.current=null;setSelectionWindow(null);setGroupOffsets({});groupOffsetsRef.current={};}}
               onPointerMove={handleSheetPointerMove}
               onPointerUp={handleSheetPointerUp}
               onClick={handleSheetClick}
@@ -1201,7 +1481,7 @@ export function DrawingSheetWorkspace({
                 </pattern>
               </defs>
 
-              <rect x={0.5} y={0.5} width={sheetDims.width - 1} height={sheetDims.height - 1} fill="white" stroke="#333" strokeWidth={0.5} />
+              <rect pointerEvents="none" x={0.5} y={0.5} width={sheetDims.width - 1} height={sheetDims.height - 1} fill="white" stroke="#333" strokeWidth={0.5} />
               {/* Moldura da área de desenho, recuada da borda do papel (ao
                   estilo ISO 5457/ABNT NBR 10068) — mesmo recuo já usado pra
                   posicionar vistas/bloco de título (SHEET_MARGIN_MM), só que
@@ -1280,12 +1560,17 @@ export function DrawingSheetWorkspace({
                 <DimensionSvg
                   key={dim.id}
                   dim={dim}
-                  effectiveOffset={dimensionDragPreview?.dimensionId === dim.id ? dimensionDragPreview.offset : null}
+                  effectiveOffset={groupOffsets[dim.id]??(dimensionDragPreview?.dimensionId === dim.id ? dimensionDragPreview.offset : null)}
                   onDragStart={handleDimensionPointerDown}
                   onRemove={() => removeDimension(activeSheet.id, dim.id)}
+                  onEdit={()=>setEditingDimension({sheetId:activeSheet.id,dimension:{...dim}})}
                 />
               ))}
 
+              <g data-drawing-ui="selection" pointerEvents="none">
+                {activeSheet.dimensions.filter(d=>selectedDimensions.includes(d.id)).map(d=>{const b=dimensionBounds({...d,offset:groupOffsets[d.id]??d.offset});return <rect key={d.id} x={b.x-1} y={b.y-1} width={b.right-b.x+2} height={b.bottom-b.y+2} fill="#2386d7" fillOpacity={0.08} stroke="#2386d7" strokeWidth={0.35}/>;})}
+                {selectionWindow&&<rect x={Math.min(selectionWindow.start.x,selectionWindow.end.x)} y={Math.min(selectionWindow.start.y,selectionWindow.end.y)} width={Math.abs(selectionWindow.end.x-selectionWindow.start.x)} height={Math.abs(selectionWindow.end.y-selectionWindow.start.y)} fill={selectionWindow.end.x>=selectionWindow.start.x?'#2386d7':'#229455'} fillOpacity={0.12} stroke="#2386d7" strokeWidth={0.4} strokeDasharray={selectionWindow.end.x<selectionWindow.start.x?'2 1':undefined}/>}
+              </g>
               {pendingLinePick && (
                 <line
                   x1={pendingLinePick.a.x}
@@ -1299,13 +1584,18 @@ export function DrawingSheetWorkspace({
               )}
 
               {activeSheet.annotations.map((annotation) => (
+                <g key={annotation.id} onDoubleClick={e => {
+                  e.stopPropagation();
+                  if (annotation.kind === "centerline" || annotation.kind === "centermark") return;
+                  const text = window.prompt("Editar anotação:", annotation.text);
+                  if (text !== null) updateAnnotation(activeSheet.id, annotation.id, {text});
+                }}>
                 <AnnotationSvg
-                  key={annotation.id}
                   annotation={annotation}
                   effectivePatch={annotationDragPreview?.annotationId === annotation.id ? annotationDragPreview.patch : null}
                   onDragStart={handleAnnotationPointerDown}
                   onRemove={() => removeAnnotation(activeSheet.id, annotation.id)}
-                />
+                /></g>
               ))}
 
               {pendingWeldPoint && <circle cx={pendingWeldPoint.x} cy={pendingWeldPoint.y} r={1} fill="#e53935" />}
@@ -1349,7 +1639,8 @@ export function DrawingSheetWorkspace({
         </div>
 
         {activeSheet && (
-          <div className={`w-full md:w-72 shrink-0 overflow-y-auto border-l border-primary-100 bg-white p-3 text-sm md:block ${mobileProperties ? "" : "hidden"}`}>
+          <div className={`inventor-drawing-properties w-64 max-w-[45vw] shrink-0 overflow-y-auto border-l border-primary-100 bg-white p-3 text-sm ${mobileProperties ? "" : "hidden"}`}>
+            <h2 className="inventor-pane-title mb-3">Propriedades da folha</h2>
             {source.bomParts ? (
               <div className="mb-3 flex gap-1">
                 <button
@@ -1630,8 +1921,8 @@ function CutLineIndicator({ a, b, letter }: { a: Point; b: Point; letter: string
 // a distância inicial até a peça, mora lá em cima junto dos outros
 // tamanhos da folha — só usada ao CRIAR a cota; depois disso o offset vira
 // um campo comum, arrastável).
-const DIM_GAP_MM = 1.2;
-const DIM_OVERSHOOT_MM = 2;
+const DIM_GAP_MM = 0.8;
+const DIM_OVERSHOOT_MM = 1.5;
 const ARROW_LENGTH_MM = 2.2;
 const ARROW_HALF_WIDTH_MM = 0.8;
 
@@ -1647,17 +1938,33 @@ function arrowheadPath(tip: Point, dirX: number, dirY: number): string {
   return `M ${tip.x} ${tip.y} L ${p1x} ${p1y} L ${p2x} ${p2y} Z`;
 }
 
-function DimensionSvg({
+export function DimensionSvg({
   dim,
   effectiveOffset,
   onDragStart,
   onRemove,
+  onEdit,
 }: {
-  dim: { id: string; x1: number; y1: number; x2: number; y2: number; offset: number };
+  onEdit?:()=>void;
+  dim: DrawingDimension;
   effectiveOffset: number | null;
-  onDragStart: (e: React.PointerEvent<SVGLineElement>, dim: { id: string; x1: number; y1: number; x2: number; y2: number; offset: number }) => void;
+  onDragStart: (e: React.PointerEvent<SVGElement>, dim: DrawingDimension) => void;
   onRemove: () => void;
 }) {
+  if(dim.angular) {
+    const {start,delta}=dim.angular,r=Math.max(6,Math.abs(effectiveOffset??dim.offset));
+    const point=(angle:number,radius=r)=>({x:dim.x1+Math.cos(angle)*radius,y:dim.y1+Math.sin(angle)*radius});
+    const a=point(start),b=point(start+delta),text=point(start+delta/2,r+4);
+    const path=`M ${a.x} ${a.y} A ${r} ${r} 0 0 ${delta>0?1:0} ${b.x} ${b.y}`;
+    return <g data-dimension-id={dim.id} onPointerDown={e=>onDragStart(e,dim)} onDoubleClick={e=>{e.stopPropagation();onEdit?.();}}>
+      {[start,start+delta].map(angle=>{const p=point(angle,r+2);return <line key={angle} x1={dim.x1} y1={dim.y1} x2={p.x} y2={p.y} stroke="#455a64" strokeWidth={0.25}/>;})}
+      <path d={path} fill="none" stroke="#455a64" strokeWidth={0.3}/>
+      <path d={arrowheadPath(a,Math.sin(start)*Math.sign(delta),-Math.cos(start)*Math.sign(delta))} fill="#455a64"/>
+      <path d={arrowheadPath(b,-Math.sin(start+delta)*Math.sign(delta),Math.cos(start+delta)*Math.sign(delta))} fill="#455a64"/>
+      <path d={path} fill="none" stroke="transparent" strokeWidth={5} className="cursor-pointer"/>
+      <text x={text.x} y={text.y} textAnchor="middle" fontSize={3.5} fill="#263238" className="cursor-pointer">{dimensionText(dim)}</text>
+    </g>;
+  }
   const a = { x: dim.x1, y: dim.y1 };
   const b = { x: dim.x2, y: dim.y2 };
   const length = distance(a, b);
@@ -1678,13 +1985,13 @@ function DimensionSvg({
   const dimB = { x: b.x + nx * offset, y: b.y + ny * offset };
   const mid = { x: (dimA.x + dimB.x) / 2, y: (dimA.y + dimB.y) / 2 };
 
-  const extAStart = { x: a.x + nx * gap, y: a.y + ny * gap };
+  const extAStart = { x: (dim.reference1?.x ?? a.x) + nx * gap, y: (dim.reference1?.y ?? a.y) + ny * gap };
   const extAEnd = { x: a.x + nx * (offset + overshoot), y: a.y + ny * (offset + overshoot) };
-  const extBStart = { x: b.x + nx * gap, y: b.y + ny * gap };
+  const extBStart = { x: (dim.reference2?.x ?? b.x) + nx * gap, y: (dim.reference2?.y ?? b.y) + ny * gap };
   const extBEnd = { x: b.x + nx * (offset + overshoot), y: b.y + ny * (offset + overshoot) };
 
   return (
-    <g className="group">
+    <g data-dimension-id={dim.id} className="group" onPointerDown={e=>onDragStart(e,dim)} onDoubleClick={e=>{e.stopPropagation();onEdit?.();}}>
       <line x1={extAStart.x} y1={extAStart.y} x2={extAEnd.x} y2={extAEnd.y} stroke="#455a64" strokeWidth={0.3} />
       <line x1={extBStart.x} y1={extBStart.y} x2={extBEnd.x} y2={extBEnd.y} stroke="#455a64" strokeWidth={0.3} />
       <line x1={dimA.x} y1={dimA.y} x2={dimB.x} y2={dimB.y} stroke="#455a64" strokeWidth={0.3} />
@@ -1706,9 +2013,9 @@ function DimensionSvg({
         onPointerDown={(e) => onDragStart(e, dim)}
       />
 
-      <rect x={mid.x - 8} y={mid.y - 3.5} width={16} height={5.5} fill="white" fillOpacity={0.85} pointerEvents="none" />
+      <rect x={mid.x - Math.max(16,dimensionText(dim,length).length*2)/2} y={mid.y - 3.5} width={Math.max(16,dimensionText(dim,length).length*2)} height={5.5} fill="white" fillOpacity={0.85} pointerEvents="none" />
       <text x={mid.x} y={mid.y} textAnchor="middle" dominantBaseline="middle" fontSize={4} fill="#263238" pointerEvents="none">
-        {length.toFixed(1)}
+        {dimensionText(dim,length)}
       </text>
 
       <text
@@ -1754,6 +2061,28 @@ function AnnotationSvg({
   onDragStart: (e: React.PointerEvent<SVGElement>, annotation: DrawingAnnotation) => void;
   onRemove: () => void;
 }) {
+  if ("x1" in annotation && annotation.kind !== "weld") {
+    const x1 = effectivePatch?.x1 ?? annotation.x1, y1 = effectivePatch?.y1 ?? annotation.y1;
+    const x2 = effectivePatch?.x2 ?? annotation.x2, y2 = effectivePatch?.y2 ?? annotation.y2;
+    const length = Math.hypot(x2-x1, y2-y1) || 1;
+    const radius = Math.max(4, annotation.text.length * 1.1);
+    return <g className="group" stroke="#0d1b2a" strokeWidth={0.25} fill="none"
+      onPointerDown={e => onDragStart(e, annotation)} onClick={e => e.stopPropagation()}>
+      {annotation.kind === "centermark" ? <>
+        <line x1={x1-length} y1={y1} x2={x1+length} y2={y1} strokeDasharray="5 1 1 1" />
+        <line x1={x1} y1={y1-length} x2={x1} y2={y1+length} strokeDasharray="5 1 1 1" />
+        <circle cx={x1} cy={y1} r={length} stroke="transparent" strokeWidth={3} />
+      </> : <>
+        <line x1={x1} y1={y1} x2={x2} y2={y2} strokeDasharray={annotation.kind === "centerline" ? "7 1.5 1 1.5" : undefined} />
+        <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="transparent" strokeWidth={3} className="cursor-move" />
+        {annotation.kind !== "centerline" && <path d={arrowheadPath({x:x1,y:y1}, (x1-x2)/length, (y1-y2)/length)} fill="#0d1b2a" />}
+        {annotation.kind === "balloon" && <circle cx={x2} cy={y2} r={radius} fill="white" />}
+        {(annotation.kind === "balloon" || annotation.kind === "leader") && <text x={x2 + (annotation.kind === "leader" ? 2 : 0)} y={y2 + (annotation.kind === "balloon" ? 1 : -1)} textAnchor={annotation.kind === "balloon" ? "middle" : "start"} fontSize={3.2} stroke="none" fill="#0d1b2a">{annotation.text}</text>}
+      </>}
+      <text x={x2+radius+2} y={y2} fontSize={5} stroke="none" fill="#e53935" className="cursor-pointer opacity-0 group-hover:opacity-100"
+        onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();onRemove();}}>×</text>
+    </g>;
+  }
   if (annotation.kind === "weld") {
     const x1 = effectivePatch?.x1 ?? annotation.x1;
     const y1 = effectivePatch?.y1 ?? annotation.y1;
@@ -1805,6 +2134,7 @@ function AnnotationSvg({
     );
   }
 
+  if (!("x" in annotation)) return null;
   const x = effectivePatch?.x ?? annotation.x;
   const y = effectivePatch?.y ?? annotation.y;
   const meta = ANNOTATION_META[annotation.kind];
@@ -2646,3 +2976,10 @@ function TitleBlockForm({
     </div>
   );
 }
+
+const EXTRA_ANNOTATIONS = [
+  {kind: "centermark", label: "Marca de centro", icon: "⊕", hint: "Marca de centro manual: clique no centro e depois defina a extensão dos eixos."},
+  {kind: "centerline", label: "Linha de centro", icon: "┄", hint: "Linha de centro manual: clique no início e no fim do eixo."},
+  {kind: "leader", label: "Nota com chamada", icon: "↗", hint: "Clique no ponto de referência e depois na posição do texto."},
+  {kind: "balloon", label: "Balão", icon: "①", hint: "Clique no componente e depois na posição do balão. Identificação manual, sem vínculo automático com a lista de peças."},
+] as const;

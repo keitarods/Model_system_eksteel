@@ -1,0 +1,20 @@
+.viewport-layout-controls{display:flex;flex-shrink:0;gap:4px;font-size:11px}
+.viewport-layout-controls button{white-space:nowrap;border:1px solid #bdc8d2;border-radius:3px;background:#fff;padding:5px 7px;color:#344b5e}
+.viewport-layout-controls button[aria-pressed=true]{background:#dceaf7;border-color:#8aafca}
+.cad-workspace[data-cad-compact=true] .inventor-command-group .cad-command{height:42px;min-height:42px;width:90px;min-width:70px;flex-direction:row;gap:4px;padding:4px}
+.cad-workspace[data-cad-compact=true] .inventor-command-group .cad-command>svg{width:21px;height:21px;flex-shrink:0}
+.cad-workspace[data-cad-compact=true] .inventor-command-group .cad-command-label{font-size:10px;text-align:left}
+.cad-workspace[data-cad-compact=true] .inventor-command-group{padding:2px 6px;gap:1px}
+.cad-workspace[data-cad-compact=true] .fea-ribbon-command{min-height:42px;flex-direction:row;width:94px;padding:4px;gap:4px;font-size:10px}
+.cad-workspace[data-cad-compact=true] .fea-ribbon-command svg{width:21px;height:21px;flex-shrink:0}
+.cad-workspace[data-cad-compact=true] .fea-ribbon-tabs button,.cad-workspace[data-cad-compact=true] .inventor-assembly-ribbon [role=tab]{padding:4px 12px}
+.cad-workspace[data-cad-focus=true] [data-cad-panel],.cad-workspace[data-cad-focus=true] [data-cad-divider],.cad-workspace[data-cad-focus=true] .cad-model-tools,.cad-workspace[data-cad-focus=true] .inventor-assembly-ribbon,.cad-workspace[data-cad-focus=true] .fea-ribbon,.cad-workspace[data-cad-focus=true] .fea-study-browser,.cad-workspace[data-cad-focus=true] .fea-properties{display:none!important}
+@media(min-width:768px){.cad-workspace[data-cad-compact=true] .fea-properties{width:270px}.cad-workspace[data-cad-compact=true] .fea-study-browser{width:185px}}
+@media(max-width:767px){.viewport-layout-controls button{min-height:32px}}
+
+.cad-workspace[data-cad-focus=true] [data-cad-viewport]{display:block!important;min-width:0}
+
+.cad-toolbar-resizer{height:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;cursor:row-resize;touch-action:none;background:#e1e7ee;border-bottom:1px solid #bdc8d2;user-select:none}
+.cad-toolbar-resizer span{width:42px;height:2px;border-radius:2px;background:#8295a7}
+.cad-toolbar-resizer:hover,.cad-toolbar-resizer:focus-visible{background:#c6dced;outline:2px solid #287cb9;outline-offset:-2px}
+@media(pointer:coarse){.cad-toolbar-resizer{height:14px}}

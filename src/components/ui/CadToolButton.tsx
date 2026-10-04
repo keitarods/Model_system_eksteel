@@ -95,8 +95,9 @@ export function CadToolButton({ icon: Icon, label, title, description, shortcut,
     tabIndex={disabled ? 0 : undefined} aria-label={disabled ? `${label} — indisponível` : undefined} aria-describedby={disabled && position ? id : undefined}>
     <button type="button" aria-label={label} aria-describedby={position ? id : undefined} aria-pressed={active} disabled={disabled}
       onClick={() => { close(); onClick(); }}
-      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-40 ${active ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"}`}>
+      className={`cad-command flex h-9 w-9 shrink-0 items-center justify-center rounded-md transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-40 ${active ? "bg-primary text-primary-foreground" : "bg-white text-primary-700 hover:bg-primary-100"}`}>
       {Icon ? <Icon className="h-5 w-5 shrink-0" /> : <span className="text-xs font-semibold">{label.slice(0, 2)}</span>}
+      <span className="cad-command-label hidden" aria-hidden="true">{label}</span>
     </button>
     {position && createPortal(<div id={id} role="tooltip" style={position} className="pointer-events-none fixed z-[200] w-72 max-w-[calc(100vw-16px)] max-h-[calc(100vh-16px)] overflow-hidden rounded-lg border border-primary-200 bg-white p-3 text-primary-900 shadow-xl">
       <div className="flex items-center justify-between gap-2 text-sm font-semibold"><span>{label}</span>{shortcut && <kbd className="rounded border px-1.5 text-xs">{shortcut}</kbd>}</div>

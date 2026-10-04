@@ -162,7 +162,24 @@ function createDrawingStore() {
     set((s) => ({
       sheets: s.sheets.map((sh) =>
         sh.id === sheetId
-          ? { ...sh, views: sh.views.map((v) => (v.id === viewId ? { ...v, ...patch } : v)) }
+          ? { ...sh, views: sh.views.map((v) => (v.id === viewId ? { ...v, ...patch } : v)),
+              annotations: sh.annotations.map(a=>{
+                if(a.viewId!==viewId||!('x1' in a)||!['leader','balloon','weld'].includes(a.kind))return a;
+                const old=sh.views.find(v=>v.id===viewId);if(!old)return a;
+                const ratio=(patch.scale??old.scale)/old.scale;
+                return {...a,x1:(patch.x??old.x)+(a.x1-old.x)*ratio,y1:(patch.y??old.y)+(a.y1-old.y)*ratio};
+              }),
+              dimensions: sh.dimensions.flatMap(d => {
+                if (!d.automatic || d.viewId !== viewId) return [d];
+                const old = sh.views.find(v=>v.id===viewId);
+                if (!old) return [d];
+                // Updated projection invalidates snapshot measurements; regenerate rather than show stale values.
+                if (patch.box || patch.lineEdges) return [];
+                const ratio = (patch.scale ?? old.scale) / old.scale;
+                const x=patch.x ?? old.x, y=patch.y ?? old.y;
+                const reference=(p:{x:number;y:number}|undefined)=>p?{x:x+(p.x-old.x)*ratio,y:y+(p.y-old.y)*ratio}:undefined;
+                return [{...d,reference1:reference(d.reference1),reference2:reference(d.reference2),x1:x+(d.x1-old.x)*ratio,y1:y+(d.y1-old.y)*ratio,x2:x+(d.x2-old.x)*ratio,y2:y+(d.y2-old.y)*ratio}];
+              }) }
           : sh
       ),
     })),

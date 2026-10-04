@@ -1,3 +1,4 @@
+import {parsePartSimulations,type PartSimulations} from '@/lib/simulation/partStudies';
 import type { Feature } from "@/lib/features/types";
 import type { DrawingSheet } from "@/lib/drawing/types";
 import { normalizePartProperties, type PartProperties } from "@/lib/project/partProperties";
@@ -28,18 +29,21 @@ type NativeProjectFile = {
   // descrição/material/densidade de cada peça vinculada — ver
   // src/lib/drawing/bom.ts.
   properties?: PartProperties;
+  simulations?:PartSimulations;
 };
 
 export type ParsedProject = {
   features: Feature[];
   drawingSheets: DrawingSheet[];
   properties: PartProperties;
+  simulations?:PartSimulations;
 };
 
 export function serializeProject(
   features: Feature[],
   drawingSheets: DrawingSheet[] = [],
-  properties?: PartProperties
+  properties?: PartProperties,
+  simulations?:PartSimulations
 ): string {
   const payload: NativeProjectFile = {
     format: NATIVE_FORMAT_ID,
@@ -48,6 +52,7 @@ export function serializeProject(
     features,
     drawingSheets,
     properties: normalizePartProperties(properties),
+    ...(simulations?{simulations}:{}),
   };
   return JSON.stringify(payload, null, 2);
 }
@@ -74,6 +79,7 @@ export function parseProject(json: string): ParsedProject {
   const file = data as NativeProjectFile;
   return {
     features: file.features,
+    ...(file.simulations!==undefined?{simulations:parsePartSimulations(file.simulations)}:{}),
     drawingSheets: Array.isArray(file.drawingSheets) ? file.drawingSheets : [],
     properties: normalizePartProperties(file.properties),
   };

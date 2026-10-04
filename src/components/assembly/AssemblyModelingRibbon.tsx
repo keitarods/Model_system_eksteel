@@ -1,4 +1,5 @@
 'use client';
+import {ToolbarResizeHandle,useToolbarSize} from "@/components/layout/ToolbarResizeHandle";
 import { useEffect, useRef, useState } from 'react';
 import { CadToolButton } from '@/components/ui/CadToolButton';
 import { IconLoadDoc, IconAddView, IconSketch, IconJoinPoints, IconFixed, IconWeldTool, IconExtrude, IconRevolve, IconFace } from '@/components/icons/ToolIcons';
@@ -15,10 +16,12 @@ import { loadOpenCascade } from '@/lib/replicad/opencascade';
 const button = 'rounded border border-chrome-border px-3 py-2 text-xs font-medium hover:bg-chrome-surface-alt disabled:opacity-40 disabled:cursor-not-allowed';
 const input = 'w-full rounded border border-primary-200 bg-white px-2 py-1.5 text-sm text-primary-900';
 type Command = 'sketch'|'extrude'|'revolve'|'weld';
-export function AssemblyModelingRibbon({selectedId,onSelect,onInsert,onConstraint,onEdit,onMaterial,onError,treeCollapsed,onToggleTree}: {
+export function AssemblyModelingRibbon({compact=false,selectedId,onSelect,onInsert,onConstraint,onEdit,onMaterial,onError,treeCollapsed,onToggleTree}: {
+  compact?:boolean;
   treeCollapsed:boolean; onToggleTree:()=>void;
   selectedId:string|null; onSelect:(id:string)=>void; onInsert:()=>void; onConstraint:()=>void; onEdit:(id:string)=>void; onMaterial:(id:string)=>void; onError:(message:string|null)=>void;
 }) {
+  const toolbarSize=useToolbarSize("montagem",compact);
   const instances = useAssemblyStore(s=>s.instances);
   const selected = instances.find(i=>i.id===selectedId);
   const [collapsed,setCollapsed] = useState(false);
@@ -119,7 +122,7 @@ export function AssemblyModelingRibbon({selectedId,onSelect,onInsert,onConstrain
     finally {setBusy(false);}
   }
   return <>
-    <section aria-label="Ferramentas da montagem" className="shrink-0 border-b border-chrome-border bg-chrome-bg text-chrome-text">
+    <section ref={element=>{toolbarSize.ref.current=element;}} style={collapsed?undefined:toolbarSize.style} aria-label="Ferramentas da montagem" className="inventor-assembly-ribbon shrink-0 border-b border-chrome-border bg-chrome-bg text-chrome-text">
       <div className="flex items-center gap-1 px-2">
         <button type="button" onClick={onToggleTree} aria-expanded={!treeCollapsed} aria-controls="assembly-component-tree" title={treeCollapsed?'Mostrar componentes':'Recolher componentes'} aria-label={treeCollapsed?'Mostrar componentes':'Recolher componentes'} className="hidden h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-chrome-surface-alt md:flex">
           <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>{treeCollapsed?<path d="m13 9 3 3-3 3"/>:<path d="m17 9-3 3 3 3"/>}</svg>
@@ -161,6 +164,7 @@ export function AssemblyModelingRibbon({selectedId,onSelect,onInsert,onConstrain
       </details>}
       </div>
     </section>
+    {!collapsed&&<ToolbarResizeHandle toolbar={toolbarSize} label="Montagem"/>}
     {command && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <form ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="assembly-command-title" onSubmit={e=>{e.preventDefault();void apply();}} className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl bg-white p-5 text-primary-900 shadow-2xl">
         <h2 id="assembly-command-title" className="mb-1 text-lg font-semibold">{command==='sketch'?'Criar sketch':command==='weld'?'Solda de filete':command==='extrude'?'Extrude · Extrusão':'Revolve · Revolução'}</h2>
@@ -188,5 +192,5 @@ export function AssemblyModelingRibbon({selectedId,onSelect,onInsert,onConstrain
     </div>}
   </>;
 }
-function Group({label,children}:{label:string;children:React.ReactNode}) {return <div aria-label={label} role="group" className="flex shrink-0 items-center border-r border-chrome-border pr-2"><div className="flex items-center gap-1">{children}</div></div>;}
+function Group({label,children}:{label:string;children:React.ReactNode}) {return <div aria-label={label} role="group" className="inventor-command-group"><div className="flex items-center gap-1">{children}</div><span>{label}</span></div>;}
 function NumberField({label,value,onChange,positive=false}:{label:string;value:number;onChange:(n:number)=>void;positive?:boolean}) {return <label className="text-xs">{label}<input required type="number" step="any" min={positive?0.001:undefined} value={Number.isNaN(value)?'':value} onChange={e=>onChange(e.target.valueAsNumber)} className={input}/></label>;}
