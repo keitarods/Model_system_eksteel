@@ -15,6 +15,7 @@ import type { CloudSession } from "@/lib/project/cloudProvider";
 import { cloudName, type CloudConnection } from "@/lib/project/cloudStorage";
 
 type Props = {
+  documentOptions?: React.ReactNode;
   compact?: boolean;
   getProject: () => string | Promise<string>;
   documentKind?: "part" | "assembly" | "drawing";
@@ -25,7 +26,7 @@ type Props = {
   documentEpoch?: number;
 };
 
-export function CloudProjectsButton({ getProject, onOpen, suggestedName, disabled, documentEpoch, documentKind = "part", generateDocument, compact = false }: Props) {
+export function CloudProjectsButton({ getProject, onOpen, suggestedName, disabled, documentEpoch, documentKind = "part", generateDocument, documentOptions, compact = false }: Props) {
   const authConfig = useInstallation();
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -312,7 +313,7 @@ export function CloudProjectsButton({ getProject, onOpen, suggestedName, disable
           </li>)}
         </ul>}
         </>}
-        {connection.documents ? <CloudDocumentsPanel key={folder} library={connection.documents} folder={folder} source={project} busy={busy} run={run}
+        {connection.documents ? <CloudDocumentsPanel documentOptions={documentOptions} key={folder} library={connection.documents} folder={folder} source={project} busy={busy} run={run}
           getNative={getProject} generateDocument={generateDocument} nativeExtension={documentKind === "drawing" ? ".eksdesenho" : documentKind === "assembly" ? ".eks3dasm" : ".eks3d"}
           onOpenNative={(json,name)=>{onOpen(json,name);setOpened(null);}} />
           : <p className="text-xs">Biblioteca de PDF, DXF e montagens disponível no conector Supabase Storage.</p>}

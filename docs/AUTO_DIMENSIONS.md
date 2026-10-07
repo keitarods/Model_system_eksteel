@@ -46,3 +46,13 @@ A prévia lista as dobras do modelo e identifica as que não receberam cota angu
 Arraste uma janela no espaço vazio da folha. Esquerda → direita seleciona cotas cuja linha/arco e texto estão contidos; direita → esquerda seleciona as que intersectam a janela (teste por limites gráficos). Ctrl, Cmd ou Shift acrescenta à janela; com clique sobre uma cota, alterna sua seleção. **Selecionar cotas por janela** permite iniciar o retângulo também sobre uma vista, sem arrastar essa vista. Escape ou Limpar seleção encerra a seleção.
 
 Arraste uma cota selecionada para ajustar os afastamentos do conjunto. Cotas lineares seguem a normal de sua linha; angulares ajustam o raio do arco. Valores, vértices e referências permanecem intactos. A atualização é aplicada em conjunto ao soltar o ponteiro. A seleção é local à folha, não é salva nem exportada. Esta seleção abrange cotas lineares e angulares; notas/chamadas de raio continuam com seu arraste individual ancorado.
+
+A folha automática **Chapa · Dobrada** mantém a vista isométrica da peça dobrada no canto superior direito, com a tabela de dobras abaixo. As três vistas ortogonais cotadas ficam à esquerda. A isométrica serve como referência visual e não recebe cotas automáticas.
+
+## Documentação automática de montagens
+
+No desenho da montagem, **Gerar cotas automaticamente** prepara uma prévia com a folha da montagem (vista ortogonal, isométrica e lista de materiais) e as folhas de cada peça distinta. A lista agrupa ocorrências repetidas e distingue geometrias modificadas por operações locais. Componentes suprimidos ficam de fora. A lista continua em folhas adicionais quando ultrapassa 25 itens.
+
+Cada peça recebe as regras de cotagem existentes, incluindo folhas planificada e dobrada, isométrica, raios e identificação de dobras nativas quando houver operações de chapa. O item da lista identifica as folhas; código, descrição e material vêm das propriedades da peça. A geração exige componentes resolvidos e mantém a confirmação da prévia antes de inserir as folhas.
+
+As folhas de peças guardam a identidade do componente. Adicionar vistas e atualizar cotas usa a geometria local daquela peça, não a montagem inteira. Se o componente for removido ou o vínculo ficar indisponível, o desenho já calculado permanece, mas a atualização exige resolver a origem. As folhas continuam editáveis e podem ser salvas e exportadas pelo fluxo de PDF existente. Geometrias importadas sem árvore de chapa recebem cotagem geométrica; não se infere uma planificação ou operações de dobra inexistentes.

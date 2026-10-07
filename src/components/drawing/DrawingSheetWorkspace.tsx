@@ -1,19 +1,21 @@
 "use client";
 
+import type { SheetShapeSource } from "@/lib/drawing/shapeSource";
+import { generateAutomaticSheets } from "@/lib/drawing/automaticSheets";
 import {layoutLeaders,leaderDragPatch} from "@/lib/drawing/leaderLayout";
 import {dimensionBounds,windowDimensions,draggedDimensionOffset} from "@/lib/drawing/dimensionSelection";
 import {isoFit} from "@/lib/drawing/isoFits";
 import {bendAngles,dimensionText,angleBetweenLines} from "@/lib/drawing/angularDimensions";
 
-import { autoDimensions, autoCircleNotes, autoRadiusNotes, bendSchedule, type DrawingBend } from "@/lib/drawing/autoDimensions";
+import { autoDimensions, autoRadiusNotes } from "@/lib/drawing/autoDimensions";
 import { CloudProjectsButton } from "@/components/modelador/CloudProjectsButton";
 import { serializeDrawing, parseDrawing, DRAWING_EXTENSION } from "@/lib/drawing/documentFormat";
+import { selectPdfSheets } from "@/lib/drawing/pdfSheets";
 import { drawingSvgDxf } from "@/lib/drawing/svgDxf";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { jsPDF } from "jspdf";
 import { svg2pdf } from "svg2pdf.js";
-import type { AnyShape } from "replicad";
 import type { StoreApi, UseBoundStore } from "zustand";
 import { useDrawingStore, createSheetObject, type AnnotationPatch, type DrawingState } from "@/lib/drawing/store";
 import {
@@ -30,7 +32,6 @@ import {
   BOM_COLUMN_LABELS,
   type BomColumn,
   type BomColumnKey,
-  type BomSourcePart,
   type BomTable,
 } from "@/lib/drawing/bom";
 import {
@@ -158,24 +159,7 @@ type SheetStore = UseBoundStore<StoreApi<DrawingState>>;
 // De onde sai a geometria projetada nas vistas — a única coisa que difere
 // entre uma folha de PEÇA e uma de MONTAGEM. O ambiente de Desenho em si
 // (vistas, cotas, anotações, bloco de título, PDF) é idêntico nos dois casos.
-export type SheetShapeSource = {
-  kind: "peca" | "montagem";
-  // Constrói a shape a projetar. `flatten` só faz sentido pra peça de chapa
-  // (planificada vs. dobrada); a montagem ignora. Devolver null = nada
-  // modelado/vinculado ainda, e a mensagem de `emptyMessage` é mostrada.
-  buildShape: (options: { flatten: boolean; onBend?:(bend:import("@/lib/replicad/drawingBends").NativeDrawingBend)=>void }) => AnyShape | null;
-  // Assinatura do modelo atual — carimbada em cada vista gerada e comparada
-  // depois pra sinalizar "vista desatualizada" (ver isViewStale).
-  signature: string;
-  // Habilita o par planificada/dobrada no seletor de vista (só peça de chapa).
-  supportsFlatten: boolean;
-  bends?: DrawingBend[];
-  emptyMessage: string;
-  // Só montagem: peças resolvidas (instância + sólido + iProperties) pra
-  // montar/atualizar a Lista de Peças. Ausente = a ferramenta de lista nem
-  // aparece na barra (uma folha de peça única não tem o que listar).
-  bomParts?: () => BomSourcePart[];
-};
+export type { SheetShapeSource } from "@/lib/drawing/shapeSource";
 
 function useActiveSheet(useStore: SheetStore): { sheet: DrawingSheet | null; sheets: DrawingSheet[] } {
   const sheets = useStore((s) => s.sheets);
@@ -322,21 +306,35 @@ const HATCH_PATTERN_ID = "section-hatch";
 
 export function DrawingSheetWorkspace({
   useStore = useDrawingStore,
-  source,
+  source: documentSource,
   onClose,
 }: {
   onClose?: () => void;
   useStore?: SheetStore;
   source: SheetShapeSource;
 }) {
-  const { sheet: activeSheet, sheets } = useActiveSheet(useStore);
+  const { sheet: currentSheet, sheets } = useActiveSheet(useStore);
+  const [exportSheet, setExportSheet] = useState<DrawingSheet | null>(null);
+  const activeSheet = exportSheet ?? currentSheet;
+  const components = documentSource.componentSources?.() ?? [];
+  const source = activeSheet?.sourceInstanceId
+    ? components.find(c => c.id === activeSheet.sourceInstanceId)?.source ?? {
+      kind: "peca" as const, supportsFlatten: false, signature: "missing", buildShape: () => null,
+      emptyMessage: "A peça desta folha não está disponível na montagem. Restaure o componente para atualizar o desenho.",
+    }
+    : documentSource;
+  const [pdfScope, setPdfScope] = useState<"current" | "all" | "selected">("current");
+  const [pdfSheetIds, setPdfSheetIds] = useState<string[]>([]);
+  const [pdfOptionsOpen, setPdfOptionsOpen] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const exportLock = useRef(false);
   const [selectedDimensions,setSelectedDimensions]=useState<string[]>([]);
   const [selectionMode,setSelectionMode]=useState(false);
   const [selectionWindow,setSelectionWindow]=useState<{start:Point;end:Point}|null>(null);
   const [groupOffsets,setGroupOffsets]=useState<Record<string,number>>({});
   const groupOffsetsRef=useRef<Record<string,number>>({});
   const suppressSheetClick=useRef(false);
-  useEffect(()=>{setSelectedDimensions([]);setSelectionWindow(null);setGroupOffsets({});groupOffsetsRef.current={};dragRef.current=null;},[activeSheet?.id]);
+  useEffect(()=>{setSelectedDimensions([]);setSelectionWindow(null);setGroupOffsets({});groupOffsetsRef.current={};dragRef.current=null;},[currentSheet?.id]);
   const [fitInput,setFitInput]=useState("H7");
   const [fitError,setFitError]=useState<string|null>(null);
   const [editingDimension,setEditingDimension] = useState<{sheetId:string;dimension:DrawingDimension}|null>(null);
@@ -480,7 +478,7 @@ export function DrawingSheetWorkspace({
     return () => window.removeEventListener("keydown", cancel);
   }, []);
 
-  useEffect(() => { clearOtherModes(); }, [activeSheet?.id]);
+  useEffect(() => { clearOtherModes(); }, [currentSheet?.id]);
 
   function setDimensionModeExclusive(on: boolean) {
     clearOtherModes();
@@ -573,45 +571,9 @@ export function DrawingSheetWorkspace({
     try {
       await new Promise(resolve => setTimeout(resolve, 30));
       await loadOpenCascade();
-      const generated: DrawingSheet[] = [];
-      for (const flatten of (hasSheetMetal ? [true, false] : [false])) {
-        const bends:import("@/lib/replicad/drawingBends").NativeDrawingBend[]=[];
-        const shape = source.buildShape({flatten,onBend:b=>bends.push(b)});
-        if (!shape) throw new Error(source.emptyMessage);
-        try {
-          const sheet = createSheetObject(hasSheetMetal ? (flatten ? "Chapa · Planificada" : "Chapa · Dobrada") : "Cotagem automática");
-          sheet.size = "A3"; sheet.orientation = "landscape";
-          if (activeSheet) sheet.titleBlock = JSON.parse(JSON.stringify(activeSheet.titleBlock));
-          sheet.titleBlock.page = `${generated.length+1}/${hasSheetMetal ? 2 : 1}`;
-          const orthogonal = (["front", "top", "right"] as const).map(o => buildDrawingView(shape,o,flatten,{bends}));
-          // Place the broadest projection first: flat stock is not always modelled on XY.
-          orthogonal.sort((a,b)=>b.box.width*b.box.height-a.box.width*a.box.height);
-          const views = flatten ? [orthogonal[0], buildDrawingView(shape,"iso",true)] : [...orthogonal,buildDrawingView(shape,"iso",false)];
-          const cells = flatten ? [{x:115,y:125,w:155,h:170},{x:310,y:125,w:135,h:150}] : [{x:115,y:70,w:155,h:65},{x:310,y:70,w:135,h:65},{x:115,y:185,w:155,h:65},{x:310,y:185,w:135,h:65}];
-          const scale = Math.min(...views.map((v,i)=>Math.min(1,cells[i].w/Math.max(v.box.width,1),cells[i].h/Math.max(v.box.height,1))));
-          sheet.scale = scale;
-          sheet.views = views.map((v,i)=>({...v,x:cells[i].x,y:cells[i].y,scale,scaleLabel:scaleToLabel(scale),label:VIEW_ORIENTATION_LABELS[v.orientation],sourceSignature:featuresSignature}));
-          sheet.dimensions = sheet.views.flatMap(v=>[...autoDimensions(v,autoDetails),...bendAngles(v,(source.bends??[]).map(b=>b.angle))]);
-          sheet.annotations = sheet.views.flatMap(v=>[...autoCircleNotes(v),...autoRadiusNotes(v)]);
-          if (!flatten && source.bends?.length) {
-            // Reserve the fourth cell for the bend schedule instead of overlaying the isometric.
-            sheet.views = sheet.views.filter(v=>v.orientation !== "iso");
-            sheet.annotations.push(...bendSchedule(source.bends.slice(0, 14)));
-          }
-          generated.push(sheet);
-        } finally { shape.delete(); }
-      }
-      if (source.bends && source.bends.length > 14) {
-        for (let start=14; start<source.bends.length; start+=30) {
-          const extra=createSheetObject(`Dobras · Continuação ${Math.floor((start-14)/30)+1}`);
-          extra.size="A3"; extra.orientation="landscape";
-          if(activeSheet) extra.titleBlock=JSON.parse(JSON.stringify(activeSheet.titleBlock));
-          extra.annotations=bendSchedule(source.bends.slice(start,start+30),20,30);
-          generated.push(extra);
-        }
-      }
-      generated.forEach((sheet,index)=>{sheet.titleBlock.page=`${index+1}/${generated.length}`;});
-      setAutoPreview(generated.map(layoutLeaders));
+      const template = activeSheet?.sourceInstanceId ? sheets.find(s => !s.sourceInstanceId)?.titleBlock : activeSheet?.titleBlock;
+      const generated = await generateAutomaticSheets(documentSource, autoDetails, template);
+      setAutoPreview(generated);
     } catch (err) { setErrorMessage(err instanceof Error ? err.message : "Erro na cotagem automática."); }
     finally { setComputing(false); }
   }
@@ -776,7 +738,13 @@ export function DrawingSheetWorkspace({
     if (!activeSheet || !source.bomParts) return;
     setErrorMessage(null);
     try {
-      updateBomTable(activeSheet.id, table.id, { rows: refreshBomRows(table.rows, source.bomParts()) });
+      const parts = source.bomParts();
+      const rows = table.rowRange
+        ? refreshBomRows([], parts).slice(table.rowRange.start, table.rowRange.start + table.rowRange.count).map(row => ({
+          ...row, overrides: table.rows.find(old => old.instanceIds.some(id => row.instanceIds.includes(id)))?.overrides ?? {},
+        }))
+        : refreshBomRows(table.rows, parts);
+      updateBomTable(activeSheet.id, table.id, { rows });
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "Erro ao atualizar a lista de peças.");
     }
@@ -841,27 +809,39 @@ export function DrawingSheetWorkspace({
     }
   }
 
-  // Exporta a folha como PDF vetorial (não rasteriza — svg2pdf.js lê o SVG
-  // já renderizado e converte forma a forma, então linhas/texto continuam
-  // nítidos e escaláveis no PDF, do mesmo jeito que um DXF/STEP exportado
-  // continua sendo geometria de verdade, não uma imagem). O SVG exportado é
-  // o mesmo elemento AO VIVO da folha (viewBox já em mm = tamanho real da
-  // página) — elementos só-de-hover (botão × de remover, "escala ↻") usam
-  // opacity 0 via classe CSS; se algum aparecer indevido no PDF (o parser
-  // não respeitando o estado padrão do hover), é a primeira coisa a
-  // verificar.
+  // Render each page with the existing sheet renderer without changing the store's
+  // active sheet. Export a snapshot without interaction overlays and always restore
+  // the displayed sheet, including when SVG conversion fails.
   async function generateDrawingDocument(kind: "pdf" | "dxf") {
     if (!activeSheet || !svgRef.current) throw new Error("Selecione uma folha para exportar.");
     const filename = `${activeSheet.name || "folha"}.${kind}`;
     if (kind === "dxf") return { filename, body: new Blob([drawingSvgDxf(svgRef.current)], { type: "application/dxf" }) };
-    const orientation = sheetDims.width >= sheetDims.height ? "landscape" : "portrait";
-    const pdf = new jsPDF({ orientation, unit: "mm", format: [sheetDims.width, sheetDims.height] });
-    const overlays=Array.from(svgRef.current.querySelectorAll<SVGElement>('[data-drawing-ui]'));
-    const displays=overlays.map(el=>el.style.display);
-    try{overlays.forEach(el=>{el.style.display='none';});await svg2pdf(svgRef.current, pdf, { x: 0, y: 0, width: sheetDims.width, height: sheetDims.height });}
-    finally{overlays.forEach((el,i)=>{el.style.display=displays[i];});}
-    return { filename, body: pdf.output("blob") };
+    if (computing) throw new Error("Aguarde o cálculo das vistas antes de exportar.");
+    if (exportLock.current) throw new Error("Uma exportação já está em andamento.");
+    const selected = selectPdfSheets(sheets, currentSheet?.id, pdfScope, pdfSheetIds);
+    exportLock.current = true;
+    setExportingPdf(true);
+    try {
+      let pdf: jsPDF | undefined;
+      for (const sheet of selected) {
+        flushSync(() => setExportSheet(sheet));
+        const dims = sheetDimensionsMm(sheet);
+        const orientation = dims.width >= dims.height ? "landscape" : "portrait";
+        if (!pdf) pdf = new jsPDF({ orientation, unit: "mm", format: [dims.width, dims.height] });
+        else pdf.addPage([dims.width, dims.height], orientation);
+        if (!svgRef.current) throw new Error("Não foi possível renderizar a folha.");
+        const svg = svgRef.current.cloneNode(true) as SVGSVGElement;
+        svg.querySelectorAll('[data-drawing-ui]').forEach(el => el.remove());
+        await svg2pdf(svg, pdf, { x: 0, y: 0, width: dims.width, height: dims.height });
+      }
+      return { filename: `${selected.length === 1 ? selected[0].name || "folha" : "desenho"}.pdf`, body: pdf!.output("blob") };
+    } finally {
+      flushSync(() => setExportSheet(null));
+      exportLock.current = false;
+      setExportingPdf(false);
+    }
   }
+
   async function handleExportPdf() {
     setErrorMessage(null);
     try {
@@ -1160,6 +1140,17 @@ export function DrawingSheetWorkspace({
 
   const sizeButtons: SheetSize[] = ["A4", "A3"];
 
+  const pdfOptions = <fieldset disabled={exportingPdf} className="space-y-2 rounded border border-chrome-border p-3 text-sm">
+    <legend>Folhas do PDF</legend>
+    <select aria-label="Folhas para exportar em PDF" value={pdfScope} onChange={e => setPdfScope(e.target.value as typeof pdfScope)} className="rounded border p-2">
+      <option value="current">Folha atual</option><option value="all">Todas as folhas</option><option value="selected">Selecionar folhas</option>
+    </select>
+    {pdfScope === "selected" && <div className="max-h-48 overflow-auto">{sheets.map(sheet => <label key={sheet.id} className="flex gap-2 p-1">
+      <input type="checkbox" checked={pdfSheetIds.includes(sheet.id)} onChange={e => setPdfSheetIds(ids => e.target.checked ? [...ids, sheet.id] : ids.filter(id => id !== sheet.id))} />{sheet.name}
+    </label>)}</div>}
+    <p>Um único PDF, na ordem das folhas do arquivo, preservando o tamanho de cada folha.</p>
+  </fieldset>;
+
   return (
     <div className="inventor-drawing flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="inventor-pane-title flex shrink-0 items-center justify-between"><span>Desenho técnico · Documentação</span><span className="font-normal text-slate-500">{activeSheet?.name??'Nenhuma folha ativa'}</span></div>
@@ -1202,9 +1193,10 @@ export function DrawingSheetWorkspace({
             <button type="button" className={toolButtonClass(false)} onClick={() => void handleDrawingFile("open")}>Abrir desenho</button>
             <button type="button" className={toolButtonClass(false)} disabled={computing || !onClose}
               onClick={handleCloseDrawing} title="Voltar ao modelo 3D preservando as folhas do projeto">Fechar desenho</button>
-            <CloudProjectsButton documentKind="drawing" suggestedName={activeSheet?.name || "desenho"}
+            <CloudProjectsButton documentKind="drawing" suggestedName={currentSheet?.name || "desenho"}
               getProject={() => serializeDrawing(useStore.getState().sheets)}
               onOpen={json => useStore.getState().loadSheets(parseDrawing(json))}
+              documentOptions={pdfOptions}
               generateDocument={activeSheet ? generateDrawingDocument : undefined} />
         {activeSheet && (
           <>
@@ -1361,7 +1353,7 @@ export function DrawingSheetWorkspace({
             </button>
             <button
               type="button"
-              onClick={() => void handleExportPdf()}
+              onClick={() => setPdfOptionsOpen(v => !v)}
               title="Exportar PDF — folha inteira (vistas, cotas, anotações e bloco de título), vetorial"
               className={toolButtonClass(false)}
             >
@@ -1381,6 +1373,12 @@ export function DrawingSheetWorkspace({
         )}
       </div>
 
+      {pdfOptionsOpen && <div className="space-y-2 border-b p-3">
+        {pdfOptions}
+        <button type="button" disabled={exportingPdf || (pdfScope === "selected" && !sheets.some(s => pdfSheetIds.includes(s.id)))} className="rounded border px-3 py-2 disabled:opacity-40" onClick={() => void handleExportPdf()}>Baixar PDF</button>
+        <p className="text-sm">Para salvar direto na pasta de PDFs da nuvem, abra Projetos na nuvem, escolha a pasta e use Gerar e enviar PDF.</p>
+      </div>}
+      {exportingPdf && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40" role="status" aria-live="polite"><span className="rounded bg-white p-4 text-black">Gerando PDF…</span></div>}
       {activeSheet && <div className="drawing-command-guide" role="status">
         <span>{annotationMode ? (EXTRA_ANNOTATIONS.find(t => t.kind === annotationMode)?.hint ?? "Clique na folha para inserir a anotação.") : angularMode ? "Cota angular: selecione duas arestas da mesma vista de perfil. O ângulo será medido na projeção." : dimensionMode ? "Selecione uma aresta reta; clique novamente para cotar seu comprimento ou escolha outra aresta." : sectionMode ? "Selecione a vista e dois pontos para definir o corte." : projectionMode ? "Selecione a vista base e clique na direção da projeção." : "Arraste no espaço vazio para selecionar cotas. Ctrl/Shift adiciona ou remove. Arraste uma cota selecionada para mover o conjunto. Duplo clique edita cotas e anotações. Botão direito abre mais opções."}
           {pendingWeldPoint && " Primeiro ponto definido. Clique no segundo ponto."}</span>
@@ -1394,7 +1392,7 @@ export function DrawingSheetWorkspace({
           <option value="">Editar cota…</option>{activeSheet?.dimensions.map((d,i)=><option key={d.id} value={d.id}>{i+1}. {d.angular?'Ângulo':'Linear'} · {dimensionText(d,Math.hypot(d.x2-d.x1,d.y2-d.y1))}</option>)}
         </select>
         <label><input type="checkbox" checked={autoDetails} onChange={e=>setAutoDetails(e.target.checked)} /> Detalhamento seletivo de contorno e abas</label>
-        <span>{hasSheetMetal ? "Duas folhas: planificada e dobrada" : "Nova folha com vistas ortogonais e isométrica"}</span>
+        <span>{documentSource.componentSources ? "Montagem com lista de materiais e folhas cotadas das peças" : hasSheetMetal ? "Duas folhas: planificada e dobrada" : "Nova folha com vistas ortogonais e isométrica"}</span>
       </div>
       {editingDimension && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-label="Editar cota">
         <form onKeyDown={e=>{if(e.key==="Escape"){e.stopPropagation();setEditingDimension(null);}}} className="max-h-[90vh] overflow-y-auto w-full max-w-lg rounded border border-slate-400 bg-slate-50 shadow-xl" onSubmit={e=>{e.preventDefault();updateDimension(editingDimension.sheetId,editingDimension.dimension.id,editingDimension.dimension);setEditingDimension(null);}}>
@@ -1439,6 +1437,7 @@ export function DrawingSheetWorkspace({
             <svg viewBox="0 0 420 297" className="my-2 w-full border bg-white">
               <rect x="8" y="8" width="404" height="281" fill="none" stroke="#aaa" strokeWidth="0.3" />
               {sheet.views.map(v=><g key={v.id} transform={`translate(${v.x} ${v.y}) scale(${v.scale}) translate(${-v.box.minX-v.box.width/2} ${-v.box.minY-v.box.height/2})`} fill="none" stroke="#263238" strokeWidth={0.3/v.scale}>{v.visiblePaths.map((d,i)=><path key={i} d={d}/>)}</g>)}
+              {sheet.bomTables?.map(table => <BomTableSvg key={table.id} table={table} effective={null} onDragStart={()=>{}} onEditCell={()=>{}} onRefresh={()=>{}} onRemove={()=>{}} />)}
               {sheet.annotations.map(annotation=><AnnotationSvg key={annotation.id} annotation={annotation} effectivePatch={null} onDragStart={()=>{}} onRemove={()=>{}} />)}
               {sheet.dimensions.map(dim=><DimensionSvg key={dim.id} dim={dim} effectiveOffset={null} onDragStart={()=>{}} onRemove={()=>{}} />)}
             </svg></div>)}

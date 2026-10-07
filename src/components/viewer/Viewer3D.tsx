@@ -1,4 +1,5 @@
 "use client";
+import { ProjectionController, ProjectionSelector, type ProjectionMode } from "@/components/viewer/ProjectionMode";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useThree, type ThreeEvent } from "@react-three/fiber";
@@ -285,6 +286,10 @@ function HomeKeyHandler({
       const rawDir = camera.position.clone().sub(previousTarget);
       const dir = rawDir.lengthSq() > 1e-6 ? rawDir.normalize() : new THREE.Vector3(1, -1, 1).normalize();
 
+      if (camera instanceof THREE.OrthographicCamera) {
+        camera.zoom = Math.min(camera.right-camera.left, camera.top-camera.bottom)/(2*radius*HOME_FIT_MARGIN);
+        camera.updateProjectionMatrix();
+      }
       const newPosition = center.clone().addScaledVector(dir, distance);
       applyCameraPose(camera, controls, newPosition, center, camera.up);
       onTargetChange([center.x, center.y, center.z]);
@@ -362,6 +367,7 @@ export function Viewer3D({
   linearEdges?: { start: [number, number, number]; end: [number, number, number] }[];
   onPickLinearEdge?: (start: [number, number, number], end: [number, number, number]) => void;
 }) {
+  const [projection, setProjection] = useState<ProjectionMode>("orthographic");
   const [wireframe, setWireframe] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [orbitTarget, setOrbitTarget] = useState<[number, number, number]>([0, 0, 0]);
@@ -391,6 +397,7 @@ export function Viewer3D({
     <div className="flex h-full flex-col">
       <CadSelectionProvider enabled={!pickMode&&!linearEdgeMode&&!sketchOverlay?.interactive} resetKey={mesh}>
       <div className="flex flex-wrap items-center gap-2 border-b border-primary-100 bg-primary-50 px-3 py-1 text-sm">
+        <ProjectionSelector value={projection} onChange={setProjection} />
         {sketchOverlay?.interactive && (
           <div className="ml-auto flex items-center gap-2">
             {selectedIsRect && (
@@ -460,10 +467,11 @@ export function Viewer3D({
       </div>
 
       <div className={`relative min-h-0 flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
-        <CadSelectionCanvas
-          camera={{ position: INITIAL_CAMERA_POSITION, fov: 45, up: [0, 0, 1], near: 0.1, far: 10000 }}
+        <CadSelectionCanvas orthographic
+          camera={{ position: INITIAL_CAMERA_POSITION, zoom: 2, up: [0, 0, 1], near: 0.1, far: 10000 }}
           shadows="basic"
         >
+          <ProjectionController mode={projection} />
           <color attach="background" args={["#d5dfe9"]} />
           <MaterialLighting/>
           <ambientLight intensity={0.7} />

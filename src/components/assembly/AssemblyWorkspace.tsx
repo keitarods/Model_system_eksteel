@@ -142,6 +142,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
   const [propertiesOpen, setPropertiesOpen] = useState(false);
   const [materialDialog, setMaterialDialog] = useState<{ instanceId: string; occurrences: number } | null>(null);
   const [placements, setPlacements] = useState<Record<string, ComponentPlacement>>({});
+  const [drawingFeatures, setDrawingFeatures] = useState<Record<string, import("@/lib/features/types").Feature[]>>({});
   const solidsRef = useRef<Record<string, Solid | null>>({});
   const generationRef = useRef(0);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -248,6 +249,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
     const generation = ++generationRef.current;
 
     (async () => {
+      setDrawingFeatures({});
       if (instances.length === 0) {
         Object.values(solidsRef.current).forEach((s) => s?.delete());
         solidsRef.current = {};
@@ -265,6 +267,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
       // de Peças da folha tira código/descrição/material/densidade (ver
       // src/lib/drawing/bom.ts). Guardadas junto da resolução do vínculo
       // pra não precisar reler o arquivo toda vez que a lista atualizar.
+      const nextDrawingFeatures: Record<string, import("@/lib/features/types").Feature[]> = {};
       const nextProperties: Record<string, PartProperties> = {};
       let anyBuildFailed = false;
 
@@ -292,7 +295,9 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
         }
 
         try {
-          const solid = rebuildModel([...resolution.features, ...(instance.assemblyFeatures ?? [])], {});
+          const features = [...resolution.features, ...(instance.assemblyFeatures ?? [])];
+          const solid = rebuildModel(features, {});
+          if (solid) nextDrawingFeatures[instance.id] = features;
           nextSolids[instance.id] = solid;
           nextMeshes[instance.id] = solid ? Object.assign(solid.mesh(),{cadEdges:solid.meshEdges()}) : null;
         } catch (err) {
@@ -313,6 +318,7 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
       setMeshes(nextMeshes);
       setLinkStatus(nextLinkStatus);
       setPartProperties(nextProperties);
+      setDrawingFeatures(nextDrawingFeatures);
       if (anyBuildFailed) {
         setErrorMessage("Uma ou mais peças não puderam ser reconstruídas — veja o console para detalhes.");
       }
@@ -633,18 +639,38 @@ export function AssemblyWorkspace({ userEmail }: { userEmail: string }) {
       // olha features): mover um componente muda a vista projetada da
       // montagem, então a vista fica mesmo desatualizada.
       signature: JSON.stringify(
-        instances.map((i) => ({ id: i.id, s: i.suppressed, f: i.assemblyFeatures, e: i.embeddedPart, p: placements[i.id] ?? i.placementSeed }))
+        instances.map((i) => ({ id: i.id, s: i.suppressed, f: drawingFeatures[i.id], e: i.embeddedPart, p: placements[i.id] ?? i.placementSeed }))
       ),
       supportsFlatten: false,
       emptyMessage: "Nenhuma peça vinculada ainda — insira peças na montagem antes de adicionar uma vista.",
+      componentSources: () => instances.filter(i => !i.suppressed).map(instance => {
+        const features = drawingFeatures[instance.id];
+        const properties = partProperties[instance.id] ?? createEmptyPartProperties();
+        return {
+          id: instance.id, name: properties.partNumber || instance.label,
+          group: JSON.stringify([instance.linkKey, properties.partNumber, JSON.stringify(features ?? [])]),
+          properties,
+          source: {
+            kind: "peca" as const,
+            signature: JSON.stringify(features ?? []),
+            supportsFlatten: !!features?.some(f => f.type === "sheetMetal"),
+            bends: features?.filter(f => f.type === "flange").map(f => ({id:f.id,label:f.label,length:f.length,angle:f.angle,innerRadius:f.innerRadius})),
+            emptyMessage: `Peça "${instance.label}" indisponível. Resolva o vínculo antes de gerar ou atualizar folhas.`,
+            buildShape: ({flatten, onBend}: Parameters<SheetShapeSource["buildShape"]>[0]) => features
+              ? rebuildModel(features, {flatten,onFlange:(feature,link)=>onBend?.({id:feature.id,label:feature.label,link})}) : null,
+          },
+          available: !!features,
+        };
+      }),
       bomParts: () =>
         instances.map((instance) => ({
           instance,
+          geometrySignature: JSON.stringify(drawingFeatures[instance.id] ?? []),
           solid: solidsRef.current[instance.id] ?? null,
           properties: partProperties[instance.id] ?? createEmptyPartProperties(),
         })),
     }),
-    [placedParts, instances, placements, partProperties]
+    [placedParts, instances, placements, partProperties, drawingFeatures]
   );
 
   // Fecha a montagem atual (ao estilo Inventor: descarta o documento

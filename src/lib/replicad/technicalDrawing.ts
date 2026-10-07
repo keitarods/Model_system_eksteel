@@ -7,8 +7,8 @@ import { createId } from "@/lib/sketch/render";
 
 // As 6 orientações padrão batem 1:1 com ProjectionPlane do replicad — "iso"
 // não existe como plano nomeado, vira uma câmera customizada olhando de
-// [1,-1,1] (mesmo ângulo isométrico já usado nos VIEW_PRESETS do viewer
-// 3D), auto-enquadrada via .lookAt(shape).
+// [1,-1,1], com direção fixa e eixo horizontal [1,1,0].
+// A posição da peça não deve alterar o ângulo da projeção.
 const ORIENTATION_TO_PLANE: Record<Exclude<ViewOrientation, "iso">, ProjectionPlane> = {
   front: "front",
   back: "back",
@@ -64,7 +64,7 @@ function drawingBox(drawing: Drawing): ViewBoxRect | null {
 // câmera equivalente divergirem por algum arredondamento.
 function cameraFor(shape: AnyShape, orientation: ViewOrientation): ProjectionCamera {
   if (orientation === "iso") {
-    return new ProjectionCamera([1, -1, 1]).lookAt(shape);
+    return new ProjectionCamera(shape.boundingBox.center, [1, -1, 1], [1, 1, 0]);
   }
   return lookFromPlane(ORIENTATION_TO_PLANE[orientation]);
 }

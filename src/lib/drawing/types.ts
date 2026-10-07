@@ -182,6 +182,8 @@ export type TitleBlockInfo = {
 };
 
 export type DrawingSheet = {
+  /** Component identity for sheets generated inside an assembly document. */
+  sourceInstanceId?: string;
   id: string;
   name: string;
   size: SheetSize;

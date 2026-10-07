@@ -2,7 +2,8 @@
 import { useExportQueue } from "@/lib/project/exportQueue";
 import { useState } from 'react';
 import type { CloudDocument, DocumentLibrary } from '@/lib/project/cloudDocuments';
-export function CloudDocumentsPanel({library,folder,source,busy,run,getNative,onOpenNative,nativeExtension,generateDocument}: {
+export function CloudDocumentsPanel({library,folder,source,busy,run,getNative,onOpenNative,nativeExtension,generateDocument,documentOptions}: {
+ documentOptions?: React.ReactNode;
  library:DocumentLibrary;folder:string;source:string;busy:boolean;run:(action:()=>Promise<void>)=>Promise<void>;
  getNative:()=>string|Promise<string>;onOpenNative:(json:string,name:string)=>void;nativeExtension:'.eks3d'|'.eks3dasm'|'.eksdesenho';
  generateDocument?:(kind:'pdf'|'dxf')=>Promise<{filename:string;body:Blob}>;
@@ -16,6 +17,7 @@ export function CloudDocumentsPanel({library,folder,source,busy,run,getNative,on
   <h3 className="font-semibold">Arquivos da pasta — peças, montagens, desenhos, PDF e DXF</h3>
   <p className="text-xs">Origem: {source || 'preencha o nome acima'}. Cada envio preserva uma cópia independente. PDFs e DXFs podem ser consultados pelo Gestão com permissão de leitura.</p>
   <label className="block text-sm">Observação para compras / referência<input disabled={busy} maxLength={500} className="w-full rounded border border-chrome-border bg-chrome-surface-alt p-2" value={purpose} onChange={e=>setPurpose(e.target.value)} /></label>
+  {documentOptions}
   <div className="flex flex-wrap gap-2">
    <button type="button" className={button} disabled={busy||!folder||!source.trim()} onClick={()=>void run(async()=>{
     const json=await getNative();await library.upload(folder,source,`${source.replace(/\.(?:eks3d(?:asm)?|eksdesenho)$/i,'')}${nativeExtension}`,new Blob([json]),purpose);

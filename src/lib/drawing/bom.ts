@@ -89,6 +89,8 @@ export type BomRow = {
 };
 
 export type BomTable = {
+  /** Automatic multi-page BOM window; preserves its page when refreshed. */
+  rowRange?: { start: number; count: number };
   id: string;
   // Canto da tabela na folha (mm). Qual canto depende de `growUp`: com
   // growUp (padrão, igual Inventor) esse é o canto INFERIOR esquerdo e a
@@ -231,6 +233,7 @@ export function bomTableTopLeft(table: BomTable): { x: number; y: number } {
 // só sem as variáveis geométricas, pra não sumir uma peça da lista por
 // causa de um vínculo quebrado.
 export type BomSourcePart = {
+  geometrySignature?: string;
   instance: ComponentInstance;
   solid: Solid | null;
   properties: PartProperties;
@@ -251,7 +254,7 @@ function formatNumber(value: number, decimals: number): string {
 // linkedFiles.ts); o nº da peça entra junto porque duas cópias do MESMO
 // arquivo com códigos diferentes preenchidos à mão não deveriam se fundir.
 function groupKeyOf(part: BomSourcePart): string {
-  return `${part.instance.linkKey}::${part.properties.partNumber}`;
+  return JSON.stringify([part.instance.linkKey, part.properties.partNumber, part.geometrySignature ?? JSON.stringify([part.instance.embeddedPart ?? null, part.instance.assemblyFeatures ?? []])]);
 }
 
 // Gera as linhas da lista a partir das peças da montagem. Peças suprimidas

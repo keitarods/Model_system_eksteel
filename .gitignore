@@ -37,3 +37,8 @@ services/fea/.runtime/
 # Local communicator builds and private pairing artifacts
 /dist/
 services/fea/packaging/vendor/
+
+# Configurações locais de agentes e credenciais de serviços
+/.aws/
+/.codex/
+/.agents/

@@ -1,4 +1,5 @@
 "use client";
+import { ProjectionController, ProjectionSelector, type ProjectionMode } from "@/components/viewer/ProjectionMode";
 
 import { useEffect, useRef, useState } from "react";
 import { useThree, type ThreeEvent } from "@react-three/fiber";
@@ -108,6 +109,10 @@ function FitAssembly({bodies,sketches,token}:{bodies:AssemblyBody[];sketches:{sk
     const fov=camera instanceof THREE.PerspectiveCamera?camera.fov:45;
     const halfAngle=Math.atan(Math.tan(fov*Math.PI/360)*Math.min(1,size.width/size.height));
     camera.position.copy(center).addScaledVector(direction,Math.max(15,radius/Math.sin(halfAngle)*1.2));
+    if (camera instanceof THREE.OrthographicCamera) {
+      camera.zoom = Math.min(camera.right-camera.left, camera.top-camera.bottom)/(2*radius*1.2);
+      camera.updateProjectionMatrix();
+    }
     controls.target.copy(center);controls.update();
   },[bodies,sketches,token,camera,controls,size.width,size.height]);
   return null;
@@ -203,6 +208,7 @@ export function AssemblyViewer3D({
 }) {
   const cameraApiRef=useRef<CameraApi|null>(null);
   const [fitToken,setFitToken] = useState(0);
+  const [projection, setProjection] = useState<ProjectionMode>("orthographic");
   const [wireframe, setWireframe] = useState(false);
   const [view, setView] = useState<ViewPreset>("isometrica");
   const [viewToken, setViewToken] = useState(0);
@@ -212,6 +218,7 @@ export function AssemblyViewer3D({
       <CadSelectionProvider assembly enabled={!pickMode&&!draggableInstanceId} resetKey={bodies} onClear={()=>onSelectInstance?.(null)} onActiveComponent={onSelectInstance}>
       <div aria-label="Visualização da montagem" className="pointer-events-none z-10 flex shrink-0 items-start justify-between gap-2 px-2 py-1">
         <div className="pointer-events-auto flex shrink-0 items-center gap-0.5 rounded-lg border border-primary-100 bg-white/95 p-1 shadow-sm">
+          <ProjectionSelector value={projection} onChange={setProjection} />
           {(Object.keys(VIEW_PRESETS) as ViewPreset[]).map(preset=><button key={preset} type="button" title={`Vista ${preset}`} aria-label={`Vista ${preset}`} aria-pressed={view===preset}
             onClick={()=>{setView(preset);setViewToken(t=>t+1);}}
             className={`flex h-8 w-8 items-center justify-center rounded ${view===preset?'bg-primary text-primary-foreground':'text-primary-700 hover:bg-primary-50'}`}>
@@ -231,7 +238,8 @@ export function AssemblyViewer3D({
         </div>
       </div>
       <div className={`relative min-h-0 flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
-        <CadSelectionCanvas camera={{ position: VIEW_PRESETS.isometrica, fov: 45, up: [0, 0, 1], near: 0.1, far: 100000 }}>
+        <CadSelectionCanvas orthographic camera={{ position: VIEW_PRESETS.isometrica, zoom: 2, up: [0, 0, 1], near: 0.1, far: 100000 }}>
+          <ProjectionController mode={projection} />
           <color attach="background" args={["#d5dfe9"]} />
           <MaterialLighting/>
           <ambientLight intensity={0.7} />

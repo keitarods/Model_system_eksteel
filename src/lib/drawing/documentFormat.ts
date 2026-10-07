@@ -17,6 +17,7 @@ export function parseDrawing(json: string): DrawingSheet[] {
       !Number.isFinite(sheet.scale) || sheet.scale <= 0 || !Array.isArray(sheet.views) ||
       !Array.isArray(sheet.dimensions) || !Array.isArray(sheet.annotations) || !sheet.titleBlock ||
       typeof sheet.titleBlock !== 'object') throw new Error('Estrutura da folha inválida.');
+    if (sheet.sourceInstanceId !== undefined && (typeof sheet.sourceInstanceId !== "string" || !sheet.sourceInstanceId)) throw new Error("Origem da folha inválida.");
     ids.add(sheet.id);
     for (const dimension of sheet.dimensions) {
       if (!dimension || (dimension.value !== undefined && (!Number.isFinite(dimension.value) || dimension.value <= 0)) || typeof dimension.id !== 'string' || ![dimension.x1, dimension.y1, dimension.x2, dimension.y2, dimension.offset].every(Number.isFinite))
