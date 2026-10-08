@@ -116,7 +116,7 @@ def health(request:Request):
     import importlib.util
     gmsh=importlib.util.find_spec('gmsh') is not None
     ccx=shutil.which(os.environ.get('CCX_BIN','ccx')) is not None
-    return {'ready':gmsh and ccx,'gmsh':gmsh,'calculix':ccx,'maxNodes':30000,'maxElements':100000,'assemblyBonded':True}
+    return {'ready':gmsh and ccx,'gmsh':gmsh,'calculix':ccx,'maxNodes':30000,'maxElements':100000,'assemblyBonded':True,'bodyDiagnostics':True}
 
 
 @app.post('/jobs',status_code=202)
@@ -130,7 +130,7 @@ async def create_job(request:Request):
     try:
         payload=json.loads(b''.join(chunks), parse_constant=invalid_constant)
     except (ValueError,UnicodeDecodeError): raise HTTPException(400,'JSON inválido.')
-    if not isinstance(payload,dict) or payload.get('action') not in ('mesh','solve'):
+    if not isinstance(payload,dict) or payload.get('action') not in ('mesh','solve','diagnose'):
         raise HTTPException(400,'Operação inválida.')
     with LOCK:
         now=time.time()
@@ -150,9 +150,11 @@ async def create_job(request:Request):
             source['created']=now
             payload={'action':'solve','meshFolder':str(source['folder']),'study':payload['study']}
         else:
+            if payload['action']=='diagnose' and (type(payload.get('bodyIndex')) is not int or not 1<=payload['bodyIndex']<=128):
+                raise HTTPException(400,'Corpo de diagnóstico inválido.')
             mode=payload.get('geometryMode','part')
             if mode not in ('part','assemblyBonded'): raise HTTPException(400,'Tipo de geometria inválido.')
-            payload={k:payload[k] for k in ('action','step','size','refinements','preparation','meshControls','elementType','materialMode') if k in payload}
+            payload={k:payload[k] for k in ('action','step','size','refinements','preparation','meshControls','elementType','materialMode','bodyIndex') if k in payload}
             payload['geometryMode']=mode
             if not isinstance(payload.get('step'),str) or 'ISO-10303-21;' not in payload['step']:
                 raise HTTPException(400,'Geometria STEP inválida.')

@@ -27,6 +27,38 @@ def assembly_step(folder, separated=False):
 
 
 class MeshingErrorTests(unittest.TestCase):
+    def test_diagnostic_meshes_only_the_requested_body(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            payload = {'step': assembly_step(folder, True), 'size': 5,
+                       'geometryMode': 'assemblyBonded', 'preparation': {'unite': False}}
+            generate = gmsh.model.mesh.generate
+            for body in (1, 2):
+                observed = []
+                def inspect_generation(dim):
+                    generate(dim)
+                    for _, tag in sorted(gmsh.model.getEntities(3)):
+                        _, elements, _ = gmsh.model.mesh.getElements(3, tag)
+                        observed.append(any(len(items) for items in elements))
+                with patch.object(gmsh.model.mesh, 'generate', side_effect=inspect_generation):
+                    result = generate_mesh(payload, folder, diagnostic_body=body)
+                self.assertEqual(result['status'], 'passed')
+                self.assertEqual(result['bodyCount'], 2)
+                self.assertEqual(observed, [body == 1, body == 2])
+                self.assertEqual(len(result['bounds']), 6)
+            self.assertEqual(generate_mesh(payload, folder)['bodyCount'], 2)
+
+    def test_diagnostic_distinguishes_intersection_from_unknown_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            payload = {'step': box_step(folder), 'size': 5}
+            for error, status in [('PLC Error: A segment and a facet intersect at point', 'failed'), ('Unknown native error', 'inconclusive')]:
+                with patch.object(gmsh.model.mesh, 'generate', side_effect=Exception(error)):
+                    result = generate_mesh(payload, folder, diagnostic_body=1)
+                self.assertEqual(result['status'], status)
+                self.assertEqual(result['bodyId'], 1)
+                self.assertEqual(gmsh.isInitialized(), 0)
+
     def test_intersection_reports_actionable_error_and_releases_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

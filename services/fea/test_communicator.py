@@ -43,6 +43,7 @@ class CommunicatorTests(unittest.TestCase):
                     paired=call('/pair','POST',extra={'X-Eksteel-Pairing':code})
                     headers['Authorization']='Bearer '+paired['token']
                     self.assertTrue(call('/health')['ready'])
+                    self.assertTrue(call('/health')['bodyDiagnostics'])
                     with self.assertRaises(HTTPError) as denied:call('/health',extra={'Origin':'https://evil.example'})
                     self.assertEqual(denied.exception.code,403)
                     with self.assertRaises(HTTPError):call('/pair','POST',extra={'X-Eksteel-Pairing':code})
@@ -60,6 +61,11 @@ class CommunicatorTests(unittest.TestCase):
                             time.sleep(.1)
                         self.fail('Job timeout')
                     mesh_id,output=complete({'action':'mesh','step':box_step(folder),'size':5,'elementType':'C3D10','preparation':{'heal':True,'tolerance':.001}})
+                    diagnostic_id,diagnostic=complete({'action':'diagnose','bodyIndex':1,'step':box_step(folder),'size':5})
+                    self.assertEqual(diagnostic['diagnostic']['status'],'passed')
+                    self.assertEqual(diagnostic['diagnostic']['bodyCount'],1)
+                    with self.assertRaises(HTTPError):
+                        call('/jobs','POST',{'action':'solve','meshId':diagnostic_id,'study':{}})
                     mesh=output['mesh'];faces=mesh['faces']
                     study={'material':{'young':210000,'poisson':0,'density':7850,'yieldStress':250},'supports':[{'faceIds':[min(faces,key=lambda f:f['center'][0])['id']],'axes':[True]*3}],'loads':[{'kind':'force','faceIds':[max(faces,key=lambda f:f['center'][0])['id']],'vector':[1000,0,0]}]}
                     solve_id,result=complete({'action':'solve','meshId':mesh_id,'study':study})

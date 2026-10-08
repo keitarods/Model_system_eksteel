@@ -71,7 +71,7 @@ def mesh_options(payload, size):
     return preparation, tolerance, minimum, curvature, quality
 
 
-def generate_mesh(payload, folder, progress=lambda percent, stage: None):
+def generate_mesh(payload, folder, progress=lambda percent, stage: None, *, diagnostic_body=None):
     progress(5, "Preparando geometria")
     import gmsh
     step = payload.get('step', '')
@@ -144,6 +144,19 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None):
                   'originalVolume': float(original_volume), 'preparedVolume': float(prepared_volume),
                   'volumeChangePercent': float(100 * (prepared_volume-original_volume)/original_volume),
                   'tolerance': tolerance}
+        diagnostic = None
+        gmsh.option.setNumber('Mesh.MeshOnlyVisible', 0)
+        if diagnostic_body is not None:
+            if type(diagnostic_body) is not int or not 1 <= diagnostic_body <= min(len(volumes), 128):
+                raise ValueError('Corpo de diagnóstico inválido (limite de 128 corpos).')
+            chosen = sorted(volumes)[diagnostic_body - 1]
+            diagnostic = {'bodyId': diagnostic_body, 'bodyCount': len(volumes),
+                          'bounds': list(gmsh.model.getBoundingBox(*chosen))}
+            # Keep the prepared topology and original face tags. Visibility limits
+            # generation to this solid without recursively deleting shared faces.
+            gmsh.model.setVisibility(gmsh.model.getEntities(), 0)
+            gmsh.model.setVisibility([chosen], 1, recursive=True)
+            gmsh.option.setNumber('Mesh.MeshOnlyVisible', 1)
         face_tags = sorted(set(tag for dim, tag in gmsh.model.getBoundary(volumes, oriented=False) if dim == 2))
         gmsh.option.setNumber('Mesh.MeshSizeMin', size)
         gmsh.option.setNumber('Mesh.MeshSizeMax', size)
@@ -176,6 +189,10 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None):
             gmsh.model.mesh.generate(3)
         except Exception as error:
             message = str(error).lower()
+            if diagnostic is not None:
+                intersection = ('plc error' in message and 'intersect' in message) or 'self intersect' in message or 'self-intersect' in message
+                return {**diagnostic, 'status': 'failed' if intersection else 'inconclusive',
+                        'message': 'Interseção reproduzida neste corpo isolado.' if intersection else 'O teste deste corpo não pôde ser concluído.'}
             if ('plc error' in message and 'intersect' in message) or 'self intersect' in message or 'self-intersect' in message:
                 raise ValueError(
                     'Não foi possível gerar a malha: foram detectadas interseções entre arestas e faces. '
@@ -184,6 +201,11 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None):
                     'A união de corpos só deve ser ativada quando representar a ligação física do conjunto.'
                 ) from error
             raise
+        if diagnostic is not None:
+            _, elements, _ = gmsh.model.mesh.getElements(3, chosen[1])
+            populated = any(len(items) for items in elements)
+            return {**diagnostic, 'status': 'passed' if populated else 'inconclusive',
+                    'message': 'Malha volumétrica gerada isoladamente.' if populated else 'O teste não produziu elementos neste corpo.'}
         progress(60, "Otimizando elementos")
         gmsh.model.mesh.optimize('')
         gmsh.model.mesh.optimize('Netgen')
