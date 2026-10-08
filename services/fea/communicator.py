@@ -121,10 +121,13 @@ class DesktopApp:
         actions=ttk.Frame(frame);actions.pack(fill='x',pady=8)
         ttk.Button(actions,text='Esquecer sites e revogar acessos',command=self.forget).pack(side='left')
         ttk.Button(actions,text='Tentar iniciar novamente',command=self.start).pack(side='left',padx=8)
-        self.ccx=tk.StringVar(value=settings.get('calculix',''))
+        self.ccx=tk.StringVar(value='' if getattr(sys,'frozen',False) else settings.get('calculix',''))
         self.native_frame=ttk.LabelFrame(frame,text='CalculiX não encontrado',padding=8)
-        ttk.Label(self.native_frame,text='Selecione o executável do solver ou instale o pacote completo.').pack(anchor='w')
-        ttk.Button(self.native_frame,text='Selecionar CalculiX',command=lambda:self.choose_calculix(filedialog)).pack(anchor='w')
+        if getattr(sys,'frozen',False):
+            ttk.Label(self.native_frame,text='Não foi possível iniciar. Feche e abra o aplicativo novamente.\nSe persistir, reinstale o pacote completo pelo site.',wraplength=600).pack(anchor='w')
+        else:
+            ttk.Label(self.native_frame,text='Selecione o executável do solver ou instale o pacote completo.').pack(anchor='w')
+            ttk.Button(self.native_frame,text='Selecionar CalculiX',command=lambda:self.choose_calculix(filedialog)).pack(anchor='w')
         ttk.Label(frame,text='Minimizar mantém o cálculo ativo. Fechar encerra o comunicador.\nNenhuma porta é publicada na rede.',wraplength=615).pack(anchor='w',pady=8)
         root.protocol('WM_DELETE_WINDOW',self.close)
         root.after(100,self.start);root.after(300,self.poll)

@@ -1,0 +1,14 @@
+Eksteel Comunicador FEA
+
+Este assistente instala o aplicativo e os componentes necessários para executar as simulações neste computador.
+
+Você não precisa instalar Python, CalculiX, Docker ou executar comandos. A instalação é feita apenas para o seu usuário do Windows.
+
+Ao concluir:
+1. Deixe marcada a opção Abrir comunicador.
+2. Volte à Simulação no site e clique em Conectar ao meu computador.
+3. Na janela do comunicador, confira o site e clique em Permitir.
+
+Se desejar, marque Lembrar este site na autorização e Abrir automaticamente ao entrar no Windows no aplicativo. Nas próximas visitas, o site poderá reconectar ao comunicador aberto.
+
+Mantenha o aplicativo aberto ou minimizado enquanto houver cálculos. O navegador poderá pedir sua permissão para acessar o aplicativo neste computador.

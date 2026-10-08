@@ -1,0 +1,60 @@
+name: Windows communicator installer
+on:
+  workflow_dispatch:
+  push:
+    branches: ['build/communicator-windows-*']
+permissions:
+  contents: read
+jobs:
+  installer:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Fetch verified official CalculiX runtime and sources
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist/vendor, dist/notices | Out-Null
+          Invoke-WebRequest https://dhondt.de/calculix_2.23_4win.zip -OutFile dist/vendor/calculix.zip
+          if ((Get-FileHash dist/vendor/calculix.zip -Algorithm SHA256).Hash -ne '87fc4e1721df37370ec67d0a244bb14f9bf804b0a95df49e2ae7369d30ec72e8') { throw 'CalculiX checksum mismatch' }
+          Expand-Archive dist/vendor/calculix.zip dist/vendor/calculix
+          Invoke-WebRequest https://dhondt.de/ccx_2.23.src.tar.bz2 -OutFile dist/notices/ccx_2.23.src.tar.bz2
+          if ((Get-FileHash dist/notices/ccx_2.23.src.tar.bz2 -Algorithm SHA256).Hash -ne '9c88385c10fb04f5dc6c4e98027a51bebdd8aee3920e05190d6c1dd08357d6e7') { throw 'Source checksum mismatch' }
+          Copy-Item dist/vendor/calculix/calculix_2.23_4win/README_Install dist/notices/CalculiX-README.txt
+          Copy-Item services/fea/packaging/GPL-2.txt dist/notices/GPL-2.txt
+          'CalculiX 2.23: https://dhondt.de/ ; unmodified ccx_static.exe from calculix_2.23_4win.zip, renamed ccx.exe. Original source archive included.' | Set-Content dist/notices/PROVENANCE.txt
+      - name: Build and test bundled runtime
+        run: |
+          ./services/fea/packaging/build-windows.ps1 -Calculix dist/vendor/calculix/calculix_2.23_4win/ccx_static.exe -Notices dist/notices -PythonExecutable (Get-Command python.exe).Source
+      - name: Install and validate installed application
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'EksteelInstalled'
+          $install = Start-Process dist/communicator/EksteelComunicador-Setup.exe -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$target") -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw 'Installer failed' }
+          $env:FEA_COMMUNICATOR_EXE = Join-Path $target 'EksteelCommunicator.exe'
+          & dist/communicator-build-env/Scripts/python.exe -m unittest discover -s services/fea -p test_communicator.py
+          if ($LASTEXITCODE -ne 0) { throw 'Installed runtime test failed' }
+          $desktop = Start-Process $env:FEA_COMMUNICATOR_EXE -PassThru
+          try {
+            Start-Sleep -Seconds 5
+            if ($desktop.HasExited) { throw 'Desktop application failed to start' }
+          } finally {
+            if (-not $desktop.HasExited) { Stop-Process -Id $desktop.Id }
+          }
+          (Get-FileHash dist/communicator/EksteelComunicador-Setup.exe -Algorithm SHA256).Hash.ToLower() + '  EksteelComunicador-Setup.exe' | Set-Content dist/communicator/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EksteelComunicador-Windows-x64
+          path: |
+            dist/communicator/EksteelComunicador-Setup.exe
+            dist/communicator/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

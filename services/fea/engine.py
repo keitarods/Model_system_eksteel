@@ -108,7 +108,7 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None):
         original_count = len(volumes)
         original_volume = sum(gmsh.model.occ.getMass(3, tag) for _, tag in volumes)
         if mode == 'part' and len(volumes) != 1 and not preparation.get('unite'):
-            raise ValueError('O modo peça exige exatamente um sólido. Para conjuntos, use Importar montagem.')
+            raise ValueError('O modo peça exige exatamente um sólido. Em Geometria, selecione Montagem · múltiplos sólidos para este STEP.')
         if preparation.get('heal') or preparation.get('removeSmall'):
             gmsh.model.occ.healShapes(volumes, tolerance=tolerance,
                 fixDegenerated=True, fixSmallEdges=preparation.get('removeSmall', False),
@@ -172,7 +172,18 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None):
             gmsh.model.mesh.field.setNumbers(field, 'FieldsList', fields)
             gmsh.model.mesh.field.setAsBackgroundMesh(field)
         progress(25, "Gerando malha volumétrica")
-        gmsh.model.mesh.generate(3)
+        try:
+            gmsh.model.mesh.generate(3)
+        except Exception as error:
+            message = str(error).lower()
+            if ('plc error' in message and 'intersect' in message) or 'self intersect' in message or 'self-intersect' in message:
+                raise ValueError(
+                    'Não foi possível gerar a malha: foram detectadas interseções entre arestas e faces. '
+                    'Em Geometria, tente Reparar e costurar faces; se persistir, revise a geometria no CAD. '
+                    'Diminuir o tamanho mínimo da malha pode ajudar em detalhes pequenos. '
+                    'A união de corpos só deve ser ativada quando representar a ligação física do conjunto.'
+                ) from error
+            raise
         progress(60, "Otimizando elementos")
         gmsh.model.mesh.optimize('')
         gmsh.model.mesh.optimize('Netgen')

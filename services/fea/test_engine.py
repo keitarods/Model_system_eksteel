@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import gmsh
 import numpy as np
@@ -23,6 +24,30 @@ def assembly_step(folder, separated=False):
         gmsh.model.occ.synchronize()
         path=folder/'assembly.step';gmsh.write(str(path));return path.read_text()
     finally:gmsh.finalize()
+
+
+class MeshingErrorTests(unittest.TestCase):
+    def test_intersection_reports_actionable_error_and_releases_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            step = box_step(folder)
+            error = Exception('PLC Error:  A segment and a facet intersect at point')
+            with patch.object(gmsh.model.mesh, 'generate', side_effect=error):
+                with self.assertRaisesRegex(ValueError, 'interseções entre arestas e faces') as caught:
+                    generate_mesh({'step': step, 'size': 5}, folder)
+            self.assertIs(caught.exception.__cause__, error)
+            self.assertEqual(gmsh.isInitialized(), 0)
+
+    def test_unexpected_failure_is_not_misreported_as_geometry_intersection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            step = box_step(folder)
+            error = RuntimeError('Unexpected meshing failure')
+            with patch.object(gmsh.model.mesh, 'generate', side_effect=error):
+                with self.assertRaises(RuntimeError) as caught:
+                    generate_mesh({'step': step, 'size': 5}, folder)
+            self.assertIs(caught.exception, error)
+            self.assertEqual(gmsh.isInitialized(), 0)
 
 
 class EngineTests(unittest.TestCase):

@@ -25,3 +25,9 @@ Desative a inicialização automática antes de mover ou remover a pasta.
 O pacote não instala certificado raiz nem altera proteções do navegador.
 Licenças e informações dos componentes nativos acompanham o pacote.
 A distribuição pública deve cumprir as obrigações de fonte correspondentes.
+
+Ubuntu/Debian: abra o .deb com o instalador de aplicativos do sistema e
+confirme. Abra Eksteel Comunicador FEA pelo menu de aplicativos.
+Para atualizar: termine os cálculos, feche o comunicador, instale o novo
+.deb e abra novamente. As preferências são preservadas. Se usava o ZIP,
+desmarque a abertura automática no antigo e marque no aplicativo instalado.
