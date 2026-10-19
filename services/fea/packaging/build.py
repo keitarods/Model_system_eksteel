@@ -1,4 +1,4 @@
-"""Build on the target OS. Output is a portable folder/zip; Python is bundled.
+"""Build on the target OS. Output is a portable folder/zip and optional Linux .deb; Python is bundled.
 
 Provide a trusted CalculiX executable and its license/source notices. Windows
 DLLs shipped with that executable can be supplied with --native-dir.
@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
+from datetime import datetime, timezone
 
 
 def main():
@@ -19,8 +21,12 @@ def main():
     parser.add_argument('--notices',type=Path,required=True,help='Directory with native solver licenses and corresponding source information')
     parser.add_argument('--native-dir',type=Path,help='Extra DLL/shared-library directory from the trusted solver distribution')
     parser.add_argument('--output',type=Path,default=Path('dist/communicator'))
+    parser.add_argument('--deb',action='store_true',help='Gerar instalador gráfico Debian/Ubuntu (requer dpkg-deb)')
+    parser.add_argument('--version',default=datetime.now(timezone.utc).strftime('%Y.%m.%d.%H%M%S'))
     args=parser.parse_args()
     if platform.system() not in ('Windows','Linux'):parser.error('Build suportado em Windows e Linux.')
+    if args.deb and (platform.system() != 'Linux' or not shutil.which('dpkg-deb')):
+        parser.error('--deb exige Linux com dpkg-deb instalado.')
     if not args.calculix.is_file() or not args.notices.is_dir():parser.error('Executável CalculiX e diretório de avisos são obrigatórios.')
     if not any(args.notices.iterdir()):parser.error('Inclua as licenças e informações do código-fonte correspondente.')
     root=Path(__file__).resolve().parents[1]
@@ -29,7 +35,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='eksteel-build-') as temp:
         work=Path(temp);native=work/'native';native.mkdir()
         ccx=native/('ccx.exe' if os.name=='nt' else 'ccx');shutil.copy2(args.calculix,ccx)
-        command=[sys.executable,'-m','PyInstaller','--noconfirm','--clean','--onedir','--name','EksteelCommunicator',
+        command=[sys.executable,'-m','PyInstaller','--noconfirm','--clean','--onedir','--name','emekaengCommunicator',
             '--distpath',str(out),'--workpath',str(work/'work'),'--specpath',str(work),
             '--paths',str(root),'--collect-all','uvicorn','--collect-all','numpy',
             '--hidden-import','app','--hidden-import','worker','--hidden-import','engine',
@@ -42,9 +48,17 @@ def main():
                 if binary.is_file() and (binary.suffix.lower()=='.dll' or '.so' in binary.name):
                     command += ['--add-binary',f'{binary.resolve()}{os.pathsep}native']
         if os.name=='nt':command.append('--windowed')
+        else:command.append('--strip')
         command.append(str(root/'communicator.py'))
         subprocess.run(command,check=True)
-    folder=out/'EksteelCommunicator'
+    folder=out/'emekaengCommunicator'
+    # PyInstaller resolves input symlinks; retain the SONAME aliases used by
+    # the native solver (for example libarpack.so.2) as well as versioned files.
+    if args.native_dir and platform.system() == 'Linux':
+        destination=folder/'_internal/native'
+        for binary in args.native_dir.iterdir():
+            if binary.is_file() and '.so' in binary.name:
+                shutil.copy2(binary, destination/binary.name)
     shutil.copy2(root/'packaging/README.txt',folder/'LEIA-ME.txt')
     # Keep the Gmsh license provided by its wheel in the redistributable notices.
     import importlib.metadata
@@ -54,9 +68,15 @@ def main():
         if any(word in entry.name.lower() for word in ('license','copying')):
             source=Path(distribution.locate_file(entry))
             if source.is_file():shutil.copy2(source,notices/('gmsh-'+source.name))
-    target=out/('EksteelCommunicator-'+platform.system().lower()+'-'+platform.machine())
-    shutil.make_archive(str(target),'zip',out,folder.name)
+    target=out/('emekaengCommunicator-'+platform.system().lower()+'-'+platform.machine())
+    # Standard Deflate remains compatible with built-in ZIP extractors.
+    with zipfile.ZipFile(str(target)+'.zip', 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for entry in sorted(folder.rglob('*')):
+            if entry.is_file():archive.write(entry, entry.relative_to(out))
     print('Pacote criado:',str(target)+'.zip')
+    if args.deb:
+        from linux_deb import build_deb
+        print('Instalador criado:', build_deb(folder, out, args.version))
 
 
 if __name__=='__main__':main()
