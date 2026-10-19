@@ -2,7 +2,6 @@ import { installation } from "./installation";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
-const cookieDomain = process.env.NEXT_PUBLIC_COOKIE_DOMAIN || undefined;
 
 export async function createClient() {
   const config = await installation();
@@ -13,7 +12,6 @@ export async function createClient() {
     config.url,
     config.key,
     {
-      ...(cookieDomain ? { cookieOptions: { domain: cookieDomain } } : {}),
       cookies: {
         getAll() {
           return cookieStore.getAll();

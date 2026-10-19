@@ -114,6 +114,12 @@ export async function runFeaJob(payload:unknown,signal:AbortSignal,onJob:(id:str
   // an existing id or geometry to a different executor after a mode change.
   const connection=snapshot();
   if(signal.aborted)throw new DOMException('Cancelado','AbortError');
+  const settings=payload as {action?:string;meshControls?:{adaptiveCurvature?:boolean}}|null;
+  if((settings?.action==='mesh'||settings?.action==='diagnose')&&settings.meshControls?.adaptiveCurvature===true){
+    const health=await requestWith(connection,'',{signal});
+    if(health.adaptiveCurvature!==true)throw new Error('Atualize o comunicador/serviço FEA para usar o refinamento adaptativo de superfícies curvas.');
+    if(signal.aborted)throw new DOMException('Cancelado','AbortError');
+  }
   const job=await requestWith(connection,'',{method:'POST',body:JSON.stringify(payload)});
   onJob(job.id);
   const cancel=()=>{void requestWith(connection,`?jobId=${job.id}`,{method:'DELETE',keepalive:true}).catch(()=>{});};

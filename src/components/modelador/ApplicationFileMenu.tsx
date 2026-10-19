@@ -1,5 +1,6 @@
 "use client";
 
+import { EmekaBrand } from "@/components/auth/EmekaBrand";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { WorkspaceMenuSection, type WorkspaceKind } from "@/components/layout/WorkspaceChrome";
 
@@ -16,8 +17,7 @@ export function ApplicationFileMenu({ current, children }: { current: WorkspaceK
     <button type="button" popoverTarget={id} aria-expanded={open} aria-controls={id}
       aria-label="Arquivo — abrir, salvar, importar e exportar" title="Arquivo"
       className="flex shrink-0 items-center gap-2 rounded-md px-2 py-1 hover:bg-chrome-surface-alt focus-visible:outline-2 focus-visible:outline-primary">
-      {/* eslint-disable-next-line @next/next/no-img-element -- local logo shared with the workspace */}
-      <img src="/images/Eksteel-logo.png" alt="Eksteel" className="h-7 w-auto object-contain" />
+      <EmekaBrand compact symbolOnly />
       <span aria-hidden="true" className="text-xs">▾</span>
     </button>
     <div id={id} ref={panel} popover="auto" onToggle={event => setOpen(event.newState === "open")}

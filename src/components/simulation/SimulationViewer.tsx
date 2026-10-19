@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
 import { Bounds, OrbitControls, Html, GizmoHelper, GizmoViewcube } from '@react-three/drei';
 import * as THREE from 'three';
+import type { BodyDiagnostic } from '@/lib/simulation/bodyDiagnostics';
 import type { ShapeMesh } from 'replicad';
 import { SolidMesh } from '@/components/viewer/SolidMesh';
 import type { Study, Load } from '@/lib/simulation/types';
@@ -99,7 +100,18 @@ function Model({study,selected,onSelect,field,scale,wireframe,visibleBody,previe
     </group>)}
   </>;
 }
-export function SimulationViewer({study,preview,selected,onSelect,field,scale,wireframe,visibleBody,previewLoad,colorRange,showExtrema,onClear,selectionDisabled}:{study:Study;preview:ShapeMesh|null;selected:number[];onSelect:(id:number,additive:boolean)=>void;field:ResultField;scale:number;wireframe:boolean;visibleBody?:number|null;previewLoad?:Load;colorRange?:ColorRange|null;showExtrema?:boolean;onClear:()=>void;selectionDisabled?:boolean}){
+function DiagnosticRegion({diagnostic}:{diagnostic:BodyDiagnostic}){
+  const helper=useMemo(()=>{
+    const b=diagnostic.bounds;
+    const box=new THREE.Box3(new THREE.Vector3(b[0],b[1],b[2]),new THREE.Vector3(b[3],b[4],b[5]));
+    const h=new THREE.Box3Helper(box,diagnostic.status==='failed'?0xdc2626:0xd97706);
+    for(const material of [h.material].flat()){material.depthTest=false;material.transparent=true;}h.renderOrder=20;
+    return h;
+  },[diagnostic]);
+  useEffect(()=>()=>{helper.geometry.dispose();for(const material of [helper.material].flat())material.dispose();},[helper]);
+  return <><primitive object={helper}/><Html position={helper.box.getCenter(new THREE.Vector3())} center><span className="pointer-events-none whitespace-nowrap rounded bg-white/90 px-2 py-1 text-xs text-red-800">Corpo preparado {diagnostic.bodyId} · região aproximada</span></Html></>;
+}
+export function SimulationViewer({diagnostic,study,preview,selected,onSelect,field,scale,wireframe,visibleBody,previewLoad,colorRange,showExtrema,onClear,selectionDisabled}:{diagnostic?:BodyDiagnostic|null;study:Study;preview:ShapeMesh|null;selected:number[];onSelect:(id:number,additive:boolean)=>void;field:ResultField;scale:number;wireframe:boolean;visibleBody?:number|null;previewLoad?:Load;colorRange?:ColorRange|null;showExtrema?:boolean;onClear:()=>void;selectionDisabled?:boolean}){
   const [selectionMode,setSelectionMode]=useState<'face'|'edge'>('face');const [multiple,setMultiple]=useState(false);const [selectedEdges,setSelectedEdges]=useState<string[]>([]);const [hoverText,setHoverText]=useState('');
   const boundaries=useMemo(()=>study.mesh?faceBoundaries(study.mesh):[],[study.mesh]);
   const clear=()=>{onClear();setSelectedEdges([]);};
@@ -110,6 +122,7 @@ export function SimulationViewer({study,preview,selected,onSelect,field,scale,wi
     <Canvas camera={{position:[180,-240,180],up:[0,0,1],near:0.01,far:100000}} onPointerMissed={e=>{if(e.type==='click'&&!selectionDisabled&&!e.ctrlKey&&!e.shiftKey&&!e.metaKey)clear();}}>
       <ambientLight intensity={1.1}/><directionalLight position={[100,-100,200]} intensity={2}/>
       {study.mesh?<Model selectionMode={selectionMode} multiple={multiple} selectedEdges={selectedEdges} onEdges={setSelectedEdges} onHover={setHoverText} selectionDisabled={selectionDisabled} colorRange={colorRange} showExtrema={showExtrema} previewLoad={previewLoad} visibleBody={visibleBody} study={study} selected={selected} onSelect={onSelect} field={field} scale={scale} wireframe={wireframe}/>:preview?<Bounds fit clip observe margin={1.3}><SolidMesh mesh={preview} pickMode={false} wireframe={false}/></Bounds>:null}
+      {diagnostic&&<DiagnosticRegion diagnostic={diagnostic}/>}
       <OrbitControls makeDefault/><axesHelper args={[10]}/><GizmoHelper alignment="top-right" margin={[72,72]}><GizmoViewcube faces={['DIREITA','ESQUERDA','TRÁS','FRENTE','TOPO','BASE']} color="#f5f7fa" hoverColor="#c5def4" textColor="#34465c" strokeColor="#8b9aab"/></GizmoHelper>
     </Canvas>
     {!study.mesh&&!preview&&<div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8 text-center text-sm text-slate-500">{study.step?'Geometria carregada. Gere a malha para selecionar faces e configurar o estudo.':'Importe uma peça STEP ou uma montagem, ou use a geometria aberta no Modelador/Montagem.'}</div>}

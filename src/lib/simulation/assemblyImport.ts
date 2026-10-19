@@ -1,3 +1,4 @@
+import { simulationGeometryPreview, geometryStage } from "./geometryPreview";
 import * as THREE from 'three';
 import { compoundShapes, type AnyShape, type ShapeMesh } from 'replicad';
 import type { AssemblyDocument, ComponentInstance } from '@/lib/assembly/types';
@@ -16,7 +17,7 @@ async function readPart(instance:ComponentInstance):Promise<Feature[]> {
   return part.features;
 }
 /** Snapshot of ALL unsuppressed instances, including hidden ones. Never edits the CAD stores. */
-export async function snapshotAssembly(doc:AssemblyDocument,read:ReadPart=readPart):Promise<AssemblySnapshot>{
+export async function snapshotAssembly(doc:AssemblyDocument,read:ReadPart=readPart,onProgress?:(message:string)=>void):Promise<AssemblySnapshot>{
   const active=doc.instances.filter(i=>!i.suppressed);
   if(!active.length)throw new Error('A montagem não possui componentes ativos. Abra ou crie uma montagem primeiro.');
   if(active.length>128)throw new Error('Esta versão permite até 128 componentes por estudo.');
@@ -24,7 +25,8 @@ export async function snapshotAssembly(doc:AssemblyDocument,read:ReadPart=readPa
   if(solved.unsatisfiedConstraintIds.length)throw new Error('Resolva as restrições conflitantes na Montagem antes de importar para a Simulação.');
   const solids:AnyShape[]=[];let compound:AnyShape|null=null;
   try{
-    for(const instance of active){
+    for(const [index,instance] of active.entries()){
+      await geometryStage(onProgress,`Preparando componente ${index+1} de ${active.length}…`);
       const features=await read(instance);
       let solid=rebuildModel([...features,...(instance.assemblyFeatures??[])]);
       if(!solid)throw new Error(`O componente "${instance.label}" não possui um sólido para simular.`);
@@ -43,9 +45,12 @@ export async function snapshotAssembly(doc:AssemblyDocument,read:ReadPart=readPa
     compound=compoundShapes(solids);
     solids.length=0; // compoundShapes consumes its input wrappers.
     if(!('mesh' in compound))throw new Error('A montagem não produziu geometria volumétrica.');
+    await geometryStage(onProgress,"Preparando STEP da montagem para o cálculo…");
     const blob=compound.blobSTEP();
     if(blob.size>12_000_000)throw new Error('A montagem excede o limite de 12 MB de geometria. Simplifique os componentes.');
-    return {step:await blob.text(),preview:compound.mesh(),components:active.map(({id,label})=>({id,label}))};
+    const step=await blob.text();
+    await geometryStage(onProgress,"Preparando visualização 3D…");
+    return {step,preview:simulationGeometryPreview(compound),components:active.map(({id,label})=>({id,label}))};
   }finally{
     compound?.delete();
     solids.forEach(s=>s.delete());

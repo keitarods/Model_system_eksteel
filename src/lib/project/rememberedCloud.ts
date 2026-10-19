@@ -1,5 +1,5 @@
 import { validateSupabaseCredentials } from './supabaseConnection';
-const STORAGE_KEY = 'eksteel.cloud.public-connection.v1';
+const STORAGE_KEY = 'emeka.cloud.public-connection.v1';
 type PreferenceStorage = Pick<Storage, 'getItem'|'setItem'|'removeItem'>;
 export function loadRememberedCloud(storage: PreferenceStorage): {url:string;key:string}|null {
   try {
@@ -15,7 +15,7 @@ export function rememberCloud(storage: PreferenceStorage, url:string, key:string
 }
 export function forgetCloud(storage: PreferenceStorage) { storage.removeItem(STORAGE_KEY); }
 
-const USER_KEY = 'eksteel.cloud.remembered-user.v1';
+const USER_KEY = 'emeka.cloud.remembered-user.v1';
 export function loadRememberedCloudUser(storage: PreferenceStorage): string {
   const value = storage.getItem(USER_KEY);
   return value && value.length <= 320 ? value : '';

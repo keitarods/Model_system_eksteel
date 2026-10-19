@@ -1,0 +1,74 @@
+name: Windows communicator download launcher
+on:
+  workflow_dispatch:
+  push:
+    branches: ['build/communicator-download-*']
+permissions:
+  contents: read
+jobs:
+  launcher:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Build launcher with verified release descriptor
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist/download | Out-Null
+          $compiler = "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+          $descriptor = (Resolve-Path 'services/fea/packaging/windows-download-payload.json').Path
+          if (-not (Test-Path $descriptor)) { throw 'Release descriptor must be staged on this release branch.' }
+          & $compiler /nologo /target:winexe /out:dist\download\emekaengCommunicator-Download.exe /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll "/resource:$descriptor,payload.json" (Resolve-Path 'services/fea/packaging/windows_download.cs').Path
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher compilation failed' }
+      - name: Download exact installer and reject integrity failures
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path (Resolve-Path dist/download) 'emekaengCommunicator-Setup.exe'
+          $download = Start-Process dist/download/emekaengCommunicator-Download.exe -ArgumentList @('--download-to', $installer) -Wait -PassThru
+          if ($download.ExitCode -ne 0) { throw 'Verified download failed' }
+          $descriptor = Get-Content services/fea/packaging/windows-download-payload.json -Raw | ConvertFrom-Json
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLower() -ne $descriptor.sha256) { throw 'Installer checksum differs' }
+          # A failure must never delete an existing destination.
+          $download = Start-Process dist/download/emekaengCommunicator-Download.exe -ArgumentList @('--download-to', $installer) -Wait -PassThru
+          if ($download.ExitCode -eq 0 -or -not (Test-Path $installer)) { throw 'Existing file protection failed' }
+          $descriptor.parts[0].sha256 = '0' * 64
+          $descriptor | ConvertTo-Json -Depth 5 | Set-Content dist/download/invalid.json
+          & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:winexe /out:dist\download\invalid.exe /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /resource:dist\download\invalid.json,payload.json (Resolve-Path 'services/fea/packaging/windows_download.cs').Path
+          if ($LASTEXITCODE -ne 0) { throw 'Negative test compilation failed' }
+          $invalid = Join-Path (Resolve-Path dist/download) 'invalid-download.exe'
+          $download = Start-Process dist/download/invalid.exe -ArgumentList @('--download-to', $invalid) -Wait -PassThru
+          if ($download.ExitCode -eq 0 -or (Test-Path $invalid)) { throw 'Checksum rejection or partial cleanup failed' }
+      - name: Install downloaded payload and validate mesh and calculation
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install -r services/fea/requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Test dependencies failed' }
+          $target = Join-Path $env:RUNNER_TEMP 'EmekaInstalled'
+          $install = Start-Process dist/download/emekaengCommunicator-Setup.exe -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$target") -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw 'Installer failed' }
+          $env:FEA_COMMUNICATOR_EXE = Join-Path $target 'emekaengCommunicator.exe'
+          python -m unittest discover -s services/fea -p test_communicator.py
+          if ($LASTEXITCODE -ne 0) { throw 'Installed runtime test failed' }
+          $desktop = Start-Process $env:FEA_COMMUNICATOR_EXE -PassThru
+          try {
+            Start-Sleep -Seconds 5
+            if ($desktop.HasExited) { throw 'Desktop application failed to start' }
+          } finally {
+            if (-not $desktop.HasExited) { Stop-Process -Id $desktop.Id }
+          }
+          (Get-FileHash dist/download/emekaengCommunicator-Download.exe -Algorithm SHA256).Hash.ToLower() + '  emekaengCommunicator-Download.exe' | Set-Content dist/download/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emekaengCommunicator-Windows-download
+          path: |
+            dist/download/emekaengCommunicator-Download.exe
+            dist/download/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

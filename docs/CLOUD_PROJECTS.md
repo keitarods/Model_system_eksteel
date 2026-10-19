@@ -1,5 +1,7 @@
 # Projetos no banco do cliente
 
+Para a instalação emeka_system, use primeiro o [provisionamento completo](EMEKA_SETUP.md), que substitui a execução das migrações Supabase individuais abaixo.
+
 ## Fluxo atual: conexão simples no software
 
 Em **Projetos na nuvem**, escolha o provedor, informe as credenciais e clique em **Conectar**. Pastas e peças aparecem após a conexão. Preparação de tabelas, autorização de rede, certificados e configuração do login são responsabilidades do administrador, fora desse diálogo.
@@ -38,11 +40,11 @@ A preparação no SQL Editor evita a conexão administrativa PostgreSQL pelo ser
 Para uma instalação comercial, configure uma vez o login do software. Em desenvolvimento, crie `.env.local` na raiz; em hospedagem, use variáveis de ambiente:
 
 ```env
-NEXT_PUBLIC_SUPABASE_URL=https://PROJETO_DE_LOGIN.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=CHAVE_PUBLICA_DO_PROJETO_DE_LOGIN
+EMEKA_SUPABASE_URL=https://PROJETO_DE_LOGIN.supabase.co
+EMEKA_SUPABASE_ANON_KEY=CHAVE_PUBLICA_DO_PROJETO_DE_LOGIN
 ```
 
-Reinicie o servidor local após mudar o ambiente; em produção, recompile/reimplante quando alterar variáveis públicas. Alternativamente, o operador pode usar `/configurar`: em produção essa configuração exige `CAD_SETUP_TOKEN` (mínimo 24 caracteres), além de um diretório persistente/gravável para `.cad-config` ou `CAD_CONFIG_DIR`.
+Reinicie o servidor local após mudar o ambiente; em produção, recompile/reimplante quando alterar variáveis públicas. Alternativamente, o operador pode usar `/configurar`: em produção essa configuração exige `CAD_SETUP_TOKEN` (mínimo 24 caracteres), além de um diretório persistente/gravável para `.emeka-config` ou `EMEKA_CONFIG_DIR`.
 
 O projeto do login pode ser diferente do Supabase de armazenamento de cada cliente. No seu teste, pode ser o mesmo. No modo local sem autenticação configurada, o conector **Supabase Storage** continua usando sua sessão própria; os conectores SQL no servidor exigem o login da instalação. Em produção, configure a autenticação antes de disponibilizar o software.
 

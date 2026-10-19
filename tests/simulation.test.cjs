@@ -20,11 +20,21 @@ test('FEA cancellation while submitting cancels the created job instead of orpha
  try{await assert.rejects(runFeaJob({},c.signal,()=>{},()=>{}),{name:'AbortError'});assert.ok(calls.some(([url,method])=>url.includes('jobId=job')&&method==='DELETE'));}finally{global.fetch=original;}
 });
 test('preparation and mesh controls persist and reject unsafe tolerances',()=>{
- const s={...emptyStudy(),preparation:{heal:true,removeSmall:false,unite:true,closeGaps:true,tolerance:.001},meshControls:{minimumSize:1,curvature:20,qualityTarget:.3}};
+ const s={...emptyStudy(),preparation:{heal:true,removeSmall:false,unite:true,closeGaps:true,tolerance:.001},meshControls:{minimumSize:1,curvature:20,qualityTarget:.3,adaptiveCurvature:true}};
  assert.deepEqual(parseStudy(serializeStudy(s)),s);
  assert.throws(()=>parseStudy(serializeStudy({...s,preparation:{...s.preparation,tolerance:10}})),/Preparação/);
  assert.throws(()=>parseStudy(serializeStudy({...s,preparation:{...s.preparation,unite:false}})),/Preparação/);
  assert.throws(()=>parseStudy(serializeStudy({...s,meshControls:{...s.meshControls,minimumSize:100}})),/Controles/);
+ assert.throws(()=>parseStudy(serializeStudy({...s,meshControls:{...s.meshControls,adaptiveCurvature:'true'}})),/Controles/);
+});
+test('adaptive meshing refuses an older executor before submitting geometry',async()=>{
+ const api=require('../src/lib/simulation/client.ts');await api.setFeaTarget('server');
+ const original=global.fetch,calls=[];
+ global.fetch=async(url,options)=>{calls.push(options?.method??'GET');return {ok:true,json:async()=>({ready:true})};};
+ try{
+  await assert.rejects(api.runFeaJob({action:'mesh',meshControls:{adaptiveCurvature:true}},new AbortController().signal,()=>{},()=>{}),/Atualize/);
+  assert.deepEqual(calls,['GET']);
+ }finally{global.fetch=original;}
 });
 test('quadratic study validates all midside nodes and preserves legacy linear studies',()=>{
  const old={...emptyStudy(),mesh};delete old.elementType;

@@ -1,6 +1,8 @@
-# Model_system_eksteel
+# emeka_system
 
-Modelador CAD com Next.js, React Three Fiber, Zustand e Replicad/OpenCascade.
+Aplicação Emeka Engenharia com portal de ferramentas, modelador CAD, montagem e simulação.
+
+Configuração do novo Supabase, autenticação e preparação do banco: [guia emeka_system](docs/EMEKA_SETUP.md).
 
 - Desenvolvimento: `npm run dev`
 - Testes de geometria, histórico e exportação WASM: `npm test`

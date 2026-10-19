@@ -2,7 +2,6 @@ import { installation } from "@/lib/supabase/installation";
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const cookieDomain = process.env.NEXT_PUBLIC_COOKIE_DOMAIN || undefined;
 
 function isInvalidRefreshTokenError(error: unknown) {
   if (!error || typeof error !== "object" || !("message" in error)) {
@@ -24,7 +23,7 @@ function isSupabaseAuthCookie(name: string) {
 // Rotas acessíveis sem sessão — a própria tela de login, o passo final de
 // redefinir senha, a troca de token por sessão (callback), e a checagem de
 // e-mail que a tela de login chama ANTES do usuário estar autenticado.
-const PUBLIC_PATHS = ["/login", "/reset-password", "/auth/callback"];
+const PUBLIC_PATHS = ["/forgot-password", "/login", "/reset-password", "/auth/callback"];
 
 function isPublicPath(pathname: string) {
   if (pathname.startsWith("/api/auth/")) return true;
@@ -57,7 +56,6 @@ export async function proxy(request: NextRequest) {
     config.url,
     config.key,
     {
-      ...(cookieDomain ? { cookieOptions: { domain: cookieDomain } } : {}),
       cookies: {
         getAll() {
           return request.cookies.getAll();
@@ -101,7 +99,7 @@ export async function proxy(request: NextRequest) {
   }
 
   if (user && pathname === "/login") {
-    return NextResponse.redirect(new URL("/modelador", request.url));
+    return NextResponse.redirect(new URL("/ferramentas", request.url));
   }
 
   return response;

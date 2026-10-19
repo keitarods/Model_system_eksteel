@@ -239,6 +239,23 @@ function buildHelixSolid(feature: Extract<Feature, { type: "helix" }>): Solid | 
 // se flatten=false) no sólido exibido.
 export function rebuildModel(features: Feature[], options: { flatten?: boolean; onFlange?: (feature: Extract<Feature, { type: "flange" }>, link: FlattenLink, parent?: FlattenLink) => void } = {}): Solid | null {
   features = activeFeatures(features);
+  // Imported independent bodies need a single flat compound, not a growing
+  // series of cloned compounds. Keep the general operation path for booleans.
+  if (features.length && features.every((f, i) => f.type === "imported" && !f.bodyGroupId && (i === 0 || f.preserveBody))) {
+    const bodies: Solid[] = [];
+    try {
+      for (const feature of features) {
+        const body = deserializeShape((feature as Extract<Feature, {type: "imported"}>).brep);
+        if (!isShape3D(body)) { body.delete(); throw new Error("Corpo importado inválido."); }
+        bodies.push(body as Solid);
+      }
+    } catch (error) {
+      bodies.forEach(body => body.delete());
+      throw error;
+    }
+    // makeCompound takes ownership of its inputs; do not delete them again.
+    return bodies.length === 1 ? bodies[0] : makeCompound(bodies) as Solid;
+  }
   const unfolded = sheetIsUnfolded(features);
   const flatten = !!options.flatten || unfolded;
   // Reconstructed bodies retain editable native operations, but their cuts only

@@ -8,6 +8,7 @@ import { importBodies } from "@/lib/replicad/exchangeImport";
 import { useFeatureStore } from "@/lib/features/store";
 import type { Feature } from "@/lib/features/types";
 import { createId } from "@/lib/sketch/render";
+import { preparedImportModel } from "@/lib/replicad/preparedModel";
 import { rebuildModel } from "@/lib/replicad/build-model";
 import { serializeProject, NATIVE_MIME_TYPE } from "@/lib/project/nativeFormat";
 import { downloadBlob } from "@/lib/project/folder";
@@ -27,7 +28,7 @@ export function ImportBodyButton({ compact = false }: { compact?: boolean }) {
   useEffect(() => {
     if (open) dialog.current?.showModal();
   }, [open]);
-  const [automatic, setAutomatic] = useState(true);
+  const [automatic, setAutomatic] = useState(false);
   const [progress, setProgress] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -50,8 +51,8 @@ export function ImportBodyButton({ compact = false }: { compact?: boolean }) {
           className="rounded-lg px-2 py-1 text-sm text-chrome-text-muted hover:bg-chrome-surface-alt">Fechar</button>
       </div>
     <div className="space-y-3 p-5 text-sm [overflow-wrap:anywhere]">
-      <p>Importe a geometria e tente reconstruir operações automaticamente. Corpos não reconhecidos permanecem como sólidos importados, sem perda da geometria.</p>
-      <label className="flex items-center gap-2"><input type="checkbox" checked={automatic} disabled={busy} onChange={e => setAutomatic(e.target.checked)} />Tentar reconstruir operações do STEP</label>
+      <p>Por padrão, importe os sólidos preservando a geometria. Ative a reconstrução de operações somente quando precisar recuperar extrusões ou revoluções; essa análise pode demorar em peças complexas.</p>
+      <label className="flex items-center gap-2"><input type="checkbox" checked={automatic} disabled={busy} onChange={e => setAutomatic(e.target.checked)} />Reconstruir operações do STEP (mais demorado)</label>
       {busy && progress && <p role="status">{progress}</p>}
       <p>IPT/IAM: exporte para STEP no Inventor antes de importar.</p>
       <label className="flex items-center justify-between gap-2">Unidade do GLB
@@ -71,7 +72,7 @@ export function ImportBodyButton({ compact = false }: { compact?: boolean }) {
             // Explain unsupported Inventor formats before downloading/initializing the kernel.
             if (/\.(ipt|iam)$/i.test(file.name)) throw new Error("Abra no Inventor e exporte como STEP. Para IAM, as peças referenciadas devem estar disponíveis na exportação.");
             await loadOpenCascade();
-            const result = await importBodies(file, file.name, createId, { glbScale: scale });
+            const result = await importBodies(file, file.name, createId, { glbScale: scale, onProgress: setProgress });
             const recognized = automatic ? await automaticallyRecognizeBodies(result.features, createId, (done, total) => setProgress(`Analisados ${done} de ${total} corpos…`)) : null;
             setConversion({ features: recognized?.features ?? result.features, warnings: automatic ? ["O reconhecimento tenta extrusão/furos e revolução. Não deduz parâmetros de fabricação de chapa.", ...result.warnings.slice(1)] : result.warnings, fileName: file.name, original, bodyCount: result.features.length, results: recognized?.results ?? [] });
           } catch (cause) { setError(cause instanceof Error ? cause.message : "Não foi possível converter o arquivo."); }
@@ -88,19 +89,22 @@ export function ImportBodyButton({ compact = false }: { compact?: boolean }) {
         <ul className="max-h-28 overflow-auto list-disc pl-4">{conversion.features.map(feature => <li key={feature.id}>{feature.label}</li>)}</ul>
         {conversion.warnings.map(warning => <p key={warning}>{warning}</p>)}
         <div className="flex flex-wrap gap-2">
-          <button type="button" disabled={busy} className="rounded-lg border border-chrome-border px-3 py-2 hover:bg-chrome-surface-alt disabled:opacity-50" onClick={() => {
+          <button type="button" disabled={busy} className="rounded-lg border border-chrome-border px-3 py-2 hover:bg-chrome-surface-alt disabled:opacity-50" onClick={async () => {
             setError("");
+            setBusy(true); setProgress("Preparando corpos para inserir no documento…");
             try {
+              await new Promise(resolve => setTimeout(resolve, 32));
               if (useFeatureStore.getState().features !== conversion.original) throw new Error("O documento mudou durante a conversão. Converta novamente para inserir, ou baixe o resultado separado.");
               const features = [...conversion.original, ...conversion.features];
               const model = rebuildModel(features);
               if (!model) throw new Error("Não foi possível reconstruir os corpos convertidos.");
-              model.delete();
+              preparedImportModel.put(features, model);
               // Publish all bodies together: one undo transaction, no partial document on failure.
               useFeatureStore.setState({ features });
               setNotice("Corpos inseridos. Use Salvar para gravar o projeto .eks3d."); setConversion(null);
-            } catch (cause) { setError(cause instanceof Error ? cause.message : "Falha ao inserir corpos."); }
-          }}>Inserir no documento</button>
+            } catch (cause) { preparedImportModel.clear(); setError(cause instanceof Error ? cause.message : "Falha ao inserir corpos."); }
+            finally { setBusy(false); setProgress(""); }
+          }}>{busy ? "Inserindo…" : "Inserir no documento"}</button>
           <button type="button" className="rounded-lg border border-chrome-border px-3 py-2 hover:bg-chrome-surface-alt disabled:opacity-50" onClick={() => {
             const blob = new Blob([serializeProject(conversion.features)], { type: NATIVE_MIME_TYPE });
             downloadBlob(blob, conversion.fileName.replace(/\.[^.]+$/, "") + ".eks3d");

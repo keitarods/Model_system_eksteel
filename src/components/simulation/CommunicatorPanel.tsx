@@ -1,4 +1,5 @@
 'use client';
+import {CommunicatorDownload} from './CommunicatorDownload';
 import {useEffect,useRef,useState} from 'react';
 import {requestLocalFeaConnection,disconnectLocalFea,feaConnection,feaRequest,setFeaTarget,type FeaTarget} from '@/lib/simulation/client';
 
@@ -47,10 +48,11 @@ export function CommunicatorPanel({busy,onChange,onBusyChange}:{busy:boolean;onC
   }
   return <details className="shrink-0 border-b border-chrome-border bg-chrome-bg px-3 py-2 text-xs text-chrome-text" open={!connection.connected&&connection.target==='local'}>
     <summary className="cursor-pointer font-semibold">Cálculo: {connection.target==='local'?'neste computador':'servidor da instalação'} · {available?'Conectado':pending?'Conectando…':'Desconectado'}</summary>
+    {connection.target==='local'&&<CommunicatorDownload/>}
     <fieldset disabled={busy||pending} className="mt-2 flex flex-wrap items-end gap-3 disabled:opacity-60">
       <label>Executar em<select className="ml-2 rounded border bg-white px-2 py-1 text-slate-800" value={connection.target} onChange={e=>void change(()=>setFeaTarget(e.target.value as FeaTarget))}><option value="local">Meu computador</option><option value="server">Servidor da instalação</option></select></label>
       {connection.target==='local'&&<>
-        <p className="basis-full">Abra o aplicativo Eksteel Comunicador no seu computador e aguarde a mensagem “Pronto”. Depois clique em Conectar e aceite a janela de autorização. Este botão conecta ao aplicativo já aberto.</p>
+        <p className="basis-full">Abra o aplicativo emekaengCommunicator no seu computador e aguarde a mensagem “Pronto”. Depois clique em Conectar e aceite a janela de autorização. Este botão conecta ao aplicativo já aberto.</p>
         <button className="rounded border px-3 py-1" onClick={()=>void connect()}>Conectar ao meu computador</button>
         {connection.connected&&<button className="rounded border px-3 py-1" onClick={()=>void change(disconnectLocalFea)}>Desconectar</button>}
         <p className="basis-full">No comunicador, marque “Abrir automaticamente ao entrar no Windows/Linux” e, ao autorizar, “Lembrar este site” para facilitar as próximas conexões. O navegador também poderá pedir permissão de acesso local.</p>

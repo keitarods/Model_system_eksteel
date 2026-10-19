@@ -23,9 +23,9 @@ export function validateSupabaseCredentials(url: string, key: string) {
   return { url: parsed.origin, key: publicKey };
 }
 
-const CONNECTION_KEY = 'eksteel.cloud.tab-connection.v1';
-const AUTH_KEY = 'eksteel.cloud.tab-auth.v1';
-const TAB_KEY = 'eksteel.cloud.tab-id.v1';
+const CONNECTION_KEY = 'emeka.cloud.tab-connection.v1';
+const AUTH_KEY = 'emeka.cloud.tab-auth.v1';
+const TAB_KEY = 'emeka.cloud.tab-id.v1';
 function authStorageKey(storage: Storage | undefined, create = false): string {
   let id = storage?.getItem(TAB_KEY);
   if (!id && create && storage) { id = crypto.randomUUID(); storage.setItem(TAB_KEY, id); }

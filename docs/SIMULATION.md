@@ -9,6 +9,7 @@ A seleção oferece pré-destaque ciano, faces selecionadas em azul, substituiç
 - Peça sólida STEP ou montagem aberta/importada (`.eks3dasm`), com conversão para milímetros.
 - Análise estática com elasticidade linear, material isotrópico comum ou por corpo volumétrico, pequenas deformações; solução incremental para contato unilateral.
 - Geração volumétrica por Gmsh, tetraedros C3D4 ou quadráticos C3D10 (padrão de novos estudos), refinamento local por face, tamanho mínimo e discretização por curvatura. Otimização Gmsh + Netgen com qualidade alvo minSICN, percentil 5 e contagem abaixo do alvo.
+- Falhas PLC, auto-interseções e `overlapping facets` são identificadas como interseções na malha superficial. Quando o Gmsh informa superfícies existentes, o erro inclui faces e corpos da geometria preparada. Nenhum corpo pode ficar sem tetraedros em uma malha aceita.
 - Etapa Geometria: reparo/costura de faces, remoção de pequenas entidades, união de partes e união de microfolgas por tolerância. Relatório de sólidos e variação de volume.
 - Convergência automática com até quatro malhas, redução de 30% dos tamanhos e comparação de deslocamento, tensão e energia.
 - Verificação de equilíbrio de forças e momentos no solver; momentos em N·mm em relação ao centro médio dos nós.
@@ -227,3 +228,203 @@ python services/fea/packaging/build.py --calculix CAMINHO_DO_CCX --notices PASTA
 O script gera pasta portátil e ZIP em `dist/communicator`, fora do Git, com Python, Tk, Gmsh, CalculiX e os módulos FEA. A compilação inclui a biblioteca Gmsh identificada no ambiente e suas dependências. No Windows, o executável deve ser compilado no Windows; para gerar o instalador por usuário, compile `services/fea/packaging/windows.iss` com Inno Setup após criar o pacote. A desinstalação remove o registro de inicialização automática. Assinatura de código, distribuição pública e validação em Windows são etapas de lançamento; não se deve apresentar um pacote não testado como instalador homologado. As obrigações de licença/fontes das bibliotecas nativas também se aplicam à distribuição desktop.
 
 O modo `--headless --origin ORIGEM --pairing-file ARQUIVO` serve somente para integração e testes; o arquivo contém um segredo de pareamento e não deve ser publicado. O executável congelado utiliza `--worker` internamente para iniciar os cálculos sem abrir outra janela. Referência: [execução de aplicações PyInstaller](https://pyinstaller.org/en/stable/runtime-information.html).
+
+### Download do comunicador pelo site
+
+O painel **Cálculo → Meu computador** mostra **Instalar ou atualizar o comunicador**, com downloads para Windows/Linux e instruções de instalação e conexão. Os links são independentes por sistema e só aparecem quando configurados. Instalar o site não disponibiliza automaticamente um instalador desktop. Sem pacote publicado, o painel informa que o download ainda não está disponível.
+
+Configure no servidor Next.js e reinicie/republique a aplicação:
+
+```env
+FEA_COMMUNICATOR_WINDOWS_URL=https://downloads.exemplo.com/EksteelComunicador-Setup.exe
+FEA_COMMUNICATOR_LINUX_URL=https://downloads.exemplo.com/eksteel-comunicador_VERSAO_amd64.deb
+```
+
+Use URLs HTTPS públicas e diretas do pacote completo, sem usuário, senha, parâmetros ou tokens. O endpoint `/api/fea-downloads` fornece apenas esses links; não serve arquivos privados do computador nem expõe as demais variáveis de ambiente. Hospede os binários em uma área de downloads ou release com acesso permitido aos usuários. `dist/` permanece ignorado pelo Git. Não configure o link antes de publicar o arquivo correspondente.
+
+Para o responsável pela distribuição, `build-windows.ps1` automatiza a criação do ambiente de empacotamento, pacote portátil e instalador. Execute **no Windows**, com Python 3.11+ (launcher `py` e Tk), Inno Setup 6 e uma distribuição Windows confiável do CalculiX com as DLLs, licenças e informações de fontes correspondentes:
+
+```powershell
+.\services\fea\packaging\build-windows.ps1 -Calculix C:\FEA\ccx.exe -Notices C:\FEA\licencas -NativeDir C:\FEA\bin
+```
+
+O resultado é `dist/communicator/EksteelComunicador-Setup.exe`, com SHA-256 exibido ao final. O script não baixa um solver de origem desconhecida e não inclui configurações privadas do usuário. Antes de publicar, valide a instalação em outro Windows sem Python, a abertura do aplicativo, a conexão ao site, a geração de malha e um cálculo. O pacote Linux não pode ser executado no Windows. O workflow `.github/workflows/communicator-windows.yml` compila em Windows x64, testa conexão/malha/cálculo, instala o `.exe`, repete os testes no aplicativo instalado e verifica a abertura da interface. A revisão visual do assistente e o teste em um PC de usuário continuam sendo verificações manuais.
+
+O instalador Windows usa assistente em português, instala em uma pasta padrão por usuário e abre o comunicador ao concluir. O usuário final não executa o script de empacotamento: baixa somente o `.exe`. O empacotamento executa o teste de conexão, malha e cálculo contra o executável congelado antes de criar o instalador. A versão instalada usa o motor incluído e não pede seleção manual do CalculiX.
+
+### Instalador Linux para Ubuntu/Debian
+
+O responsável pelo lançamento pode acrescentar `--deb --version VERSAO` ao comando de `build.py` em um Linux com `dpkg-deb`. O pacote inclui o runtime e cria a entrada **Eksteel Comunicador FEA** no menu de aplicativos. Não executa scripts como administrador nem inicia processos durante a instalação. A instalação é gerenciada pelo sistema e pode solicitar autenticação.
+
+O usuário baixa o `.deb`, abre com o instalador gráfico de aplicativos e confirma. Depois abre o comunicador pelo menu e autoriza o site. Para atualizar, termina os cálculos, fecha o aplicativo, instala o pacote mais recente e abre novamente. As preferências em `~/.config/EksteelFEA` são preservadas. A inicialização automática é opcional no aplicativo. Quem usava a pasta portátil deve desmarcar a inicialização automática na versão antiga e marcar novamente na versão instalada, para atualizar o caminho.
+
+O `.deb` não atende todas as distribuições Linux; mantenha o ZIP portátil como alternativa. Teste a instalação gráfica e o runtime na distribuição de destino antes de publicar. A geração local do pacote não publica o download no site.
+
+### Publicar e manter os downloads atualizados
+
+Após validar o executável empacotado, o mantenedor executa
+`npm run fea:publish -- linux VERSAO CAMINHO_DO_DEB` (ou `windows VERSAO CAMINHO_DO_EXE`).
+Configure `SUPABASE_SERVICE_ROLE_KEY` somente no ambiente privado de publicação
+(por exemplo `.env.local`, ignorado pelo Git). Nunca use prefixo `NEXT_PUBLIC_`
+para essa chave. O endereço do Supabase é lido da instalação ou de
+`NEXT_PUBLIC_SUPABASE_URL`.
+
+O publicador cria o bucket público separado `fea-releases` se necessário,
+envia o instalador para uma pasta imutável por versão e verifica o download
+público completo por SHA-256. Somente então atualiza `linux/latest.json` ou
+`windows/latest.json`. O plano do Storage deve permitir o tamanho do instalador
+(o Linux atual ocupa aproximadamente 100 MiB). Falhas não promovem a nova versão.
+Nenhuma permissão dos buckets de projetos ou documentos é alterada.
+
+O endpoint de downloads consulta esses registros automaticamente. As variáveis
+`FEA_COMMUNICATOR_*_URL`, se preenchidas, têm prioridade: remova overrides antigos
+para usar as versões do storage. Publique essa alteração do site uma vez para
+ativar a descoberta; publicações posteriores do comunicador não exigem alterar
+links ou republicar o site. O usuário ainda precisa baixar e instalar a atualização;
+não há instalação silenciosa nem atualização automática do aplicativo local.
+
+### Compilação Windows validada
+
+Execução inicial: https://github.com/keitarods/Model_system_eksteel/actions/runs/37714986138 (Windows Server 2022 x64, Python 3.11). Os testes de conexão, malha e cálculo passaram no executável empacotado e no instalado; a abertura da interface também foi verificada. CalculiX 2.23 `ccx_static.exe` veio do site oficial, com SHA-256 fixado no workflow. O artefato contém instalador e checksum e fica retido no Actions por 14 dias. A cópia local está em `dist/communicator-windows/`. Não é uma publicação no Storage.
+
+### Diagnóstico de falhas por corpo
+
+Na aba **Malha**, use **Diagnosticar corpos da geometria** (também disponível na mensagem de erro de malha). O comunicador testa até 32 sólidos da geometria preparada, um por trabalho cancelável, mantendo reparos, união e parâmetros atuais. Não remove faces compartilhadas para isolar o sólido: restringe a geração ao corpo visível e confirma que ele recebeu elementos volumétricos.
+
+A lista distingue interseção reproduzida, malha isolada gerada e resultado inconclusivo. **Marcar região no modelo** mostra a caixa envolvente do corpo preparado, não a localização exata da face. A numeração é interna ao diagnóstico e pode mudar com reparo/união; não representa necessariamente o nome original de um componente STEP. Se todos passarem, a falha conjunta permanece sem localização comprovada. O diagnóstico não autoriza a análise nem substitui a malha normal. Alterar geometria ou parâmetros descarta a marcação e a lista.
+
+Requer comunicador com a capacidade `bodyDiagnostics`; versões antigas exibem orientação para atualizar. O STEP de referência foi verificado localmente sem inclusão no repositório: com união desativada e tamanho global de 10 mm, corpos preparados 1 e 2 reproduziram interseção e 3 a 6 geraram malha isolada. Isso não certifica a geometria nem garante o mesmo resultado com outros parâmetros.
+
+A versão com diagnóstico foi validada no Windows em https://github.com/keitarods/Model_system_eksteel/actions/runs/37715774590, incluindo diagnóstico pelo protocolo local e recusa de usar um diagnóstico como malha de cálculo. Instaladores locais atualizados: `dist/communicator-diagnostics-windows/` e `dist/communicator-diagnostics-linux/`. O executável Linux passou em diagnóstico, geração de malha e solução analítica. A publicação no Storage permanece adiada conforme solicitado.
+
+### Investigação do STEP de módulos laterais — 13/10/2026
+
+O arquivo `CONJ MODULOS LATERAIS ESQ.stp` foi testado localmente, sem envio a serviços externos e sem inclusão do CAD no repositório. Gmsh 4.15.2 importou 6 sólidos e 1.054 faces. O `BRepCheck_Analyzer` do kernel usado pelo aplicativo considerou os seis sólidos válidos. Essa verificação topológica não certifica que sua discretização superficial esteja livre de interseções.
+
+| Experimento | Resultado observado |
+| --- | --- |
+| Montagem unida, tamanho 20 mm, demais controles padrão | `overlapping facets`, superfícies preparadas 141 e 207 |
+| Montagem sem união, tamanho 10 mm, demais controles padrão | `PLC Error: A segment and a facet intersect at point` |
+| Corpos separados, tamanho 40 mm, sem união | Corpos 1 e 2 falham; 3 a 6 geram tetraedros isoladamente |
+| Corpo 1, tamanho 40 mm sem curvatura | Sobreposição nas superfícies 23 e 418 |
+| Corpo 1, global 40 mm, mínimo 2 mm, curvatura 24, superfície Frontal-Delaunay | Falha PLC |
+| Corpo 1, global 40 mm, mínimo 5 mm, curvatura 12, superfície MeshAdapt | Falha PLC |
+| Corpo 1, global 40 mm, mínimo 0,1 mm, curvatura 24, sem extensão do tamanho da borda | Falha PLC |
+| Reparo/costura e remoção de pequenas entidades, tolerância 0,001 mm; corpo 1, global 40 mm, mínimo 10 mm | Sobreposição nas superfícies renumeradas 2 e 652 |
+| Corpo 1, Gmsh Frontal 3D (algoritmo 4), global 40 mm, mínimo 10 mm | Retorna sem exceção, mas produz zero tetraedros; resultado rejeitado |
+| Netgen 6.2.2608 independente, STEP completo, `maxh=40`, `grading=0.3` | Falha de superfícies e `Stop meshing since boundary mesh is overlapping` no domínio 1 |
+
+Os IDs dependem da preparação aplicada. “Gerou tetraedros isoladamente” não significa aprovação de qualidade, convergência ou cálculo do conjunto. Os testes não demonstram que o CAD seja irrecuperável nem que outro ajuste não possa funcionar. A geração da malha completa deste STEP permanece **não resolvida**.
+
+Foi feita uma comparação de código e documentação públicos, não engenharia reversa do código proprietário do Inventor. O usuário informou que ainda não testou esse STEP no Inventor; não existe resultado de referência desse software para afirmar equivalência. As [configurações documentadas do Inventor](https://help.autodesk.com/cloudhelp/2015/ENU/Inventor-Help/files/GUID-AFA85111-A7A8-4622-9339-0BA9B05C527B.htm) usam tamanho médio relativo ao modelo e mínimo relativo à média; o aplicativo usa milímetros. Copiar os valores numéricos entre os programas não equivale a reproduzir a mesma malha.
+
+Fontes consultadas: [Gmsh no GitHub, espelho do repositório oficial](https://github.com/live-clones/gmsh), [controle de tamanho do Gmsh](https://gmsh.info/doc/texinfo/#Specifying-mesh-element-sizes), [Netgen](https://github.com/NGSolve/netgen), [implementação OCC do Netgen](https://github.com/NGSolve/netgen/blob/master/libsrc/occ/occgeom.cpp) e [integração FEM do FreeCAD](https://github.com/FreeCAD/FreeCAD/tree/main/src/Mod/Fem/femmesh). O Netgen foi instalado apenas em ambiente temporário para o experimento; não é uma nova dependência do produto. A otimização `gmsh.model.mesh.optimize('Netgen')` já existente atua depois da geração dos tetraedros e não substitui o gerador de superfícies.
+
+Para reproduzir com o worker de produção, registrar versão/hash/configurações e limitar cada processo nativo:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 services/fea/.venv/bin/python \
+  services/fea/diagnose_step.py '/caminho/modelo.stp' --size 40 \
+  --body 1 --body 2 --body 3 --body 4 --body 5 --body 6 \
+  --output /tmp/diagnostico-malha.json
+```
+
+Sem `--body`, o script testa a malha completa C3D4, incluindo as verificações de qualidade e limites do runtime. `--unite`, `--heal`, `--minimum` e `--curvature` permitem repetir a preparação; união permanece desativada por padrão. A saída retorna código 1 se qualquer teste falhar, ficar inconclusivo ou exceder o tempo. O relatório não incorpora o conteúdo STEP.
+
+Validação desta alteração: 62 testes FEA passaram. O pacote Linux `dist/communicator-mesh-analysis-linux/eksteel-comunicador_2026.10.13.1_amd64.deb` foi gerado; o executável empacotado passou em conexão local, diagnóstico, malha quadrática e solução analítica. O worker extraído do `.deb` também reproduziu o erro do corpo 1 nas faces 23 e 418. Isso valida o diagnóstico, não resolve a malha do STEP. A publicação continua adiada; uma nova compilação/validação Windows desta alteração permanece pendente.
+
+### Recuperação da malha do corpo 2
+
+Uma segunda rodada obteve uma malha completa do **corpo 2 isolado**, preservando sua geometria e posição no STEP. A configuração é C3D4, tamanho global 40 mm, mínimo 0,5 mm, 12 elementos por volta de curvatura, união desativada e **Refinamento adaptativo de superfícies curvas** ativado. A nova opção está na aba Malha e persiste no estudo. Ela usa `Mesh.MeshSizeFromCurvatureIsotropic=1` e `Mesh.MeshSizeExtendFromBoundary=0`: resolve a curvatura nas duas direções da superfície, sem propagar os pequenos tamanhos das bordas por grandes faces planas. A configuração anterior permanece como padrão para estudos existentes.
+
+Resultado na rotina de produção: **27.097 nós / 79.720 tetraedros**, todos com volume assinado positivo. Qualidade minSICN mínima 0,011246; média 0,552295; percentil 5 de 0,151823; 13.200 elementos abaixo da meta 0,3. Volume CAD 4.188.628,314844 mm³; volume tetraédrico 4.180.337,564416 mm³ (diferença de −0,197935%). A discretização passa pelas verificações do runtime, incluindo correspondência entre faces e elementos volumétricos. Essa aceitação não certifica convergência nem a resposta estrutural; não foram inventados apoios ou cargas. O estudo usa o material padrão editável do aplicativo.
+
+Arquivos locais, fora do Git:
+
+- `dist/mesh-recovery/Corpo-2-malha-recuperada.eksfea`: estudo com geometria, configuração e malha já gerada, validado pelo importador do aplicativo.
+- `dist/mesh-recovery/Corpo-2-original.step`: corpo 2 extraído sem reparos geométricos.
+- `dist/mesh-recovery/Corpo-2-verificacao.json`: hash do arquivo de origem, parâmetros, qualidade e volumes.
+
+Abra o `.eksfea` na Simulação. Para calcular, use o comunicador atualizado e gere a malha na sessão antes de aplicar apoios/cargas. A malha fornecida é linear; trocar para C3D10 aumenta a contagem de nós e não foi validado para este corpo dentro do limite de 30 mil nós. O aplicativo verifica a capacidade `adaptiveCurvature` do executor antes de enviar a geometria, evitando que uma versão antiga ignore a opção.
+
+Reprodução da configuração, com o arquivo extraído:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 services/fea/.venv/bin/python \
+  services/fea/diagnose_step.py dist/mesh-recovery/Corpo-2-original.step \
+  --size 40 --minimum 0.5 --curvature 12 --adaptive-curvature \
+  --output /tmp/corpo-2-reproducao.json
+```
+
+O corpo 1 continua sob investigação: `BOPAlgo_CheckerSI` encontrou 11 interferências no sólido original (OpenCascade 8.0.1), enquanto o corpo 2 apresentou zero. Refinamento de arestas, reconstrução de sólidos a partir das faces, remoção de faces estreitas, costura com tolerância 0,1 mm e unificação de superfícies não produziram uma malha aprovada do corpo 1. As variantes alteradas não foram incorporadas ao estudo entregue. O resultado do corpo 2 não resolve a montagem completa nem autoriza omitir o corpo 1 da análise do conjunto.
+
+Uma tentativa adicional com [fTetWild](https://github.com/wildmeshing/fTetWild), via wildmeshing 0.4.1, também não entregou malha no limite de 180 segundos: triangulação OCC com deflexão 0,03 mm, `epsilon=0.00005` relativo à diagonal, `edge_length_r=0.016`, `max_its=10` e uma thread. O processo registrou falhas `subdivide_tets` antes do timeout. Esse resultado é inconclusivo para outros parâmetros; a biblioteca permaneceu apenas no ambiente temporário de investigação.
+
+Validação do refinamento adaptativo: 63 testes FEA, suíte JavaScript (74 entradas) e `tsc --noEmit` passaram. O novo executável Linux passou no teste de conexão, diagnóstico, malha quadrática e solução analítica; também gerou a malha do corpo 2 real com a nova opção. O instalador local é `dist/communicator-adaptive-linux/eksteel-comunicador_2026.10.13.2_amd64.deb`. Publicação e compilação/validação Windows desta versão permanecem pendentes; o instalador Linux não atualiza uma instalação Windows.
+
+### Comparação com Inventor Stress Analysis e ANSYS
+
+O usuário confirmou que usa o Inventor normal, sem Nastran, e autorizou considerar ANSYS. A referência é, portanto, a Análise de Tensão do Inventor. Sua [documentação de ajustes de malha](https://help.autodesk.com/cloudhelp/2021/ENU/Inventor-Help/files/GUID-B73B2C75-4AA4-4F9E-9BC4-4AB8D26C1765.htm) recomenda refinamento, simplificação e divisão de peças complexas, com contato colado quando necessário. Isso orienta experimentos independentes; não revela a implementação proprietária nem demonstra equivalência com ela.
+
+Experimentos adicionais no corpo 1 isolado, com tamanho global 40 mm, mínimo 0,5 mm e curvatura adaptativa 12:
+
+| Preparação experimental | Verificação e resultado |
+| --- | --- |
+| Divisão por 11 planos transversais em posições X de −1400 a 600 mm, espaçados 200 mm | Produziu 13 volumes; variação de volume total −0,00001420%; geração falhou com interseção PLC |
+| Reconstrução das faces com `BOPAlgo_MakerVolume`, tolerância fuzzy 0,01 mm | Candidato de volume mais próximo ao original passou em `BRepCheck_Analyzer` e apresentou zero interferências em `BOPAlgo_CheckerSI`; variação de volume +0,00002844%; geração ainda falhou com interseção PLC |
+| Agrupamento de faces estreitas do candidato reconstruído via `mesh.setCompound` | Faces com área menor que 100 mm² e largura estimada `2*área/perímetro < 1 mm` foram agrupadas com a vizinha de maior área; geração falhou com sobreposição nas superfícies renumeradas 304 e 305 |
+
+A escolha do sólido de volume mais próximo é apenas uma heurística experimental, não um critério suficiente para aceitar reparos. Esses candidatos não foram incorporados ao produto ou ao estudo entregue. A ausência de interferências no verificador CAD não garantiu uma triangulação superficial utilizável. O corpo 1 permanece sem malha aprovada; trocar somente o solver estrutural não corrige a falha anterior de discretização.
+
+O agrupamento foi inspirado nas estratégias documentadas de [topologia virtual e remoção de pequenas feições do ANSYS](https://ansyshelp.ansys.com/public/Views/Secured/corp/v242/en/wb_msh/msh_troubleshoot.html), sem reproduzir seu algoritmo de Pinch. Não foi encontrado executável ANSYS no PATH ou nos diretórios Linux usuais consultados. Uma integração real via [PyMechanical](https://mechanical.docs.pyansys.com/version/stable/getting_started/running_mechanical.html) exige uma instância local ou remota de Mechanical; a biblioteca não substitui essa instalação. Nenhum teste foi executado no Inventor ou no ANSYS. Esta rodada acrescenta resultados de investigação, sem alterar o runtime ou gerar outra versão do instalador.
+
+### Nome do comunicador — Emeka Engenharia
+
+Os próximos pacotes usam o nome `emekaengCommunicator`, incluindo o executável
+`emekaengCommunicator.exe` no Windows e `emekaengCommunicator` no Linux.
+O instalador Windows passa a ser `emekaengCommunicator-Setup.exe`.
+Os identificadores internos de instalação e preferências permanecem compatíveis
+com instalações anteriores. Os caminhos de artefatos históricos acima descrevem
+os pacotes antigos. A mudança de nome no código não substitui downloads publicados;
+a nova distribuição exige compilação e validação em cada plataforma antes da publicação.
+
+### Distribuição compacta Windows e limite do Storage
+
+O instalador completo `emekaengCommunicator-Setup.exe` da versão `2026.10.18.1`
+ocupa 57.434.141 bytes, enquanto o ZIP portátil ocupa 84.127.714 bytes.
+O Storage da Emeka recusou um limite de upload de 55 MiB. Para manter um único
+arquivo de entrada para o usuário, o instalador completo é armazenado em partes
+internas de até 24 MiB; o pequeno `emekaengCommunicator-Download.exe` baixa essas
+partes, verifica SHA-256 de cada uma e do arquivo completo e abre a instalação.
+A instalação inicial precisa de internet. Não é necessário juntar arquivos manualmente.
+O lançador usa o .NET Framework do Windows e não inclui outro runtime Python.
+
+Fluxo de publicação:
+
+1. Compile e valide o instalador completo no Windows com o workflow habitual.
+2. Execute `node scripts/publish-communicator-payload.cjs VERSAO INSTALADOR JSON_DE_SAIDA`.
+   O script envia e verifica as partes, mas não altera `latest.json`.
+3. Em uma branch de release `build/communicator-download-*`, inclua o descritor
+   gerado como `services/fea/packaging/windows-download-payload.json`. Esse arquivo
+   contém apenas URLs públicas, tamanhos e hashes; nunca credenciais.
+4. O workflow `communicator-windows-download.yml` compila o lançador, testa o
+   download real, a rejeição de checksum incorreto, a preservação de arquivos
+   existentes e a instalação, malha e cálculo do payload baixado.
+5. Publique somente o lançador aprovado com
+   `npm run fea:publish -- windows VERSAO CAMINHO_DO_DOWNLOAD_EXE`.
+   As partes devem permanecer disponíveis enquanto esse lançador for distribuído.
+
+O publicador usa `EMEKA_SUPABASE_URL` com prioridade e a configuração privada em
+`EMEKA_CONFIG_DIR`/`.emeka-config`, alinhado à instalação atual do site.
+O ZIP e uma segunda cópia do instalador completo não precisam ocupar o Storage.
+
+Publicação concluída em 18/10/2026: versão Windows `2026.10.18.1`.
+O lançador público ocupa 13.312 bytes; o payload ocupa 57.434.141 bytes
+(aproximadamente 54,8 MiB), sem duplicar o ZIP no Storage.
+O build completo foi validado no GitHub Actions, execução `39179030217`;
+o lançador e a instalação do payload baixado foram validados na execução
+`39180280444`. Ambos passaram em conexão, diagnóstico, malha quadrática,
+cálculo e abertura do aplicativo. O lançador também passou nos testes de
+checksum incorreto e preservação de arquivo de destino existente.
+O download público e o SHA-256 foram conferidos antes de promover `windows/latest.json`.
+O Linux permanece sem publicação nesta entrega, conforme prioridade dada ao Windows.

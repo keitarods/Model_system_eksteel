@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import gmsh
 import numpy as np
@@ -23,6 +24,89 @@ def assembly_step(folder, separated=False):
         gmsh.model.occ.synchronize()
         path=folder/'assembly.step';gmsh.write(str(path));return path.read_text()
     finally:gmsh.finalize()
+
+
+class MeshingErrorTests(unittest.TestCase):
+    def test_diagnostic_meshes_only_the_requested_body(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            payload = {'step': assembly_step(folder, True), 'size': 5,
+                       'geometryMode': 'assemblyBonded', 'preparation': {'unite': False}}
+            generate = gmsh.model.mesh.generate
+            for body in (1, 2):
+                observed = []
+                def inspect_generation(dim):
+                    generate(dim)
+                    for _, tag in sorted(gmsh.model.getEntities(3)):
+                        _, elements, _ = gmsh.model.mesh.getElements(3, tag)
+                        observed.append(any(len(items) for items in elements))
+                with patch.object(gmsh.model.mesh, 'generate', side_effect=inspect_generation):
+                    result = generate_mesh(payload, folder, diagnostic_body=body)
+                self.assertEqual(result['status'], 'passed')
+                self.assertEqual(result['bodyCount'], 2)
+                self.assertEqual(observed, [body == 1, body == 2])
+                self.assertEqual(len(result['bounds']), 6)
+            self.assertEqual(generate_mesh(payload, folder)['bodyCount'], 2)
+
+    def test_diagnostic_distinguishes_intersection_from_unknown_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            payload = {'step': box_step(folder), 'size': 5}
+            for error, status in [('PLC Error: A segment and a facet intersect at point', 'failed'),
+                                  ('Invalid boundary mesh (overlapping facets) on surface 1 surface 2', 'failed'),
+                                  ('Unknown native error', 'inconclusive')]:
+                with patch.object(gmsh.model.mesh, 'generate', side_effect=Exception(error)):
+                    result = generate_mesh(payload, folder, diagnostic_body=1)
+                self.assertEqual(result['status'], status)
+                self.assertEqual(result['bodyId'], 1)
+                self.assertEqual(gmsh.isInitialized(), 0)
+
+    def test_overlapping_facets_identify_prepared_faces_and_body(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            step = box_step(folder)
+            error = Exception('Invalid boundary mesh (overlapping facets) on surface 1 surface 2')
+            with patch.object(gmsh.model.mesh, 'generate', side_effect=error):
+                with self.assertRaisesRegex(ValueError, 'Faces preparadas: 1, 2; corpos preparados: 1'):
+                    generate_mesh({'step': step, 'size': 5}, folder)
+            self.assertEqual(gmsh.isInitialized(), 0)
+
+    def test_partial_volume_mesh_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            step = assembly_step(folder, True)
+            get_elements = gmsh.model.mesh.getElements
+            def partial(dim=-1, tag=-1):
+                if dim == 3 and tag == 2:
+                    return [], [], []
+                return get_elements(dim, tag)
+            with patch.object(gmsh.model.mesh, 'getElements', side_effect=partial):
+                with self.assertRaisesRegex(ValueError, 'incompleta nos corpos preparados: 2'):
+                    generate_mesh({'step': step, 'size': 5, 'geometryMode': 'assemblyBonded',
+                                   'preparation': {'unite': False}}, folder)
+            self.assertEqual(gmsh.isInitialized(), 0)
+
+    def test_intersection_reports_actionable_error_and_releases_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            step = box_step(folder)
+            error = Exception('PLC Error:  A segment and a facet intersect at point')
+            with patch.object(gmsh.model.mesh, 'generate', side_effect=error):
+                with self.assertRaisesRegex(ValueError, 'interseções entre arestas e faces') as caught:
+                    generate_mesh({'step': step, 'size': 5}, folder)
+            self.assertIs(caught.exception.__cause__, error)
+            self.assertEqual(gmsh.isInitialized(), 0)
+
+    def test_unexpected_failure_is_not_misreported_as_geometry_intersection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            step = box_step(folder)
+            error = RuntimeError('Unexpected meshing failure')
+            with patch.object(gmsh.model.mesh, 'generate', side_effect=error):
+                with self.assertRaises(RuntimeError) as caught:
+                    generate_mesh({'step': step, 'size': 5}, folder)
+            self.assertIs(caught.exception, error)
+            self.assertEqual(gmsh.isInitialized(), 0)
 
 
 class EngineTests(unittest.TestCase):
@@ -92,6 +176,30 @@ class EngineTests(unittest.TestCase):
                         {'preparation':{'tolerance':float('nan')}},
                         {'meshControls':{'qualityTarget':2}}):
             with self.assertRaises(ValueError):mesh_options(payload,5)
+
+    def test_adaptive_curvature_preserves_hole_with_fewer_elements(self):
+        gmsh.initialize(['test', '-nopopup'])
+        gmsh.option.setNumber('General.Terminal', 0)
+        try:
+            box = gmsh.model.occ.addBox(0, 0, 0, 50, 50, 10)
+            hole = gmsh.model.occ.addCylinder(25, 25, 0, 0, 0, 10, 2)
+            gmsh.model.occ.cut([(3, box)], [(3, hole)])
+            gmsh.model.occ.synchronize()
+            gmsh.write(str(self.folder / 'curved-hole.step'))
+        finally:
+            gmsh.finalize()
+        payload = {'step': (self.folder / 'curved-hole.step').read_text(), 'size': 10,
+                   'meshControls': {'minimumSize': 0.5, 'curvature': 12}}
+        regular = generate_mesh(payload, self.folder)
+        payload['meshControls']['adaptiveCurvature'] = True
+        adaptive = generate_mesh(payload, self.folder)
+        self.assertEqual(adaptive['bodyCount'], 1)
+        self.assertAlmostEqual(adaptive['volume'], regular['volume'], places=6)
+        self.assertEqual([f['id'] for f in adaptive['faces']], [f['id'] for f in regular['faces']])
+        self.assertLess(len(adaptive['tetrahedra']), len(regular['tetrahedra']))
+        self.assertGreater(adaptive['quality']['minimum'], 1e-8)
+        with self.assertRaisesRegex(ValueError, 'curvatura adaptativa'):
+            mesh_options({'meshControls': {'adaptiveCurvature': 'yes'}}, 5)
 
     def test_load_conservation_pressure_and_gravity(self):
         study=self.study();_,_,forces,_=prepare_analysis(self.mesh,study)

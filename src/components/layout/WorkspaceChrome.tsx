@@ -40,6 +40,7 @@ export function WorkspaceMenuSection({ current }: { current: WorkspaceKind }) {
   return (
     <>
       <div aria-hidden="true" className="my-1 h-px w-full bg-chrome-border" />
+      <a href="/ferramentas" className="px-3 py-2 text-sm underline">Ferramentas Emeka</a>
       <p className="px-3 pt-1 text-[11px] font-semibold uppercase tracking-wide text-chrome-text-subtle">Ambientes</p>
       {WORKSPACES.map((w) => (
         <button key={w.kind} type="button" title={w.title} disabled={w.kind === current}

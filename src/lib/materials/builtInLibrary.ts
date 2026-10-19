@@ -29,7 +29,7 @@ export function parseMaterialRows(rows:unknown):MaterialDefinition[]{
 
 export async function loadBuiltInMaterials(force=false){
   if(!force&&(state.status==='loading'||state.status==='ready'))return;
-  if(!getBrowserConfig()&&!(process.env.NEXT_PUBLIC_SUPABASE_URL&&process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)){
+  if(!getBrowserConfig()){
     publish({status:'unavailable',materials:[],message:'Autenticação da instalação não configurada: a biblioteca padrão fica indisponível. Importe um .adsklib ou JSON.'});
     return;
   }

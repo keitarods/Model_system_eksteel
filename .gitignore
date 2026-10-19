@@ -42,3 +42,12 @@ services/fea/packaging/vendor/
 /.aws/
 /.codex/
 /.agents/
+
+# Configuração privada da emeka_system
+.emeka-config/
+
+# Certificado local usado na conexão administrativa; provisionado no servidor.
+/prod-ca-2021.crt
+
+# Esquema novo sem credenciais ou dados de clientes
+!database/emeka/001_audits.sql

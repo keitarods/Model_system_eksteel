@@ -61,6 +61,8 @@ import { BASE_SKETCH_PLANE, ORIGIN_POINT, ORIGIN_POINT_ID } from "@/lib/sketch/t
 import type { SketchPlane } from "@/lib/sketch/types";
 import { loadOpenCascade } from "@/lib/replicad/opencascade";
 import { reconstructedSketchProfile, findCenterLine, findLastCircle, findProfileSource, findProfileSources, findSelectedCircles } from "@/lib/replicad/geometry";
+import { IMPORTED_DISPLAY_OPTIONS, type ImportedDisplayQuality } from "@/lib/replicad/displayQuality";
+import { preparedImportModel } from "@/lib/replicad/preparedModel";
 import { rebuildModel, findFlangeParentId } from "@/lib/replicad/build-model";
 import { sketchPlaneFromHit, worldToLocalPoint, offsetOrigin, STANDARD_PLANES, STANDARD_AXES } from "@/lib/replicad/plane";
 import { isPatternable } from "@/lib/replicad/pattern";
@@ -486,6 +488,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
   const solidRef = useRef<Solid | null>(null);
+  const [importedDisplayQuality, setImportedDisplayQuality] = useState<ImportedDisplayQuality>("fast");
+  const [buildStage, setBuildStage] = useState("Preparando modelo…");
+  const [exportingStep, setExportingStep] = useState(false);
+  const stepExportLock = useRef(false);
   const generationRef = useRef(0);
 
   // Projeta as arestas do sólido no plano ativo do sketch (2D local) — só
@@ -819,7 +825,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // Título da aba ao estilo Inventor: mostra o nome do arquivo aberto/salvo
   // por último, não só o nome genérico do app.
   useEffect(() => {
-    document.title = currentFileName ? `${currentFileName} — Modelador Eksteel` : "Modelador Eksteel";
+    document.title = currentFileName ? `${currentFileName} — Modelador emeka_system` : "Modelador emeka_system";
   }, [currentFileName]);
 
   // Recupera a pasta do projeto lembrada de uma sessão anterior (se o
@@ -922,6 +928,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // confirmar que o resultado é "nenhum sólido".
   useEffect(() => {
     if (effectiveFeatures.length === 0) {
+      preparedImportModel.clear();
       solidRef.current?.delete();
       solidRef.current = null;
       measurementSolid.current?.delete(); measurementSolid.current = null; measurementSelection.current = null; setMeasurePoints([]); setMeasureAngle(null); setMeasureCircles([]);
@@ -939,12 +946,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
     (async () => {
       setStatus("loading");
+      setBuildStage("Preparando modelo…");
       try {
         await loadOpenCascade();
 
         let next: Solid | null;
         try {
-          next = rebuildModel(effectiveFeatures, { flatten: flattenView });
+          next = preparedImportModel.take(effectiveFeatures, flattenView) ?? rebuildModel(effectiveFeatures, { flatten: flattenView });
         } catch (err) {
           throw new Error(`Falha ao construir o sólido (${describeThrown(err)}).`);
         }
@@ -954,6 +962,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           return;
         }
 
+        setBuildStage("Preparando visualização 3D…");
+        await new Promise(resolve => setTimeout(resolve, 32));
+        if (cancelled || generation !== generationRef.current) { next?.delete(); return; }
         let nextMesh: ShapeMesh | null = null;
         let nextEdgeLines: number[] = [];
         let nextLinearEdges: { start: [number, number, number]; end: [number, number, number] }[] = [];
@@ -964,8 +975,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             visibleSolid = rebuildVisibleModel(effectiveFeatures, { flatten: flattenView });
             separateDisplay = true;
           }
-          nextMesh = visibleSolid ? Object.assign(visibleSolid.mesh(),{cadEdges:visibleSolid.meshEdges()}) : null;
-          nextEdgeLines = visibleSolid ? visibleSolid.meshEdges().lines : [];
+          // Display tessellation only; BREP, measurements and STEP stay exact.
+          const displayOptions = effectiveFeatures.some(f => f.type === "imported" && !f.suppressed)
+            ? IMPORTED_DISPLAY_OPTIONS[importedDisplayQuality] : undefined;
+          nextMesh = visibleSolid?.mesh(displayOptions) ?? null;
+          const cadEdges = visibleSolid?.meshEdges(displayOptions);
+          if (nextMesh) Object.assign(nextMesh, {cadEdges});
+          nextEdgeLines = cadEdges?.lines ?? [];
           nextLinearEdges = visibleSolid ? listLinearEdges(visibleSolid) : [];
           const reference = visibleSolid ? visibleSolid.clone() as Solid : null;
           measurementSolid.current?.delete(); measurementSolid.current = reference;
@@ -1012,7 +1028,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     return () => {
       cancelled = true;
     };
-  }, [effectiveFeatures, flattenView, showNotice]);
+  }, [effectiveFeatures, flattenView, showNotice, importedDisplayQuality]);
 
   // Ao estilo Inventor/SolidWorks: sempre mostra as opções de plano (os 3
   // planos padrão de origem, mais qualquer face do sólido existente) em vez
@@ -2504,11 +2520,25 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   }, [clearSketch, showNotice]);
 
   const handleExportStep = useCallback(async () => {
-    if (!solidRef.current) return;
-    const blob = solidRef.current.blobSTEP();
-    const result = await saveOrDownload(projectFolder, blob, "modelo.step");
-    showNotice(result === "folder" ? "STEP salvo na pasta selecionada." : "STEP baixado.");
-  }, [projectFolder, showNotice]);
+    if (!solidRef.current || stepExportLock.current || status === "loading") return;
+    stepExportLock.current = true;
+    setExportingStep(true);
+    setErrorMessage(null);
+    try {
+      // Give React and the browser a chance to paint before the synchronous kernel call.
+      await new Promise(resolve => setTimeout(resolve, 32));
+      const solid = solidRef.current;
+      if (!solid) throw new Error("O modelo foi fechado antes da exportação.");
+      const blob = solid.blobSTEP();
+      const result = await saveOrDownload(projectFolder, blob, "modelo.step");
+      showNotice(result === "folder" ? "STEP salvo na pasta selecionada." : "STEP baixado.");
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Não foi possível exportar STEP.");
+    } finally {
+      stepExportLock.current = false;
+      setExportingStep(false);
+    }
+  }, [projectFolder, showNotice, status]);
 
   const handleExportStl = useCallback(async () => {
     if (!solidRef.current) return;
@@ -2664,11 +2694,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           <button
             type="button"
             onClick={handleExportStep}
-            disabled={!hasActiveSolid}
+            disabled={!hasActiveSolid || exportingStep || status === "loading"}
             title={hasActiveSolid ? "Exportar o modelo como STEP" : "Crie um sólido antes de exportar"}
             className="rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <HeaderIcon kind="step" /><span className="">STEP</span>
+            <HeaderIcon kind="step" /><span className="" role="status">{exportingStep ? "Gerando STEP…" : "STEP"}</span>
           </button>
           <button
             type="button"
@@ -2731,9 +2761,12 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             ? `Modo esboço — ${isBasePlane(activePlane) ? "plano XY" : "face selecionada"}`
             : "Modo modelo"}
         </span>
-        {status === "loading" && (
-          <span className="hidden text-xs text-chrome-text-subtle 2xl:inline">Gerando…</span>
-        )}
+        {features.some(f => f.type === "imported") && <label className="flex items-center gap-1 text-xs" title="Detalhe da visualização; não altera as superfícies do STEP">
+          Visualização<select aria-label="Detalhe visual dos corpos importados" disabled={status === "loading"} value={importedDisplayQuality} onChange={e => setImportedDisplayQuality(e.target.value as ImportedDisplayQuality)} className="rounded border bg-white px-1 py-1 text-slate-800">
+            <option value="fast">Rápida</option><option value="balanced">Equilibrada</option><option value="fine">Detalhada</option>
+          </select>
+        </label>}
+        {status === "loading" && <span role="status" className="text-xs text-chrome-text-subtle">{buildStage}</span>}
 
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {editingInContext ? (

@@ -1,4 +1,9 @@
 'use client';
+import { feaRequest } from '@/lib/simulation/client';
+import { readBodyDiagnostic, diagnosticSummary, type BodyDiagnostic } from '@/lib/simulation/bodyDiagnostics';
+import { meshStudyWithBodyCount } from '@/lib/simulation/meshGeometryMode';
+import { classifyStepBodies } from '@/lib/simulation/stepClassification';
+import { simulationGeometryPreview, geometryStage } from "@/lib/simulation/geometryPreview";
 import {ToolbarResizeHandle,useToolbarSize} from "@/components/layout/ToolbarResizeHandle";
 import {ViewportLayoutControls,useViewportLayout} from "@/components/layout/ViewportLayoutControls";
 import {selectReference} from '@/lib/simulation/selection';
@@ -49,6 +54,9 @@ export function SimulationWorkspace({userEmail=''}:{userEmail?:string}){
   const [materialRegion,setMaterialRegion]=useState('common');
   const [convergenceTolerance,setConvergenceTolerance]=useState(5);
   const [tab,setTab]=useState<typeof tabs[number]>('Material');const [selected,setSelected]=useState<number[]>([]);
+  const [diagnostics,setDiagnostics]=useState<BodyDiagnostic[]>([]);
+  const [diagnosticSelection,setDiagnosticSelection]=useState<BodyDiagnostic|null>(null);
+  useEffect(()=>{setDiagnostics([]);setDiagnosticSelection(null);},[study.step,study.size,study.preparation,study.meshControls,study.refinements,study.geometryMode,study.materialMode]);
   const [preview,setPreview]=useState<ShapeMesh|null>(null);const [working,setBusy]=useState(false);const [cancellable,setCancellable]=useState(false);const [status,setStatus]=useState('');const [error,setError]=useState('');
   const [progress,setProgress]=useState<FeaProgress>({percent:null,stage:''});
   const [connecting,setConnecting]=useState(false);const busy=working||connecting;
@@ -78,7 +86,7 @@ export function SimulationWorkspace({userEmail=''}:{userEmail?:string}){
   function update(patch:Partial<Study>,invalidateMesh=false){setStudy({...study,...patch,convergence:undefined,results:null,...(invalidateMesh?{mesh:null}:{})});setSolveId(null);if(invalidateMesh)setMeshId(null);}
   async function withBusy(action:()=>Promise<void>){if(busy)return;setBusy(true);setProgress({percent:null,stage:'Preparando operação…'});setError('');try{await action();}catch(e){if(e instanceof Error&&e.name==='AbortError')setStatus('Cancelado.');else setError(e instanceof Error?e.message:'Erro no estudo.');}finally{setBusy(false);setCancellable(false);controller.current=null;}}
   function canReplace(){return !study.step||window.confirm('Substituir o estudo atual? Salve o arquivo se quiser preservar esta análise.');}
-  async function importModel(){if(!canReplace())return;await withBusy(async()=>{setStatus('Preparando geometria…');await loadOpenCascade();const solid=rebuildModel(useFeatureStore.getState().features);if(!solid)throw new Error('Abra ou crie uma peça no Modelador antes de usar este comando.');try{const properties=usePartPropertiesStore.getState().properties;const material=properties.materialDefinition?toSimulationMaterial(properties.materialDefinition,properties.density):null;const step=await solid.blobSTEP().text();setPreview(solid.mesh());const document=usePartStudiesStore.getState().document;const next:Study={...emptyStudy(),name:`Estudo ${document.studies.length+1}`,step,sourceName:'Peça do Modelador',sourcePart:{documentId:document.id,studyId:crypto.randomUUID()},...(material?{material}:{})};usePartStudiesStore.getState().record(next,JSON.stringify(useFeatureStore.getState().features));setStudy(next);persistPartStudy(next,true);setSelected([]);setMeshId(null);setSolveId(null);setStatus(material?'Estudo vinculado à peça. Gere a malha.':'Estudo vinculado à peça. Configure o material antes de calcular.');}finally{solid.delete();}});}
+  async function importModel(){if(!canReplace())return;await withBusy(async()=>{await geometryStage(setStatus,'Preparando geometria da peça…');await loadOpenCascade();const sourceFeatures=useFeatureStore.getState().features;const solid=rebuildModel(sourceFeatures);if(!solid)throw new Error('Abra ou crie uma peça no Modelador antes de usar este comando.');try{const properties=usePartPropertiesStore.getState().properties;const material=properties.materialDefinition?toSimulationMaterial(properties.materialDefinition,properties.density):null;await geometryStage(setStatus,'Preparando STEP para o cálculo…');const step=await solid.blobSTEP().text();await geometryStage(setStatus,'Preparando visualização 3D…');setPreview(simulationGeometryPreview(solid));const document=usePartStudiesStore.getState().document;const next:Study={...emptyStudy(),...classifyStepBodies(solid),name:`Estudo ${document.studies.length+1}`,step,sourceName:'Peça do Modelador',sourcePart:{documentId:document.id,studyId:crypto.randomUUID()},...(material?{material}:{})};usePartStudiesStore.getState().record(next,JSON.stringify(sourceFeatures));setStudy(next);persistPartStudy(next,true);setSelected([]);setMeshId(null);setSolveId(null);setStatus(material?'Estudo vinculado à peça. Gere a malha.':'Estudo vinculado à peça. Configure o material antes de calcular.');}finally{solid.delete();}});}
   async function importAssembly(file?:File){
     if(file&&file.size>64_000_000){setError('Montagem acima de 64 MB.');return;}
     if(!canReplace())return;
@@ -92,15 +100,80 @@ export function SimulationWorkspace({userEmail=''}:{userEmail?:string}){
         if(!doc.instances.length){const draft=await loadDraft('montagem');if(draft)doc=parseAssembly(draft);}
       }
       await loadOpenCascade();
-      const snapshot=await snapshotAssembly(doc);
+      const snapshot=await snapshotAssembly(doc,undefined,setStatus);
       setPreview(snapshot.preview);
       setStudy({...emptyStudy(),step:snapshot.step,geometryMode:'assemblyBonded',components:snapshot.components,sourceName:file?.name??'Montagem aberta',name:'Estudo da montagem'});
       setSelected([]);setMeshId(null);setSolveId(null);setScale(0);setTab('Material');
       setStatus(`${snapshot.components.length} componente(s) copiado(s) nas posições da montagem. Confira o material comum e defina as fixações FEA.`);
     });
   }
-  async function openStep(file:File){if(file.size>12000000){setError('STEP acima de 12 MB.');return;}if(!canReplace())return;await withBusy(async()=>{const step=await file.text();if(!step.includes('ISO-10303-21;'))throw new Error('Arquivo STEP inválido.');await loadOpenCascade();const shape=await importSTEP(file);try{if(!('mesh' in shape))throw new Error('A geometria deve conter um sólido.');setPreview(shape.mesh());}finally{shape.delete();}setStudy({...emptyStudy(),step,sourceName:file.name});setSelected([]);setMeshId(null);setSolveId(null);setStatus('STEP importado.');});}
-  async function mesh(){await withBusy(async()=>{controller.current=new AbortController();setCancellable(true);setStatus('Enviando geometria…');setMeshId(null);let generatedId:string|null=null;const output=await runFeaJob({action:'mesh',elementType:study.elementType??'C3D4',materialMode:study.materialMode,geometryMode:study.geometryMode??'part',step:study.step,size:study.size,refinements:study.refinements,preparation:study.preparation,meshControls:study.meshControls},controller.current.signal,id=>{generatedId=id;},setStatus,setProgress);validateGeneratedMesh(output.mesh,study);if(study.mesh)verifyFaceReferences(study.mesh,output.mesh,study);const ids=new Set(output.mesh.faces.map((f:{id:number})=>f.id));if([...study.supports,...study.loads].some(c=>c.faceIds.some(id=>!ids.has(id))))throw new Error('As referências de face mudaram. Reabra a geometria para definir novas condições.');setMeshId(generatedId);setStudy({...study,mesh:output.mesh,results:null,convergence:undefined});setSolveId(null);setSelected([]);setStatus('Malha gerada. Selecione as faces para configurar fixações e cargas.');setTab('Fixações');});}
+  async function openStep(file:File) {
+    if(file.size>12000000){setError('STEP acima de 12 MB.');return;}
+    if(!canReplace())return;
+    await withBusy(async()=>{
+      const step=await file.text();
+      if(!step.includes('ISO-10303-21;'))throw new Error('Arquivo STEP inválido.');
+      await loadOpenCascade();
+      await geometryStage(setStatus,'Lendo geometria STEP…');
+      const shape=await importSTEP(file);
+      try {
+        if(!('mesh' in shape))throw new Error('A geometria deve conter um sólido.');
+        const classification=classifyStepBodies(shape);
+        await geometryStage(setStatus,'Preparando visualização 3D…');
+        const preview=simulationGeometryPreview(shape);
+        setStudy({...emptyStudy(),step,sourceName:file.name,...classification});
+        setPreview(preview);setSelected([]);setMeshId(null);setSolveId(null);setScale(0);
+        setTab('Geometria');setPanelOpen(true);
+        const count=classification.components!.length;
+        setStatus(count>1
+          ? `STEP com ${count} corpos: sugerido como montagem. Confira o tipo de geometria e defina união ou contatos conforme o conjunto.`
+          : 'STEP com 1 corpo: identificado como peça. Confira o material e gere a malha.');
+      } finally {shape.delete();}
+    });
+  }
+
+  async function diagnose(){await withBusy(async()=>{
+    setDiagnostics([]);setDiagnosticSelection(null);setTab('Malha');setPanelOpen(true);
+    const health=await feaRequest();
+    if(!health.bodyDiagnostics)throw new Error('Atualize o comunicador para usar o diagnóstico por corpo.');
+    await geometryStage(setStatus,'Preparando visualização do diagnóstico…');
+    await loadOpenCascade();
+    const shape=await importSTEP(new Blob([study.step]));
+    try{setPreview(simulationGeometryPreview(shape));}finally{shape.delete();}
+    controller.current=new AbortController();setCancellable(true);
+    const results:BodyDiagnostic[]=[];
+    let count=1;
+    for(let bodyIndex=1;bodyIndex<=Math.min(count,32);bodyIndex++){
+      const stage=`Testando corpo ${bodyIndex}${count>1?` de ${count}`:''}…`;
+      const output=await runFeaJob({action:'diagnose',bodyIndex,step:study.step,size:study.size,
+        geometryMode:study.geometryMode??'part',elementType:study.elementType,materialMode:study.materialMode,
+        preparation:study.preparation,meshControls:study.meshControls,refinements:study.refinements},
+        controller.current.signal,()=>{},()=>setStatus(stage),p=>setProgress({...p,stage:stage+' '+p.stage}));
+      const result=readBodyDiagnostic(output.diagnostic,bodyIndex);
+      count=result.bodyCount;results.push(result);setDiagnostics([...results]);
+    }
+    setStatus(diagnosticSummary(results));
+  });}
+
+  async function mesh(){await withBusy(async()=>{
+    setDiagnosticSelection(null);
+    let meshStudy=study;
+    if ((study.geometryMode??'part')==='part') {
+      let count=study.components?.length;
+      if (!count) {
+        await geometryStage(setStatus,'Conferindo os corpos do estudo…');
+        await loadOpenCascade();
+        const shape=await importSTEP(new Blob([study.step]));
+        try {
+          const classification=classifyStepBodies(shape);
+          count=classification.components!.length;
+          meshStudy={...study,components:classification.components};
+        } finally {shape.delete();}
+      }
+      meshStudy=meshStudyWithBodyCount(meshStudy,count);
+      if (meshStudy!==study) setStudy(meshStudy);
+    }
+    controller.current=new AbortController();setCancellable(true);setStatus('Enviando geometria…');setMeshId(null);let generatedId:string|null=null;const output=await runFeaJob({action:'mesh',elementType:meshStudy.elementType??'C3D4',materialMode:meshStudy.materialMode,geometryMode:meshStudy.geometryMode??'part',step:meshStudy.step,size:meshStudy.size,refinements:meshStudy.refinements,preparation:meshStudy.preparation,meshControls:meshStudy.meshControls},controller.current.signal,id=>{generatedId=id;},setStatus,setProgress);validateGeneratedMesh(output.mesh,meshStudy);if(meshStudy.mesh)verifyFaceReferences(meshStudy.mesh,output.mesh,meshStudy);const ids=new Set(output.mesh.faces.map((f:{id:number})=>f.id));if([...meshStudy.supports,...meshStudy.loads].some(c=>c.faceIds.some(id=>!ids.has(id))))throw new Error('As referências de face mudaram. Reabra a geometria para definir novas condições.');setMeshId(generatedId);setStudy({...meshStudy,mesh:output.mesh,results:null,convergence:undefined});setSolveId(null);setSelected([]);setStatus('Malha gerada. Selecione as faces para configurar fixações e cargas.');setTab('Fixações');});}
   async function solve(){if(!checkAnalysis())return;await withBusy(async()=>{if(!study.mesh||!meshId)throw new Error('Gere novamente a malha para iniciar uma nova análise nesta sessão.');controller.current=new AbortController();setCancellable(true);setStatus('Enviando análise…');const output=await runFeaJob({action:'solve',meshId,study:{material:study.material,regionMaterials:study.regionMaterials,contacts:study.contacts,supports:study.supports,loads:solverLoads(study.loads,study.mesh)}},controller.current.signal,setSolveId,setStatus,setProgress);validateResults(output.results,study.mesh,study.contacts);setStudy({...study,results:output.results,convergence:undefined});setTab('Resultados');setScale(0);setStatus('Análise concluída. Confira o equilíbrio e compare refinamentos antes de interpretar os resultados.');});}
   async function convergence(){if(!checkAnalysis())return;await withBusy(async()=>{
     if(!study.mesh||!meshId)throw new Error('Gere a malha antes de verificar convergência.');
@@ -189,7 +262,7 @@ export function SimulationWorkspace({userEmail=''}:{userEmail?:string}){
     <input ref={stepInput} type="file" accept=".step,.stp" className="hidden" onChange={e=>{const f=e.target.files?.[0];e.target.value='';if(f)void openStep(f);}}/>
     <input ref={assemblyInput} type="file" accept=".eks3dasm" className="hidden" onChange={e=>{const f=e.target.files?.[0];e.target.value='';if(f)void importAssembly(f);}}/>
     <input ref={studyInput} type="file" accept=".eksfea" className="hidden" onChange={e=>{const f=e.target.files?.[0];e.target.value='';if(f)void openStudy(f);}}/>
-    {error&&<div role="alert" className="flex shrink-0 items-center justify-between bg-red-50 px-3 py-2 text-xs text-red-800">{error}<button aria-label="Fechar erro" onClick={()=>setError('')}>×</button></div>}
+    {error&&<div role="alert" className="flex shrink-0 items-center justify-between bg-red-50 px-3 py-2 text-xs text-red-800">{error}{study.step&&/malha|interseções/i.test(error)&&<button type="button" disabled={busy} className="mx-3 shrink-0 underline" onClick={()=>void diagnose()}>Diagnosticar corpos</button>}<button aria-label="Fechar erro" onClick={()=>setError('')}>×</button></div>}
     <div className="flex min-h-0 flex-1 flex-col md:flex-row">
       <StudyBrowser study={study} tab={tab} field={field} onTab={value=>{setTab(value);setPanelOpen(true);}} onField={value=>{setField(value);setTab('Resultados');setPanelOpen(true);}}/>
       {panelOpen&&<aside className="fea-properties max-h-[45dvh] w-full shrink-0 overflow-y-auto border-r bg-white md:max-h-none md:w-80">
@@ -200,9 +273,14 @@ export function SimulationWorkspace({userEmail=''}:{userEmail?:string}){
           <p>Defina fixações FEA: peças fixas e restrições da Montagem apenas posicionam a geometria.</p>
           <details><summary className="cursor-pointer">Componentes incluídos</summary><ul className="mt-1 max-h-32 overflow-y-auto">{study.components?.map((c,i)=><li key={`${c.id}-${i}`}>{c.label}</li>)}</ul></details>
         </div>}
+        {!!study.components?.some(c=>c.id.startsWith('step-body-')) && <div className="space-y-2 border-b p-3 text-xs">
+          <p>{study.components.length} corpo(s) detectado(s) no STEP. Vários corpos usam o modo de análise de montagem, inclusive quando pertencem a uma peça multicorpos. Nomes e hierarquia originais não são recuperados.</p>
+          <label className="block">Tratar como<select aria-label="Classificação do STEP" className={input} disabled={busy} value={study.geometryMode??'part'} onChange={e=>prepare({},e.target.value as Study['geometryMode'])}><option value="part" disabled={(study.components?.length??0)>1}>Peça · sólido único</option><option value="assemblyBonded">Montagem</option></select></label>
+          <p>A detecção não une os corpos automaticamente. Confira a união ou os contatos na preparação do estudo.</p>
+        </div>}
         <fieldset disabled={busy||!ready} className="space-y-4 p-4 disabled:opacity-60">
           {tab==='Geometria'&&<>
-            <label className="block text-xs">Tipo de geometria<select className={input} value={study.geometryMode??'part'} onChange={e=>prepare({},e.target.value as Study['geometryMode'])}><option value="part">Peça · sólido único</option><option value="assemblyBonded">Montagem · múltiplos sólidos</option></select></label>
+            <label className="block text-xs">Tipo de geometria<select className={input} value={study.geometryMode??'part'} onChange={e=>prepare({},e.target.value as Study['geometryMode'])}><option value="part" disabled={(study.components?.length??0)>1}>Peça · sólido único</option><option value="assemblyBonded">Montagem · múltiplos sólidos</option></select></label>
             <p className="text-xs text-slate-500">Prepare a cópia da geometria usada na simulação. Alterar estas opções limpa cargas, apoios, contatos, refinamentos e materiais por corpo, pois as faces podem mudar.</p>
             {([['heal','Reparar e costurar faces'],['removeSmall','Remover arestas e faces pequenas'],['unite','Unir partes encostadas ou sobrepostas'],['closeGaps','Fechar microfolgas na união']] as const).map(([key,label])=><label key={key} className="flex items-center gap-2 text-xs"><input type="checkbox" checked={preparation[key]} onChange={e=>prepare({[key]:e.target.checked,...(key==='closeGaps'&&e.target.checked?{unite:true}:{}),...(key==='unite'&&!e.target.checked?{closeGaps:false}:{})})}/>{label}</label>)}
             <NumberField label="Tolerância de reparo / união (mm)" value={preparation.tolerance} min={0.0000001} onChange={tolerance=>prepare({tolerance})}/>
@@ -229,10 +307,24 @@ export function SimulationWorkspace({userEmail=''}:{userEmail?:string}){
             <NumberField label="Tamanho global (mm)" value={study.size} min={0.01} onChange={size=>{setMeshId(null);update({size,meshControls:{...meshControls,minimumSize:Math.min(meshControls.minimumSize,size)},refinements:study.refinements.filter(r=>r.size<=size)});}}/>
             <NumberField label="Tamanho mínimo por curvatura (mm)" value={meshControls.minimumSize} min={0.01} onChange={minimumSize=>{setMeshId(null);update({meshControls:{...meshControls,minimumSize}});}}/>
             <NumberField label="Elementos por volta de curvatura (0 = desligado)" value={meshControls.curvature} min={0} onChange={curvature=>{setMeshId(null);update({meshControls:{...meshControls,curvature}});}}/>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={meshControls.adaptiveCurvature??false} onChange={e=>{setMeshId(null);update({meshControls:{...meshControls,adaptiveCurvature:e.target.checked}});}}/>Refinamento adaptativo de superfícies curvas</label>
+            <p className="text-xs text-slate-500">Com curvatura maior que zero, refina as superfícies curvas em todas as direções e evita estender esse tamanho pequeno por grandes faces planas.</p>
             <NumberField label="Qualidade alvo minSICN (0,01 a 0,9)" value={meshControls.qualityTarget} min={0.01} onChange={qualityTarget=>{setMeshId(null);update({meshControls:{...meshControls,qualityTarget}});}}/>
             {study.mesh?.quality.belowTarget!==undefined&&<p className="text-xs">Elementos abaixo da qualidade alvo: {study.mesh.quality.belowTarget} · percentil 5: {study.mesh.quality.p05?.toFixed(3)}</p>}
             <p className="text-xs text-slate-500">C3D10 melhora a interpolação dos deslocamentos, especialmente em flexão. As arestas geométricas permanecem retas: refine também superfícies curvas. Verifique a convergência antes de interpretar os resultados.</p>
             <button className={button} disabled={!study.step||!Number.isFinite(study.size)||study.size<0.01} onClick={()=>void mesh()}>Gerar / atualizar malha</button>
+            <button className={button} disabled={busy||!study.step} onClick={()=>void diagnose()}>Diagnosticar corpos da geometria</button>
+            <p className="text-xs text-slate-500">Testa até 32 corpos separadamente com a preparação e os tamanhos atuais. Pode ser cancelado. Não altera a geometria nem cria uma malha válida para análise.</p>
+            {diagnostics.length>0&&<section aria-label="Diagnóstico por corpo" className="space-y-2 rounded border p-2 text-xs">
+              <p>{diagnosticSummary(diagnostics)}</p>
+              <p>A caixa marca a extensão do corpo preparado, não a face exata. A numeração pode mudar após reparos ou união.</p>
+              {diagnostics.map(d=><div key={d.bodyId} className="rounded border p-2">
+                <strong>Corpo preparado {d.bodyId}: {d.status==='failed'?'interseção':d.status==='passed'?'malha isolada gerada':'inconclusivo'}</strong>
+                <p>{d.message}</p>
+                <button type="button" disabled={busy} className="underline" onClick={()=>{setDiagnosticSelection(d);setScale(0);}}>Marcar região no modelo</button>
+              </div>)}
+              <button type="button" className="underline" onClick={()=>setDiagnosticSelection(null)}>Limpar marcação</button>
+            </section>}
             {study.mesh&&<><p className="text-xs">{study.mesh.nodes.length.toLocaleString()} nós · {study.mesh.tetrahedra.length.toLocaleString()} elementos{study.mesh.bodyCount!==undefined&&<> · {study.mesh.bodyCount} corpo(s) conectado(s)</>}<br/>Qualidade mínima: {study.mesh.quality.minimum.toFixed(3)} · média: {study.mesh.quality.mean.toFixed(3)}<br/>Índice minSICN: próximo de 1 é melhor.</p><p className="text-xs">Selecione faces no modelo para refinar a região.</p><NumberField label="Tamanho local (mm)" value={localSize} min={0.01} onChange={setLocalSize}/><button className={button} disabled={!selected.length||!Number.isFinite(localSize)||localSize<0.01||localSize>study.size} onClick={()=>{setMeshId(null);update({refinements:[...study.refinements.filter(r=>!selected.includes(r.faceId)),...selected.map(faceId=>({faceId,size:localSize}))]});}}>Refinar faces selecionadas</button></>}
             {study.refinements.map(r=><Row key={r.faceId} onRemove={()=>{setMeshId(null);update({refinements:study.refinements.filter(v=>v.faceId!==r.faceId)});}}>Face {r.faceId}: {r.size} mm</Row>)}
             {study.mesh&&!meshId&&<p className="text-xs text-amber-700">Gere a malha novamente antes de resolver. A malha exibida é a última disponível.</p>}
@@ -282,7 +374,7 @@ export function SimulationWorkspace({userEmail=''}:{userEmail?:string}){
         </fieldset>
         <details className="border-t p-3 text-xs text-slate-500"><summary className="cursor-pointer">Serviço de cálculo</summary><p className="mt-2">Selecione o executor e conecte o comunicador no painel acima.</p><p className="mt-2">Limite: 30 mil nós, 100 mil elementos, 240 s por trabalho.</p></details>
       </aside>}
-      <main className="fea-viewport relative min-h-0 min-w-0 flex-1"><SimulationViewer onClear={()=>{if(!busy)setSelected([]);}} selectionDisabled={busy} colorRange={(field.startsWith('stress')||field.startsWith('shear'))&&validColorRange(colorRange)?colorRange:null} showExtrema={showExtrema} previewLoad={tab==='Cargas'&&kind==='force'&&selected.length?{id:'load-preview',kind,faceIds:selected,vector:force.map(v=>v*(inverted?-1:1)) as Vec3,pressure:0,direction:forceDirection,magnitude,inverted}:undefined} visibleBody={study.mesh?.faces.some(f=>f.bodyId===visibleBody)?visibleBody:null} study={study} preview={preview} selected={selected} onSelect={(id,additive)=>{if(!busy)setSelected(ids=>selectReference(ids,id,additive));}} field={field} scale={study.results?scale:0} wireframe={wireframe}/><label className="absolute left-3 top-3 flex items-center gap-2 rounded bg-white/90 px-2 py-1 text-xs"><input type="checkbox" checked={wireframe} onChange={e=>setWireframe(e.target.checked)}/>Exibir malha</label>{study.mesh?.faces.some(f=>f.bodyId!==undefined)&&<label className="absolute left-3 top-12 rounded bg-white/90 px-2 py-1 text-xs">Corpo visível<select className="ml-2 rounded border" value={study.mesh.faces.some(f=>f.bodyId===visibleBody)?visibleBody!:0} onChange={e=>{setVisibleBody(Number(e.target.value)||null);setSelected([]);}}><option value={0}>Todos</option>{[...new Set(study.mesh.faces.map(f=>f.bodyId).filter((id):id is number=>id!==undefined))].sort((a,b)=>a-b).map(id=><option key={id} value={id}>Corpo {id}</option>)}</select></label>}</main>
+      <main className="fea-viewport relative min-h-0 min-w-0 flex-1"><SimulationViewer diagnostic={diagnosticSelection} onClear={()=>{if(!busy)setSelected([]);}} selectionDisabled={busy} colorRange={(field.startsWith('stress')||field.startsWith('shear'))&&validColorRange(colorRange)?colorRange:null} showExtrema={showExtrema} previewLoad={tab==='Cargas'&&kind==='force'&&selected.length?{id:'load-preview',kind,faceIds:selected,vector:force.map(v=>v*(inverted?-1:1)) as Vec3,pressure:0,direction:forceDirection,magnitude,inverted}:undefined} visibleBody={study.mesh?.faces.some(f=>f.bodyId===visibleBody)?visibleBody:null} study={diagnosticSelection?{...study,mesh:null,results:null}:study} preview={preview} selected={selected} onSelect={(id,additive)=>{if(!busy)setSelected(ids=>selectReference(ids,id,additive));}} field={field} scale={study.results?scale:0} wireframe={wireframe}/><label className="absolute left-3 top-3 flex items-center gap-2 rounded bg-white/90 px-2 py-1 text-xs"><input type="checkbox" checked={wireframe} onChange={e=>setWireframe(e.target.checked)}/>Exibir malha</label>{!diagnosticSelection&&study.mesh?.faces.some(f=>f.bodyId!==undefined)&&<label className="absolute left-3 top-12 rounded bg-white/90 px-2 py-1 text-xs">Corpo visível<select className="ml-2 rounded border" value={study.mesh.faces.some(f=>f.bodyId===visibleBody)?visibleBody!:0} onChange={e=>{setVisibleBody(Number(e.target.value)||null);setSelected([]);}}><option value={0}>Todos</option>{[...new Set(study.mesh.faces.map(f=>f.bodyId).filter((id):id is number=>id!==undefined))].sort((a,b)=>a-b).map(id=><option key={id} value={id}>Corpo {id}</option>)}</select></label>}</main>
     </div>
     <footer role="status" className="shrink-0 bg-primary-100 px-4 py-1.5 text-xs text-primary-800">{status||(study.sourcePart?.documentId===partDocument.id?'Estudo vinculado à peça · salve a peça para incluir as simulações no arquivo.':'Estudo independente · selecione uma etapa para começar.')}</footer>
   </div>;

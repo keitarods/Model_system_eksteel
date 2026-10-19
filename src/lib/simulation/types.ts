@@ -3,7 +3,7 @@ export type ElementType = 'C3D4'|'C3D10';
 export type ConvergenceRun = {size:number;nodes:number;elements:number;displacement:number;stress:number;energy:number;displacementChange:number|null;stressChange:number|null;energyChange:number|null};
 export type Vec3 = [number, number, number];
 export type GeometryPreparation = {heal:boolean;removeSmall:boolean;closeGaps:boolean;unite:boolean;tolerance:number};
-export type MeshControls = {minimumSize:number;curvature:number;qualityTarget:number};
+export type MeshControls = {minimumSize:number;curvature:number;qualityTarget:number;adaptiveCurvature?:boolean};
 export type FeaMesh = {
   regions?:{id:number;elements:number[];volume:number;center:Vec3}[];
   preparationReport?: {originalBodies:number;preparedBodies:number;originalVolume:number;preparedVolume:number;volumeChangePercent:number;tolerance:number};

@@ -1,23 +1,11 @@
 "use client";
 
 import { useInstallation } from "@/lib/supabase/InstallationProvider";
-import Image from "next/image";
+import { AppBackground } from "@/components/auth/AppBackground";
+import { EmekaBrand } from "@/components/auth/EmekaBrand";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-
-// Mesma estrutura/lógica da tela de login do sistema de gestão
-// (Eksteel_system/src/app/(auth)/login/page.tsx) — pedido explícito de
-// reaproveitar o MESMO visual. Aponta hoje pro MESMO projeto Supabase do
-// Eksteel_system (decisão explícita, temporária: só dono+sócio usam os
-// dois sistemas por enquanto — ver aviso em .env.local.example sobre
-// separar isso antes de vender licença). Só a aba "Entrar" fica ativa por
-// hora: "Criar conta" e "Esqueci a senha" ficam de fora até existir
-// controle de licença/pagamento — sem isso, cadastro aberto deixaria
-// qualquer pessoa criar conta de graça. Contas são criadas direto no
-// painel do Supabase enquanto isso. As rotas /auth/callback e
-// /reset-password continuam existindo (prontas pra quando essas abas
-// voltarem), só não há mais nenhum link na UI que leve a elas.
 
 const MAX_TENTATIVAS_LOGIN = 5;
 const TEMPO_BLOQUEIO_MS = 5 * 60 * 1000;
@@ -27,11 +15,11 @@ function normalizarEmail(email: string) {
 }
 
 function gerarChaveTentativas(email: string) {
-  return `modelador_login_tentativas_${normalizarEmail(email)}`;
+  return `emeka_login_tentativas_${normalizarEmail(email)}`;
 }
 
 function gerarChaveBloqueio(email: string) {
-  return `modelador_login_bloqueio_${normalizarEmail(email)}`;
+  return `emeka_login_bloqueio_${normalizarEmail(email)}`;
 }
 
 function obterTempoRestanteBloqueio(email: string) {
@@ -89,13 +77,13 @@ export default function LoginPage() {
 
   const [emailLogin, setEmailLogin] = useState(() => {
     if (typeof window === "undefined") return "";
-    return localStorage.getItem("modelador_email_login") ?? "";
+    return localStorage.getItem("emeka_email_login") ?? "";
   });
   const [senhaLogin, setSenhaLogin] = useState("");
   const config = useInstallation();
   const [manterConectado, setManterConectado] = useState(() => {
     if (typeof window === "undefined") return true;
-    const manterSalvo = localStorage.getItem("modelador_manter_conectado");
+    const manterSalvo = localStorage.getItem("emeka_manter_conectado");
     return manterSalvo === null ? true : manterSalvo === "true";
   });
 
@@ -103,6 +91,7 @@ export default function LoginPage() {
   const [erro, setErro] = useState("");
 
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("error") === "auth_callback") setErro("Link inválido ou expirado. Solicite um novo link de acesso.");
     if (!config) return;
 
     let montado = true;
@@ -111,7 +100,7 @@ export default function LoginPage() {
     supabase.auth.getUser().then(({ data }) => {
       if (!montado) return;
       if (data.user) {
-        router.replace("/modelador");
+        router.replace("/ferramentas");
       }
     });
 
@@ -156,7 +145,7 @@ export default function LoginPage() {
     const { error } = await supabase.auth.signInWithPassword({
       email,
       password: senhaLogin,
-    });
+    }).catch(() => ({ error: { code: "network_error" } }));
 
     setCarregando(false);
 
@@ -189,79 +178,31 @@ export default function LoginPage() {
     limparTentativasLogin(email);
 
     if (manterConectado) {
-      localStorage.setItem("modelador_email_login", email);
-      localStorage.setItem("modelador_manter_conectado", "true");
+      localStorage.setItem("emeka_email_login", email);
+      localStorage.setItem("emeka_manter_conectado", "true");
     } else {
-      localStorage.removeItem("modelador_email_login");
-      localStorage.setItem("modelador_manter_conectado", "false");
+      localStorage.removeItem("emeka_email_login");
+      localStorage.setItem("emeka_manter_conectado", "false");
     }
 
-    router.push("/modelador");
+    router.push("/ferramentas");
     router.refresh();
   }
 
   if (!config) return <main className="m-auto p-8"><h1>Configuração inicial necessária</h1><a className="underline" href="/configurar">Configurar acesso ao software</a></main>;
   return (
     <main className="relative min-h-screen overflow-hidden bg-[#1e1e1e] text-white">
-      <div className="absolute inset-0 bg-gradient-to-br from-[#1e1e1e] via-[#1e1e1e] to-[#263238]" />
+      <AppBackground />
 
-      <section className="relative z-10 mx-auto flex min-h-screen max-w-6xl items-center px-4 py-8 sm:px-6 sm:py-12">
-        <div className="grid w-full gap-8 lg:grid-cols-[1fr_auto]">
-          <div className="flex w-full flex-col justify-center">
-            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Image
-                src="/images/Eksteel-logo.png"
-                alt="Eksteel"
-                width={360}
-                height={108}
-                priority
-                unoptimized
-                className="h-20 sm:h-28 w-auto shrink-0 object-contain"
-                onError={() => {}}
-              />
-              <div className="hidden sm:block mx-6 h-20 w-px shrink-0 bg-gray-600" />
-              <span
-                className="text-base sm:text-lg uppercase leading-tight tracking-wider bg-gradient-to-r from-[#9e9e9e] to-[#f0f0f0] bg-clip-text text-transparent"
-                style={{ fontFamily: "var(--font-oswald)", fontWeight: 700 }}
-              >
-                Modelador 3D
-              </span>
+      <section className="relative z-10 mx-auto flex min-h-screen max-w-6xl items-center justify-center px-4 py-8 sm:px-6 sm:py-12 lg:justify-end">
+          <div className="w-full max-w-[400px] rounded-[28px] border border-white/60 bg-white/95 p-6 text-[#1e1e1e] shadow-xl shadow-black/15 backdrop-blur-md sm:p-8">
+            <div className="flex justify-center">
+              <EmekaBrand />
             </div>
-
-            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl md:text-5xl">
-              Modele peças e chapas metálicas em 3D, direto do navegador.
-            </h1>
-
-            <p className="mt-4 text-base leading-7 text-gray-400 md:text-lg">
-              Esboço 2D, extrusão, revolução, ambiente de chapa com dobras e
-              planificação, e exportação pronta pra fabricação — sem instalar
-              nada.
-            </p>
-
-            <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3">
-              {[
-                ["Esboço e Sólidos", "Extrusão, revolução, furos, arredondamento e chanfro."],
-                ["Chapa Metálica", "Dobras com raio automático e planificação pra corte."],
-                ["Exportação", "DXF da chapa planificada e STEP do sólido final."],
-              ].map(([titulo, descricao]) => (
-                <div
-                  key={titulo}
-                  className="rounded-3xl border border-white/10 bg-white/8 p-4 shadow-sm backdrop-blur-md"
-                >
-                  <p className="text-sm font-semibold text-[#90A4AE]">{titulo}</p>
-                  <p className="mt-1.5 text-sm leading-6 text-gray-400">
-                    {descricao}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="w-full self-end rounded-[28px] border border-[#90A4AE] bg-white/90 p-6 shadow-xl shadow-black/5 backdrop-blur-md sm:w-[420px] text-[#1e1e1e]">
-            <h2 className="text-lg font-bold text-[#1e1e1e]">Entrar</h2>
+            <h1 className="sr-only">Entrar na Emeka Engenharia</h1>
 
             {erro ? (
-              <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              <div role="alert" className="mt-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {erro}
               </div>
             ) : null}
@@ -284,7 +225,7 @@ export default function LoginPage() {
                 autoComplete="current-password"
               />
 
-              <div className="rounded-2xl border border-[#90A4AE] bg-[#ECEFF1] px-4 py-3">
+              <div className="py-1">
                 <label className="flex cursor-pointer items-start gap-3 text-sm">
                   <input
                     type="checkbox"
@@ -294,20 +235,17 @@ export default function LoginPage() {
                   />
                   <span>
                     <span className="block font-semibold">
-                      Manter conectado
+                      Lembrar meu e-mail
                     </span>
-                    <span className="mt-1 block text-xs leading-5 text-[#607D8B]">
-                      Mantém seu e-mail salvo neste navegador para facilitar o
-                      próximo acesso.
-                    </span>
+
                   </span>
                 </label>
               </div>
 
               <SubmitButton loading={carregando} idleText="Entrar" />
             </form>
+            <a href="/forgot-password" className="mt-5 block text-center text-sm underline">Esqueci minha senha</a>
           </div>
-        </div>
       </section>
     </main>
   );
@@ -376,9 +314,11 @@ function InputField({
 
   return (
     <div>
-      <label className="mb-1 block text-sm font-medium">{label}</label>
+      <label htmlFor={autoComplete} className="mb-1 block text-sm font-medium">{label}</label>
       <div className="relative">
         <input
+          id={autoComplete}
+          required
           type={tipo}
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -390,12 +330,8 @@ function InputField({
         {ehSenha && (
           <button
             type="button"
-            tabIndex={-1}
             aria-label={mostrar ? "Ocultar senha" : "Mostrar senha"}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              setMostrar((v) => !v);
-            }}
+            onClick={() => setMostrar((v) => !v)}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-[#9E9E9E] hover:text-[#546E7A] transition"
           >
             {mostrar ? <EyeOffIcon /> : <EyeIcon />}

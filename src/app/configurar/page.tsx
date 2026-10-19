@@ -16,6 +16,6 @@ export default function Configure() {
       finally { setBusy(false); }
     }} />
     <p role="alert">{message}</p>
-    <a className="underline" href="/modelador">Voltar ao Modelador</a>
+    <a className="underline" href="/login">Voltar ao login</a>
   </main>;
 }

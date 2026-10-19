@@ -22,9 +22,8 @@ const oswald = Oswald({
 });
 
 export const metadata: Metadata = {
-  title: "Modelador Eksteel",
-  icons: { icon: "/icon.png", apple: "/icon.png" },
-  description: "Modelador 3D — Eksteel.",
+  title: "Emeka Engenharia | Ferramentas",
+  description: "Ferramentas de engenharia para modelagem, montagem e simulação.",
 };
 
 export default async function RootLayout({

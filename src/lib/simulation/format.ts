@@ -65,7 +65,7 @@ export function parseStudy(json:string):Study {
   }
   if(s.meshControls!==undefined){
     const c=s.meshControls;
-    if(!c||![c.minimumSize,c.curvature,c.qualityTarget].every(finite)||c.minimumSize<0.01||c.minimumSize>s.size||c.curvature<0||c.curvature>100||c.qualityTarget<0.01||c.qualityTarget>0.9)throw new Error('Controles de malha inválidos.');
+    if(!c||![c.minimumSize,c.curvature,c.qualityTarget].every(finite)||c.minimumSize<0.01||c.minimumSize>s.size||c.curvature<0||c.curvature>100||c.qualityTarget<0.01||c.qualityTarget>0.9||(c.adaptiveCurvature!==undefined&&typeof c.adaptiveCurvature!=='boolean'))throw new Error('Controles de malha inválidos.');
   }
   if(s.elementType!==undefined&&!['C3D4','C3D10'].includes(s.elementType))throw new Error('Tipo de elemento inválido.');
   if(s.convergence!==undefined){

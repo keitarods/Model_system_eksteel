@@ -21,7 +21,7 @@ export type BodyImportResult = { features: ImportedFeature[]; warnings: string[]
 
 /** Convert a whole exchange document before publishing any changes to the store. */
 export async function importBodies(
-  file: Blob, name: string, createId: () => string, options: { glbScale?: number } = {},
+  file: Blob, name: string, createId: () => string, options: { glbScale?: number; onProgress?: (message: string) => void } = {},
 ): Promise<BodyImportResult> {
   const extension = name.split(".").at(-1)?.toLowerCase();
   if (extension === "ipt" || extension === "iam") {
@@ -32,13 +32,15 @@ export async function importBodies(
   const features: ImportedFeature[] = [];
   const warnings = ["Conversão em corpos base: esboços, cotas e operações originais não são reconstruídos. Salve como .eks3d para continuar editando."];
   const { cast, iterTopo } = await import("replicad");
-  const appendSolids = (shape: Awaited<ReturnType<typeof importSTEP>>, label: string, format: ImportedFeature["format"], nodePath?: string) => {
+  const appendSolids = async (shape: Awaited<ReturnType<typeof importSTEP>>, label: string, format: ImportedFeature["format"], nodePath?: string) => {
     // Drain the iterator before validation so its OpenCascade explorer is disposed even on failure.
     const rawSolids = Array.from(iterTopo(shape.wrapped, "solid"));
     try {
       if (!rawSolids.length) throw new Error(`${label}: não contém sólidos fechados.`);
       if (features.length + rawSolids.length > 200) throw new Error("Importação limitada a 200 corpos.");
-      for (const raw of rawSolids) {
+      for (const [index, raw] of rawSolids.entries()) {
+        options.onProgress?.(`Validando e convertendo corpo ${index + 1} de ${rawSolids.length}…`);
+        if (options.onProgress) await new Promise(resolve => setTimeout(resolve, 0));
         const solid = cast(raw);
         try {
           if (!isShape3D(solid)) throw new Error(`${label}: entidade não sólida.`);
@@ -56,6 +58,8 @@ export async function importBodies(
       }
     } finally { for (const raw of rawSolids) raw.delete(); }
   };
+  options.onProgress?.("Lendo a geometria do arquivo…");
+  if (options.onProgress) await new Promise(resolve => setTimeout(resolve, 0));
   if (extension === "glb") {
     const { readGLBBodies } = await import("./glbImport");
     const bodies = await readGLBBodies(file, options.glbScale ?? 1000);
@@ -63,13 +67,13 @@ export async function importBodies(
       let shape: Awaited<ReturnType<typeof importSTL>>;
       try { shape = await importSTL(body.stl); }
       catch { throw new Error(`${body.path}: não foi possível converter a malha em sólido; repare e feche a malha antes de importar.`); }
-      try { appendSolids(shape, body.path, "glb", body.path); }
+      try { await appendSolids(shape, body.path, "glb", body.path); }
       finally { shape.delete(); }
     }
     warnings.push("GLB: cena estática convertida de Y-up para Z-up; curvas permanecem facetadas. Materiais, texturas e animações não são importados.");
   } else {
     const shape = extension === "stl" ? await importSTL(file) : await importSTEP(file);
-    try { appendSolids(shape, name, extension === "stl" ? "stl" : "step"); }
+    try { await appendSolids(shape, name, extension === "stl" ? "stl" : "step"); }
     finally { shape.delete(); }
     if (extension !== "stl") warnings.push("STEP: corpos e posições preservados; nomes, hierarquia e vínculos da montagem original não são recuperados por este leitor.");
   }

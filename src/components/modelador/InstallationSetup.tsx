@@ -12,13 +12,12 @@ export function InstallationSetup({ suggestedUrl = "", suggestedKey = "", busy =
   const [saved, setSaved] = useState(false);
   const field = "block w-full rounded border border-chrome-border bg-chrome-surface-alt p-2 text-sm";
   if (saved) return <div role="status" className="mb-4 rounded border border-chrome-border p-3 text-sm">
-    Configuração salva. Entre no software para habilitar a preparação de bancos.
+    Configuração salva. Entre com uma conta do novo projeto.
     <a className="ml-2 underline" href="/login">Ir para o login</a>
-    <p className="mt-2">Salve a peça localmente antes de sair desta tela.</p>
   </div>;
   return <details className="mb-4 rounded border border-chrome-border p-3" open>
     <summary className="cursor-pointer text-sm font-semibold">Configurar acesso ao software — primeiro uso</summary>
-    <p className="my-2 text-sm">Informe o Supabase que autentica esta instalação. O armazenamento do cliente é configurado abaixo e pode usar outro projeto.</p>
+    <p className="my-2 text-sm">Informe o novo projeto Supabase da emeka_system. Use a URL e a chave pública desse projeto.</p>
     <fieldset disabled={busy} className="space-y-3">
       <label className="block text-sm">URL do Supabase para login<input className={field} type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://projeto.supabase.co" /></label>
       <label className="block text-sm">Chave pública para login<input className={field} type="password" autoComplete="off" value={key} onChange={e => setKey(e.target.value)} /></label>

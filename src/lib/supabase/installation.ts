@@ -1,9 +1,9 @@
 import { readFile, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 export type Installation = { url: string; key: string };
-const directory = () => process.env.CAD_CONFIG_DIR || join(process.cwd(), '.cad-config');
+const directory = () => process.env.EMEKA_CONFIG_DIR || join(process.cwd(), '.emeka-config');
 export async function installation(): Promise<Installation | null> {
-  if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) return { url: process.env.NEXT_PUBLIC_SUPABASE_URL, key: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY };
+  if (process.env.EMEKA_SUPABASE_URL && process.env.EMEKA_SUPABASE_ANON_KEY) return { url: process.env.EMEKA_SUPABASE_URL, key: process.env.EMEKA_SUPABASE_ANON_KEY };
   try { return JSON.parse(await readFile(join(directory(), 'auth.json'), 'utf8')); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }

@@ -1,20 +1,17 @@
 "use client";
 
-import Image from "next/image";
+import { AppBackground } from "@/components/auth/AppBackground";
+import { EmekaBrand } from "@/components/auth/EmekaBrand";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useInstallation } from "@/lib/supabase/InstallationProvider";
 import { createClient } from "@/lib/supabase/client";
-
-// Passo final do "Esqueci minha senha": o link do e-mail já passou pela
-// rota /auth/callback, que trocou o token por uma sessão de recuperação —
-// aqui só falta pedir a nova senha e gravar. Não existe no sistema de
-// gestão (o link de lá aponta pra essa rota, mas a página nunca foi
-// criada) — construída do zero aqui, mesma linguagem visual do login.
 
 const REGEX_SENHA_FORTE = /^(?=.*[A-Z])(?=.*[^A-Za-z0-9]).{8,}$/;
 
 export default function ResetPasswordPage() {
   const router = useRouter();
+  const config = useInstallation();
   const [senha, setSenha] = useState("");
   const [confirmarSenha, setConfirmarSenha] = useState("");
   const [carregando, setCarregando] = useState(false);
@@ -35,9 +32,12 @@ export default function ResetPasswordPage() {
       return;
     }
 
+    if (!config) { setErro("Configure o acesso da emeka_system antes de redefinir a senha."); return; }
     setCarregando(true);
     const supabase = createClient();
-    const { error } = await supabase.auth.updateUser({ password: senha });
+    const { data, error: sessionError } = await supabase.auth.getUser().catch(() => ({ data: { user: null }, error: true }));
+    if (sessionError || !data.user) { setCarregando(false); setErro("Link inválido ou expirado. Solicite um novo link em Esqueci minha senha."); return; }
+    const { error } = await supabase.auth.updateUser({ password: senha }).catch(() => ({ error: { message: "Falha de conexão. Tente novamente." } }));
     setCarregando(false);
 
     if (error) {
@@ -47,29 +47,21 @@ export default function ResetPasswordPage() {
 
     setSucesso(true);
     setTimeout(() => {
-      router.push("/modelador");
+      router.push("/ferramentas");
       router.refresh();
     }, 1500);
   }
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-[#1e1e1e] text-white">
-      <div className="absolute inset-0 bg-gradient-to-br from-[#1e1e1e] via-[#1e1e1e] to-[#263238]" />
+      <AppBackground />
 
       <section className="relative z-10 mx-auto flex min-h-screen max-w-md flex-col items-center justify-center px-4">
-        <Image
-          src="/images/Eksteel-logo.png"
-          alt="Eksteel"
-          width={280}
-          height={84}
-          priority
-          unoptimized
-          className="mb-8 h-16 w-auto object-contain"
-          onError={() => {}}
-        />
+        <div className="mb-8"><EmekaBrand /></div>
 
         <div className="w-full rounded-[28px] border border-[#90A4AE] bg-white/90 p-6 text-[#1e1e1e] shadow-xl shadow-black/5 backdrop-blur-md">
           <h1 className="text-lg font-bold">Defina sua nova senha</h1>
+          <a href="/forgot-password" className="mt-2 block text-sm underline">Solicitar novo link de acesso</a>
 
           {sucesso ? (
             <div className="mt-5 rounded-2xl border border-[#90A4AE] bg-[#ECEFF1] px-4 py-3 text-sm text-[#546E7A]">
@@ -112,7 +104,7 @@ export default function ResetPasswordPage() {
 
               <button
                 type="submit"
-                disabled={carregando}
+                disabled={carregando || !config}
                 className="w-full rounded-2xl bg-[#546E7A] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#37474F] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {carregando ? "Salvando..." : "Salvar nova senha"}

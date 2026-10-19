@@ -1,8 +1,13 @@
-Eksteel Comunicador FEA — Windows e Linux
+emekaengCommunicator — Windows e Linux
 
 1. Instale ou extraia a pasta completa para um local permanente no seu usuário.
-2. Abra EksteelCommunicator.exe (Windows) ou EksteelCommunicator (Linux).
+2. Abra emekaengCommunicator.exe (Windows) ou emekaengCommunicator (Linux).
    O serviço inicia automaticamente, sem terminal nem configuração de endereço.
+
+No Windows, emekaengCommunicator-Download.exe é o instalador pequeno oferecido
+pelo site. Mantenha a internet conectada durante a instalação: ele baixa os
+componentes, verifica sua integridade e abre o instalador completo automaticamente.
+Não é necessário baixar ou juntar partes manualmente.
 3. No site, em Simulação > Meu computador, clique em Conectar ao meu computador.
 4. Na janela do comunicador, confira o site e clique em Permitir.
 5. Marque Lembrar este site para conectar automaticamente nas próximas visitas.
@@ -25,3 +30,9 @@ Desative a inicialização automática antes de mover ou remover a pasta.
 O pacote não instala certificado raiz nem altera proteções do navegador.
 Licenças e informações dos componentes nativos acompanham o pacote.
 A distribuição pública deve cumprir as obrigações de fonte correspondentes.
+
+Ubuntu/Debian: abra o .deb com o instalador de aplicativos do sistema e
+confirme. Abra emekaengCommunicator pelo menu de aplicativos.
+Para atualizar: termine os cálculos, feche o comunicador, instale o novo
+.deb e abra novamente. As preferências são preservadas. Se usava o ZIP,
+desmarque a abertura automática no antigo e marque no aplicativo instalado.
