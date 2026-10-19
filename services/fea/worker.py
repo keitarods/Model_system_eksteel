@@ -21,6 +21,8 @@ def main(folder):
         payload=json.loads((folder/'request.json').read_text())
         if payload['action']=='mesh':
             result={'mesh':generate_mesh(payload,folder,progress)}
+        elif payload['action']=='diagnose':
+            result={'diagnostic':generate_mesh(payload,folder,progress,diagnostic_body=payload.get('bodyIndex'))}
         else:
             mesh=json.loads((Path(payload['meshFolder'])/'result.json').read_text())['mesh']
             result={'results':solve(mesh,payload['study'],folder,progress)}

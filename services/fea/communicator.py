@@ -57,7 +57,7 @@ def autostart(enabled):
             folder.mkdir(parents=True,exist_ok=True)
             # Desktop Entry Exec quoting (not a shell command).
             escaped=['"'+arg.replace('\\','\\\\').replace('"','\\"').replace('`','\\`').replace('$','\\$').replace('%','%%')+'"' for arg in command]
-            path.write_text('[Desktop Entry]\nType=Application\nName=Eksteel Comunicador FEA\nExec='+' '.join(escaped)+'\nTerminal=false\n')
+            path.write_text('[Desktop Entry]\nType=Application\nName=emekaengCommunicator\nExec='+' '.join(escaped)+'\nTerminal=false\n')
         else:path.unlink(missing_ok=True)
 
 
@@ -108,7 +108,7 @@ class DesktopApp:
             try:self.trusted.append(normalize_origin(origin))
             except (ValueError,AttributeError):pass
         self.server=None;self.dialog=None;self.request_id=None;self.closing=False
-        root.title('Eksteel · Comunicador FEA');root.geometry('660x430')
+        root.title('emekaengCommunicator');root.geometry('660x430')
         frame=ttk.Frame(root,padding=18);frame.pack(fill='both',expand=True)
         ttk.Label(frame,text='Cálculos neste computador',font=('',15,'bold')).pack(anchor='w')
         ttk.Label(frame,text='Abra a Simulação no site e aceite a solicitação nesta janela.\nNão é necessário copiar códigos nem digitar o endereço do site.',wraplength=615).pack(anchor='w',pady=12)
@@ -121,10 +121,13 @@ class DesktopApp:
         actions=ttk.Frame(frame);actions.pack(fill='x',pady=8)
         ttk.Button(actions,text='Esquecer sites e revogar acessos',command=self.forget).pack(side='left')
         ttk.Button(actions,text='Tentar iniciar novamente',command=self.start).pack(side='left',padx=8)
-        self.ccx=tk.StringVar(value=settings.get('calculix',''))
+        self.ccx=tk.StringVar(value='' if getattr(sys,'frozen',False) else settings.get('calculix',''))
         self.native_frame=ttk.LabelFrame(frame,text='CalculiX não encontrado',padding=8)
-        ttk.Label(self.native_frame,text='Selecione o executável do solver ou instale o pacote completo.').pack(anchor='w')
-        ttk.Button(self.native_frame,text='Selecionar CalculiX',command=lambda:self.choose_calculix(filedialog)).pack(anchor='w')
+        if getattr(sys,'frozen',False):
+            ttk.Label(self.native_frame,text='Não foi possível iniciar. Feche e abra o aplicativo novamente.\nSe persistir, reinstale o pacote completo pelo site.',wraplength=600).pack(anchor='w')
+        else:
+            ttk.Label(self.native_frame,text='Selecione o executável do solver ou instale o pacote completo.').pack(anchor='w')
+            ttk.Button(self.native_frame,text='Selecionar CalculiX',command=lambda:self.choose_calculix(filedialog)).pack(anchor='w')
         ttk.Label(frame,text='Minimizar mantém o cálculo ativo. Fechar encerra o comunicador.\nNenhuma porta é publicada na rede.',wraplength=615).pack(anchor='w',pady=8)
         root.protocol('WM_DELETE_WINDOW',self.close)
         root.after(100,self.start);root.after(300,self.poll)
@@ -194,7 +197,7 @@ class DesktopApp:
                 self.dialog.destroy();self.dialog=None;self.request_id=None
             if pending and not self.dialog:
                 self.request_id,origin=pending[0]
-                self.dialog=self.tk.Toplevel(self.root);self.dialog.title('Autorizar site · Eksteel');self.dialog.geometry('560x235');self.dialog.transient(self.root)
+                self.dialog=self.tk.Toplevel(self.root);self.dialog.title('Autorizar site · emekaengCommunicator');self.dialog.geometry('560x235');self.dialog.transient(self.root)
                 box=ttk.Frame(self.dialog,padding=18);box.pack(fill='both',expand=True)
                 ttk.Label(box,text='Permitir que este site use seu computador para cálculos?',wraplength=510,font=('',11,'bold')).pack(anchor='w')
                 ttk.Label(box,text=origin,wraplength=510).pack(anchor='w',pady=14)
@@ -224,7 +227,7 @@ def main():
         # Runtime settings are inherited from the desktop parent.
         from worker import main as worker_main
         worker_main(sys.argv[2]);return
-    parser=argparse.ArgumentParser(description='Eksteel Comunicador FEA')
+    parser=argparse.ArgumentParser(description='emekaengCommunicator')
     parser.add_argument('--headless',action='store_true',help='Para testes e integração técnica')
     parser.add_argument('--origin')
     parser.add_argument('--calculix',default='')

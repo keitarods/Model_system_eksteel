@@ -4,6 +4,7 @@ Region materials and consistent quadrature recover stresses, reactions and energ
 """
 import math
 import os
+import re
 import subprocess
 import numpy as np
 from unilateral import spring_lines, solve_incremental, recover_unilateral
@@ -61,6 +62,8 @@ def mesh_options(payload, size):
     controls = payload.get('meshControls', {})
     if not isinstance(preparation, dict) or not isinstance(controls, dict):
         raise ValueError('Opções de preparação ou malha inválidas.')
+    if 'adaptiveCurvature' in controls and type(controls['adaptiveCurvature']) is not bool:
+        raise ValueError('Opção de curvatura adaptativa inválida.')
     for key in ('heal', 'removeSmall', 'closeGaps', 'unite'):
         if key in preparation and type(preparation[key]) is not bool:
             raise ValueError('Opção de preparação inválida.')
@@ -71,7 +74,35 @@ def mesh_options(payload, size):
     return preparation, tolerance, minimum, curvature, quality
 
 
-def generate_mesh(payload, folder, progress=lambda percent, stage: None):
+def intersection_failure(error):
+    """Classify boundary meshing errors, not CAD validity or solver failures."""
+    message = str(error).lower()
+    return (('plc error' in message and 'intersect' in message)
+            or 'self intersect' in message or 'self-intersect' in message
+            or 'overlapping facets' in message)
+
+
+def intersection_location(error, volumes):
+    """Report only entity IDs supplied by Gmsh and present in this prepared CAD."""
+    import gmsh
+    surfaces = sorted(set(int(tag) for tag in re.findall(r'\bsurface\s+(\d+)\b', str(error), re.I)))
+    if not surfaces:
+        return ''
+    owners = []
+    found = set()
+    for index, volume in enumerate(sorted(volumes), 1):
+        boundary = {tag for dim, tag in gmsh.model.getBoundary([volume], oriented=False) if dim == 2}
+        common = boundary.intersection(surfaces)
+        if common:
+            owners.append(index)
+            found.update(common)
+    if not found:
+        return ''
+    return (' Faces preparadas: ' + ', '.join(map(str, sorted(found)))
+            + '; corpos preparados: ' + ', '.join(map(str, owners)) + '.')
+
+
+def generate_mesh(payload, folder, progress=lambda percent, stage: None, *, diagnostic_body=None):
     progress(5, "Preparando geometria")
     import gmsh
     step = payload.get('step', '')
@@ -108,7 +139,7 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None):
         original_count = len(volumes)
         original_volume = sum(gmsh.model.occ.getMass(3, tag) for _, tag in volumes)
         if mode == 'part' and len(volumes) != 1 and not preparation.get('unite'):
-            raise ValueError('O modo peça exige exatamente um sólido. Para conjuntos, use Importar montagem.')
+            raise ValueError('O modo peça exige exatamente um sólido. Em Geometria, selecione Montagem · múltiplos sólidos para este STEP.')
         if preparation.get('heal') or preparation.get('removeSmall'):
             gmsh.model.occ.healShapes(volumes, tolerance=tolerance,
                 fixDegenerated=True, fixSmallEdges=preparation.get('removeSmall', False),
@@ -144,11 +175,29 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None):
                   'originalVolume': float(original_volume), 'preparedVolume': float(prepared_volume),
                   'volumeChangePercent': float(100 * (prepared_volume-original_volume)/original_volume),
                   'tolerance': tolerance}
+        diagnostic = None
+        gmsh.option.setNumber('Mesh.MeshOnlyVisible', 0)
+        if diagnostic_body is not None:
+            if type(diagnostic_body) is not int or not 1 <= diagnostic_body <= min(len(volumes), 128):
+                raise ValueError('Corpo de diagnóstico inválido (limite de 128 corpos).')
+            chosen = sorted(volumes)[diagnostic_body - 1]
+            diagnostic = {'bodyId': diagnostic_body, 'bodyCount': len(volumes),
+                          'bounds': list(gmsh.model.getBoundingBox(*chosen))}
+            # Keep the prepared topology and original face tags. Visibility limits
+            # generation to this solid without recursively deleting shared faces.
+            gmsh.model.setVisibility(gmsh.model.getEntities(), 0)
+            gmsh.model.setVisibility([chosen], 1, recursive=True)
+            gmsh.option.setNumber('Mesh.MeshOnlyVisible', 1)
         face_tags = sorted(set(tag for dim, tag in gmsh.model.getBoundary(volumes, oriented=False) if dim == 2))
         gmsh.option.setNumber('Mesh.MeshSizeMin', size)
         gmsh.option.setNumber('Mesh.MeshSizeMax', size)
         gmsh.option.setNumber('Mesh.ElementOrder', 1)
         gmsh.option.setNumber('Mesh.MeshSizeFromCurvature', curvature)
+        # Resolve curved surfaces in both parametric directions, without
+        # spreading their small boundary sizes across large planar faces.
+        adaptive = payload.get('meshControls', {}).get('adaptiveCurvature', False)
+        gmsh.option.setNumber('Mesh.MeshSizeFromCurvatureIsotropic', int(adaptive))
+        gmsh.option.setNumber('Mesh.MeshSizeExtendFromBoundary', 0 if adaptive else 1)
         gmsh.option.setNumber('Mesh.OptimizeThreshold', quality_target)
         gmsh.model.mesh.setSize(gmsh.model.getEntities(0), size)
         fields = []
@@ -172,7 +221,36 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None):
             gmsh.model.mesh.field.setNumbers(field, 'FieldsList', fields)
             gmsh.model.mesh.field.setAsBackgroundMesh(field)
         progress(25, "Gerando malha volumétrica")
-        gmsh.model.mesh.generate(3)
+        try:
+            gmsh.model.mesh.generate(3)
+        except Exception as error:
+            intersection = intersection_failure(error)
+            location = intersection_location(error, volumes) if intersection else ''
+            if diagnostic is not None:
+                return {**diagnostic, 'status': 'failed' if intersection else 'inconclusive',
+                        'message': ('Interseção na malha de superfície reproduzida neste corpo isolado.' + location) if intersection else 'O teste deste corpo não pôde ser concluído.'}
+            if intersection:
+                raise ValueError(
+                    'Não foi possível gerar a malha: foram detectadas interseções entre arestas e faces '
+                    'ou triângulos sobrepostos na malha de superfície.' + location + ' '
+                    'Isso não prova, por si só, que o sólido CAD é inválido. '
+                    'Teste os corpos isoladamente. Para detalhes curvos, combine divisões por curvatura '
+                    'com um tamanho mínimo menor; reduzir apenas o mínimo não ativa o refinamento. '
+                    'A união de corpos só deve ser ativada quando representar a ligação física do conjunto.'
+                ) from error
+            raise
+        if diagnostic is not None:
+            _, elements, _ = gmsh.model.mesh.getElements(3, chosen[1])
+            populated = any(len(items) for items in elements)
+            return {**diagnostic, 'status': 'passed' if populated else 'inconclusive',
+                    'message': 'Malha volumétrica gerada isoladamente.' if populated else 'O teste não produziu elementos neste corpo.'}
+        # Some native algorithms return normally with empty or partial meshes.
+        # Never silently omit a component from the structural model.
+        missing = [index for index, (_, tag) in enumerate(sorted(volumes), 1)
+                   if not any(len(items) for items in gmsh.model.mesh.getElements(3, tag)[1])]
+        if missing:
+            raise ValueError('Malha volumétrica incompleta nos corpos preparados: '
+                             + ', '.join(map(str, missing)) + '. Revise o diagnóstico de malha.')
         progress(60, "Otimizando elementos")
         gmsh.model.mesh.optimize('')
         gmsh.model.mesh.optimize('Netgen')
