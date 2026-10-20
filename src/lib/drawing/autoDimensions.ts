@@ -1,3 +1,5 @@
+import { flatBendDimension } from "./flatBendDimension";
+import { dimensionText } from "./angularDimensions";
 import { fullContourLines } from "./roundedContour";
 import type { DrawingAnnotation, DrawingDimension, DrawingView } from './types';
 import { createId } from '@/lib/sketch/render';
@@ -6,7 +8,8 @@ export function labelBox(d: DrawingDimension) {
   const length=Math.hypot(d.x2-d.x1,d.y2-d.y1)||1;
   const x=(d.x1+d.x2)/2-(d.y2-d.y1)/length*d.offset;
   const y=(d.y1+d.y2)/2+(d.x2-d.x1)/length*d.offset;
-  const w=Math.max(16,(d.value??length).toFixed(2).length*1.8+2);
+  const w=Math.max(16,dimensionText(d,length).length*1.9+3);
+  if(d.angular){const angle=d.angular.start+d.angular.delta/2,r=Math.max(6,Math.abs(d.offset))+4;return {x:d.x1+Math.cos(angle)*r-w/2,y:d.y1+Math.sin(angle)*r-3,w,h:6};}
   return {x:x-w/2,y:y-2.5,w,h:5};
 }
 
@@ -30,6 +33,32 @@ export function autoDimensions(view: DrawingView, details = true): DrawingDimens
   const refs=[[extreme('x',minX),extreme('x',minX+width)],[extreme('y',minY),extreme('y',minY+height)]];
   result.forEach((d,i)=>{if(refs[i]?.[0]) d.reference1=point(refs[i][0]!.x,refs[i][0]!.y);if(refs[i]?.[1]) d.reference2=point(refs[i][1]!.x,refs[i][1]!.y);});
   if (!details) return result;
+  // Developed straight-panel lengths and widths are tied to their native bend.
+  for (const [index,bend] of (view.flattened ? view.flatBends ?? [] : view.panelDimensions ?? []).entries()) {
+    const panel=view.flattened ? flatBendDimension(view,bend) : bend.panel;
+    for (const edge of [panel,bend.width]) {
+      if(edge === panel ? bend.measurePanel === false : bend.measureWidth === false) continue;
+      const dx=edge.x2-edge.x1,dy=edge.y2-edge.y1,length=Math.hypot(dx,dy);
+      if(length<1e-5) continue;
+      // Repeated widths add no setup information, especially in profile views.
+      if(edge===bend.width && result.some(d=>Math.abs((d.value??0)-length)<.05 && Math.abs((d.x2-d.x1)*dy-(d.y2-d.y1)*dx)<.05)) continue;
+      const nx=-dy/length,ny=dx/length;
+      const mx=(edge.x1+edge.x2)/2,my=(edge.y1+edge.y2)/2;
+      const sign=nx*(mx-minX-width/2)+ny*(my-minY-height/2)>=0?1:-1;
+      const corners=[[minX,minY],[minX+width,minY],[minX,minY+height],[minX+width,minY+height]];
+      const clearance=Math.max(0,...corners.map(([x,y])=>sign*(nx*(x-mx)+ny*(y-my))))*view.scale;
+      const before = result.length;
+      add(edge.x1,edge.y1,edge.x2,edge.y2,sign*(clearance+8+(index%3)*7));
+      if (result.length === before) continue;
+      const dim=result[result.length-1];
+      dim.bendId=bend.id;
+      dim.suffix = edge === panel && bend.angle !== undefined && Number.isFinite(bend.angle)
+        ? ` (${bend.angle.toLocaleString("pt-BR", { maximumFractionDigits: 2 })}°)` : undefined;
+      dim.reference1={x:dim.x1,y:dim.y1}; dim.reference2={x:dim.x2,y:dim.y2};
+    }
+  }
+  // Native sheet references replace fragmented silhouette edges and logo detail.
+  if ((view.flatBends?.length ?? 0) || (view.panelDimensions?.length ?? 0) || (view.bendProfiles?.length ?? 0)) return result;
   // Dimension meaningful visible outline segments, not every projected vertex.
   // Inner/hidden edges and tiny thickness/sliver edges must not create chains.
   const edges=fullContourLines(view.visibleLineEdges ?? view.lineEdges,view.arcs??[]);
@@ -87,10 +116,14 @@ export function bendSchedule(bends: DrawingBend[], x=235, y=150): DrawingAnnotat
 }
 
 /** One radius indication for each distinct visible circular-arc radius. */
-export function autoRadiusNotes(view: DrawingView): DrawingAnnotation[] {
+export function autoRadiusNotes(view: DrawingView, fabrication: boolean): DrawingAnnotation[];
+export function autoRadiusNotes(view: DrawingView): DrawingAnnotation[];
+export function autoRadiusNotes(view: DrawingView, fabrication: boolean | number = false): DrawingAnnotation[] {
   if(view.orientation==='iso') return [];
   const groups=new Map<string,NonNullable<DrawingView['arcs']>>();
-  for(const arc of view.arcs??[]) {const key=arc.radius.toFixed(4);groups.set(key,[...(groups.get(key)??[]),arc]);}
+  for(const arc of view.arcs??[]) {
+    if(fabrication === true && !(view.bendProfiles??[]).some(b=>Math.hypot(b.x-arc.x,b.y-arc.y)<.05 && Math.abs(b.radius-arc.radius)<.01)) continue;
+    const key=arc.radius.toFixed(4);groups.set(key,[...(groups.get(key)??[]),arc]);}
   return [...groups.values()].map((arcs,i)=>{
     const arc=arcs[0];
     const x1=view.x+(arc.mid.x-view.box.minX-view.box.width/2)*view.scale;

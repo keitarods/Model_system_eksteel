@@ -71,3 +71,54 @@ test('view commands discard pending orbit damping instead of drifting after the 
   assert.equal(controls.enableDamping,true);
   stable(camera,controls);
 });
+
+test('entering sketch preserves perspective scale and pan at any model size',()=>{
+ const {focusSketchPlane}=require('../src/components/viewer/cameraNavigation.ts');
+ for(const radius of [5,260,8000]) {
+  const {camera,controls}=scene();
+  applyCameraPose(camera,controls,new Vector3(80,-30,40+radius),new Vector3(80,-30,40),new Vector3(0,1,0));
+  const target=focusSketchPlane(camera,controls,new Vector3(0,0,100),new Vector3(0,0,1),new Vector3(0,1,0));
+  close(target,new Vector3(80,-30,100));
+  assert.ok(Math.abs(camera.position.distanceTo(target)-radius)<1e-7);
+  stable(camera,controls);
+ }
+});
+test('entering sketch preserves orthographic zoom on an offset inclined plane',()=>{
+ const {OrthographicCamera}=require('three');
+ const {focusSketchPlane}=require('../src/components/viewer/cameraNavigation.ts');
+ const camera=new OrthographicCamera(-400,400,300,-300,0.1,10000);
+ camera.zoom=4;camera.updateProjectionMatrix();
+ camera.position.set(500,400,700);
+ const controls=new OrbitControls(camera);controls.target.set(30,40,50);controls.update();
+ const distance=camera.position.distanceTo(controls.target);
+ const origin=new Vector3(0,100,0),normal=new Vector3(1,1,0).normalize();
+ const target=focusSketchPlane(camera,controls,origin,normal,new Vector3(0,0,1));
+ assert.equal(camera.zoom,4);assert.ok(Math.abs(target.clone().sub(origin).dot(normal))<1e-7);
+ assert.ok(Math.abs(camera.position.distanceTo(target)-distance)<1e-7);stable(camera,controls);
+});
+
+test('entering sketch backs out to show the whole part in both projections, including narrow viewports',()=>{
+ const {OrthographicCamera}=require('three');
+ const {focusSketchPlane}=require('../src/components/viewer/cameraNavigation.ts');
+ const vertices=[];
+ for(const x of [100,2100])for(const y of [-500,500])for(const z of [200,210])vertices.push(x,y,z);
+ for(const camera of [new OrthographicCamera(-200,200,300,-300,.1,10000),new PerspectiveCamera(45,0.6,.1,10000)]) {
+  camera.position.set(1100,0,250);camera.zoom=4;camera.updateProjectionMatrix();
+  const controls=new OrbitControls(camera);controls.target.set(1100,0,200);controls.update();
+  const oldZoom=camera.zoom;
+  focusSketchPlane(camera,controls,new Vector3(0,0,200),new Vector3(0,0,1),new Vector3(0,1,0),vertices);
+  for(let i=0;i<vertices.length;i+=3){
+   const p=new Vector3(...vertices.slice(i,i+3)).project(camera);
+   assert.ok(Math.abs(p.x)<0.81&&Math.abs(p.y)<0.81,`${camera.type}: ${p.toArray()}`);
+   assert.ok(p.z>=-1&&p.z<=1);
+  }
+  assert.ok(camera.zoom<=oldZoom);stable(camera,controls);
+ }
+});
+test('fitting the sketch never zooms into a part that is already comfortably framed',()=>{
+ const {OrthographicCamera}=require('three');const {focusSketchPlane}=require('../src/components/viewer/cameraNavigation.ts');
+ const camera=new OrthographicCamera(-400,400,300,-300,.1,10000);camera.zoom=.1;camera.position.set(0,0,1000);camera.updateProjectionMatrix();
+ const controls=new OrbitControls(camera);controls.update();
+ focusSketchPlane(camera,controls,new Vector3(),new Vector3(0,0,1),new Vector3(0,1,0),[-10,-10,0,10,10,2]);
+ assert.equal(camera.zoom,.1);assert.equal(camera.position.distanceTo(controls.target),1000);
+});

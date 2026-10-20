@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { bindSketchDependencies } from "./sketchDependencies";
 import type { Feature } from "./types";
 
 type FeatureState = {
@@ -9,18 +10,26 @@ type FeatureState = {
   clear: () => void;
 };
 
-// Histórico de operações (feature tree simplificada): cada item é reaplicado
-// em ordem por rebuildModel sempre que a lista muda — sem parametrização
-// completa, mas editável (dá pra remover uma operação e ver o resultado).
+// Preserve sketch references before changing geometry so downstream rebuilds
+// follow entity identity rather than searching for the old coordinates.
 export const useFeatureStore = create<FeatureState>((set) => ({
   features: [],
   addFeature: (feature) =>
-    set((s) => ({ features: [...s.features, feature] })),
+    set((s) => {
+      const features = bindSketchDependencies([...s.features, feature]);
+      const operation = features[features.length - 1];
+      const consumed = new Set([
+        ...(operation.sketchReference ? [operation.sketchReference.sketchId] : []),
+        ...(operation.type === "sweep" ? [operation.pathFeatureId] : []),
+        ...(operation.type === "loft" ? operation.sectionIds : []),
+      ]);
+      return { features: features.map(f => f.type === "sketch" && consumed.has(f.id) ? { ...f, visible: false } : f) };
+    }),
   updateFeature: (id, feature) =>
     set((s) => ({
-      features: s.features.map((f) => (f.id === id ? { ...feature, visible: feature.visible ?? f.visible, suppressed: feature.suppressed ?? f.suppressed, ...(f.bodyGroupId ? { bodyGroupId: f.bodyGroupId } : {}) } : f)),
+      features: bindSketchDependencies(s.features).map((f) => (f.id === id ? { ...feature, sketchReference: feature.sketchReference ?? f.sketchReference, visible: feature.visible ?? f.visible, suppressed: feature.suppressed ?? f.suppressed, ...(f.bodyGroupId ? { bodyGroupId: f.bodyGroupId } : {}) } : f)),
     })),
   removeFeature: (id) =>
-    set((s) => ({ features: s.features.filter((f) => f.id !== id) })),
+    set((s) => ({ features: bindSketchDependencies(s.features).filter((f) => f.id !== id) })),
   clear: () => set({ features: [] }),
 }));

@@ -11,6 +11,8 @@ export function activeFeatures(features: Feature[]): Feature[] {
     const bends: string[] = [];
     for (const f of features) {
       const dependencies: string[] = [];
+      if (f.sketchReference) dependencies.push(f.sketchReference.sketchId);
+      if (f.type === "pattern") dependencies.push(f.sourceFeatureId);
       if (f.type === 'sheetMetal') rule = f.id;
       if ((f.type === 'face' || f.type === 'flange') && rule) dependencies.push(rule);
       if (previousSolid && (['hole','fillet','chamfer','shell','split','pattern'].includes(f.type) || ('cut' in f && f.cut))) dependencies.push(previousSolid);

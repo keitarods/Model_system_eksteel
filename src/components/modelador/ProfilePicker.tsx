@@ -31,7 +31,7 @@ export function ProfilePicker({ profiles, selected, onChange }: {
       {profile.kind === 'rect' && ` (${Math.abs(profile.x2-profile.x1).toFixed(2)} × ${Math.abs(profile.y2-profile.y1).toFixed(2)})`}
     </label>)}
     {selected?.length === 0 && <span role="status">Selecione pelo menos um perfil fechado.</span>}
-    {selected === null && <span>Usando a seleção anterior do esboço (ou seu último perfil).</span>}
+    {selected === null && <span>Usando a seleção anterior ou os perfis fechados do esboço.</span>}
     <span>Perfis marcados são unidos. Confira a pré-visualização antes de confirmar.</span>
   </fieldset>;
 }

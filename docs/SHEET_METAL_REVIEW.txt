@@ -1,0 +1,44 @@
+Revisão das ferramentas de chapa — 2026-10-20
+
+Referências consultadas (sem copiar implementação):
+https://help.autodesk.com/cloudhelp/2024/ENU/Inventor-Help/files/GUID-1B336854-4ED3-4C32-ADCB-E7A407485D80.htm
+https://github.com/shaise/FreeCAD_SheetMetal/blob/master/SheetMetalNewUnfolder.py
+
+Correção implementada:
+O histórico descartava a cadeia de dobras ao construir cada Face. A Face
+adicionada sobre um painel dobrado permanecia na posição 3D original,
+enquanto os flanges subsequentes se desenvolviam em outro referencial.
+Agora planos coplanares a um painel reto são transportados pelo referencial
+desse painel. A Face transmite a cadeia aos seus flanges descendentes.
+A construção dobrada de referência é mantida separada da construção plana.
+Recortes de Face, extrusões e furos usam planos transformados na planificação.
+Referências ambíguas são rejeitadas. Uma verificação final da espessura na
+direção normal da Face base impede exibir resultados ainda não planos.
+Essa verificação não certifica ausência de sobreposição nem conectividade.
+
+Validação:
+Teste de Face adicionada sobre flange, recorte e flange descendente em
+45 e 90 graus; volume removido e espessura do resultado plano.
+Regressões de arredondamento planificado, descendentes de flange e estados
+desdobrado/redobrado. Verificação TypeScript.
+A peça fornecida posteriormente foi usada na validação local; o arquivo CAD
+permanece fora do Git por conter dados do projeto.
+
+Limites da revisão / trabalho ainda necessário para equivalência ampla:
+- Referência persistente de face de suporte, em lugar de inferência por plano,
+  principalmente quando vários painéis ocupam o mesmo plano geométrico.
+- Cortes atravessando múltiplos painéis ou zonas curvas precisam de divisão
+  topológica e transformação de cada porção, não apenas de um plano.
+- Padrões de cortes têm um caminho próprio de construção; precisam da mesma
+  associação de suporte e de testes específicos de planificação.
+- Revolução, varredura, hélice, casca e cortes por plano não têm transformação
+  geral para desenvolvimento. O teste de planicidade não certifica sua
+  equivalência ao sólido dobrado.
+- Reconhecimento geral de chapas importadas, seleção de face estacionária,
+  alívios e transições de canto, costuras, rasgos de abertura e tabelas de dobra
+  exigem especificações e validação geométrica próprias.
+- Validar sobreposições, corpos desconectados e comprimentos de fabricação
+  por dobra antes de considerar o resultado pronto para corte industrial.
+
+Não foi realizada engenharia reversa do código proprietário do Inventor.
+Esta alteração não implementa equivalência completa com todas as ferramentas.

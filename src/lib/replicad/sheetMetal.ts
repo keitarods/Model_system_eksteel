@@ -223,11 +223,11 @@ export function undoFlattenChainDir(chain: FlattenLink[], v: Vec3): Vec3 {
 // nasce de clicar direto na LINHA da aresta (ao estilo Inventor), então não
 // existe mais um "ponto de clique" nem uma normal escolhida por clique para
 // alimentar esse cálculo; só os dois extremos da aresta.
-function computeEdgeFrame(solid: Solid, edgeStart: Vec3, edgeEnd: Vec3) {
+function computeEdgeFrame(solid: Solid, edgeStart: Vec3, edgeEnd: Vec3, supportNormal?: Vec3) {
   const dRaw = norm(sub(edgeEnd, edgeStart));
   const edgeMid = mid(edgeStart, edgeEnd);
 
-  const mainFace = findMainFaceForEdge(solid, edgeStart, edgeEnd);
+  const mainFace = findMainFaceForEdge(solid, edgeStart, edgeEnd, supportNormal);
   if (!mainFace) {
     throw new Error(
       "Flange: não consegui achar a face de origem dessa aresta no sólido atual — tente clicar em outra aresta."
@@ -238,7 +238,7 @@ function computeEdgeFrame(solid: Solid, edgeStart: Vec3, edgeEnd: Vec3) {
 
   const towardEdge = sub(edgeMid, faceCenter);
   const alongD = scale(dRaw, dot(towardEdge, dRaw));
-  const perp = sub(towardEdge, alongD);
+  const perp = sub(sub(towardEdge, alongD), scale(n, dot(towardEdge, n)));
   const perpLength = Math.hypot(perp[0], perp[1], perp[2]);
   if (perpLength < 0.5) {
     throw new Error(
@@ -333,7 +333,8 @@ export function buildFlangeSolid(
   activeSolid: Solid,
   shadowSolid: Solid,
   flatten: boolean,
-  parentChain: FlattenLink[]
+  parentChain: FlattenLink[],
+  supportNormal?: Vec3
 ): { solid: Solid; shadowSolid: Solid; link: FlattenLink } {
   const parent = parentChain.at(-1);
   if (feature.attachment && !parent) throw new Error('Flange: referência ao pai indisponível.');
@@ -352,7 +353,7 @@ export function buildFlangeSolid(
   // Face de origem/direção "pra fora" SEMPRE contra a sombra (sempre
   // dobrada) com as coordenadas CRUAS da aresta — nunca precisa desfazer
   // nada aqui, porque a sombra nunca planifica.
-  const { dRaw, n, outDir } = computeEdgeFrame(shadowSolid, rawEdgeStart, rawEdgeEnd);
+  const { dRaw, n, outDir } = computeEdgeFrame(shadowSolid, rawEdgeStart, rawEdgeEnd, supportNormal);
   const yDirActual = cross(dRaw, outDir);
   const vSign0: 1 | -1 = dot(yDirActual, n) >= 0 ? 1 : -1;
 

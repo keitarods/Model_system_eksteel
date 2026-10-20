@@ -21,7 +21,7 @@ test('redefine preserves local geometry and dimensions, stores the new plane, an
  const original=[sketch,operation];const updated=redefineSketchPlane(original,'s',target);
  assert.equal(updated[0].shapes,sketch.shapes);assert.equal(updated[0].points,sketch.points);
  assert.equal(updated[0].dimensions,sketch.dimensions);assert.equal(updated[0].constraints,sketch.constraints);
- assert.deepEqual(updated[0].profileWires,sketch.profileWires);assert.equal(updated[1],operation);
+ assert.deepEqual(updated[0].profileWires,sketch.profileWires);assert.equal(updated[1].sketchReference.sketchId,sketch.id);
  assert.deepEqual(original[0].plane,originalPlane);
  assert.deepEqual(localToWorldPoint(updated[0].plane,{x:5,y:7}),[5,20,-7]);
  assert.deepEqual(parseProject(serializeProject(updated)).features[0].plane,target);

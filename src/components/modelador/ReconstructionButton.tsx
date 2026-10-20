@@ -20,9 +20,9 @@ type Proposal = Recognition & {
     mesh: ShapeMesh;
     keptSolid?: boolean;
 };
-export function ReconstructionButton({ compact = false, initialMode = "auto" }: { compact?: boolean; initialMode?: "auto" | "bentSheet" }) {
+export function ReconstructionButton({ compact = false, initialMode = "auto", sourceFeatureId, disabled = false }: { compact?: boolean; initialMode?: "auto" | "bentSheet"; sourceFeatureId?: string; disabled?: boolean }) {
     const features = useFeatureStore(s => s.features);
-    const sources = features.filter((f): f is ImportedFeature => f.type === 'imported' && f.format === 'step');
+    const sources = features.filter((f): f is ImportedFeature => f.type === 'imported' && f.format === 'step' && (!sourceFeatureId || f.id === sourceFeatureId));
     const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
     const [sourceId, setSourceId] = useState(''), [mode, setMode] = useState<RecognitionMode | "auto" | "bentSheet">(initialMode);
     const [estimateK, setEstimateK] = useState(false);
@@ -68,7 +68,7 @@ export function ReconstructionButton({ compact = false, initialMode = "auto" }: 
         }
     }
     return <>
-    <button ref={trigger} type="button" disabled={!sources.length} onClick={() => setOpen(true)} className="shrink-0 rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:opacity-40" title="Reconstruir operações de um corpo STEP">{compact ? <><HeaderIcon kind="reconstruct" /><span className="sr-only">Reconstruir STEP</span></> : initialMode === "bentSheet" ? "Reconhecer dobras STEP" : "Reconstruir STEP"}</button>
+    <button ref={trigger} type="button" disabled={disabled || !sources.length} onClick={() => setOpen(true)} className="shrink-0 rounded-lg px-2 py-1.5 text-xs text-chrome-text-muted hover:bg-chrome-surface-alt disabled:opacity-40" title="Reconstruir operações de um corpo STEP">{compact ? <><HeaderIcon kind="reconstruct" /><span className="sr-only">Reconstruir STEP</span></> : initialMode === "bentSheet" ? "Reconhecer dobras STEP" : "Reconstruir STEP"}</button>
     {open && createPortal(<dialog ref={dialog} aria-labelledby={title} onCancel={e => { e.preventDefault(); close(); }} onClose={() => setOpen(false)} onKeyDown={e => e.stopPropagation()} className="fixed inset-0 m-auto max-h-[calc(100dvh-2rem)] w-[min(38rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-chrome-border bg-chrome-surface p-5 text-sm text-chrome-text shadow-xl backdrop:bg-black/50">
       <div className="flex items-center justify-between gap-3"><h2 id={title} className="font-semibold">Reconstruir operações do STEP</h2><button autoFocus onClick={close} className="rounded border px-3 py-1">Fechar</button></div>
       <div className="mt-4 space-y-3 [&_select]:w-full [&_select]:rounded [&_select]:border [&_select]:border-chrome-border [&_select]:bg-chrome-surface [&_select]:p-2">
@@ -97,7 +97,7 @@ export function ReconstructionButton({ compact = false, initialMode = "auto" }: 
           <p role="status">{proposal.keptSolid ? "Corpo original preservado. Nenhuma reconstrução aplicada." : <>Geometria validada. Diferença: {proposal.differenceVolume.toExponential(3)} mm³; limite: {proposal.toleranceVolume.toExponential(3)} mm³.</>}</p>
           <ol className="max-h-48 list-decimal overflow-auto pl-5">{proposal.features.map(f => <li key={f.id}>{f.label} ({f.type})</li>)}</ol>
           {proposal.notes.map(note => <p key={note}>{note}</p>)}
-          <p>Os esboços são editáveis, mas editar um esboço salvo não recalcula automaticamente o perfil já copiado para a operação. Profundidade, ângulo e parâmetros de furo/dobra são editados na árvore.</p>
+          <p>Depois de aplicar a reconstrução, use “Editar esboço” na operação para alterar seu perfil e recalcular as operações vinculadas. Profundidade, ângulo e parâmetros de furo/dobra são editados na árvore.</p>
           <div className="flex flex-wrap gap-2">
             <button className="rounded border px-3 py-2" onClick={() => downloadBlob(new Blob([serializeProject(proposal.features)], { type: NATIVE_MIME_TYPE }), proposal.source.label.replace(/[^\p{L}\p{N}._-]+/gu, '_') + '-reconstruido.eks3d')}>Baixar reconstrução .eks3d</button>
             <button disabled={proposal.keptSolid || proposal.original.length !== 1} title="Substituição disponível apenas em documento com um único corpo importado, sem operações posteriores." className="rounded border px-3 py-2 disabled:opacity-40" onClick={() => {

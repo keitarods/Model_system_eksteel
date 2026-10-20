@@ -14,3 +14,18 @@ test('joining spline control points remaps their references instead of leaving d
  s.getState().clear();s.setState({points:{a:{id:'a',x:0,y:0},b:{id:'b',x:100,y:0},c:{id:'c',x:0,y:100},d:{id:'d',x:100,y:100},new:{id:'new',x:10,y:100}},shapes:[{id:'curve',type:'spline',p1:'a',p2:'b',control1:'c',control2:'d'}]});
  s.getState().joinPoints('new','c');assert.equal(s.getState().shapes[0].control1,'new');assert.equal(s.getState().points.c,undefined);
 });
+test('dragging either symmetric endpoint moves its partner in preview and on release',()=>{
+ s.getState().clear();
+ s.setState({tool:'select',points:{a:{id:'a',x:20,y:30},b:{id:'b',x:-20,y:30},x:{id:'x',x:0,y:-100},y:{id:'y',x:0,y:100}},shapes:[{id:'axis',type:'line',p1:'x',p2:'y',isCenterLine:true},{id:'line',type:'line',p1:'a',p2:'b'}],constraints:[{id:'sym',kind:'symmetric',sourcePointId:'a',pointId:'b',lineId:'axis'}]});
+ s.getState().handleRawDown({x:-20,y:30});s.getState().handleRawMove({x:-40,y:50});
+ assert.equal(s.getState().dragPreview.a.x,40);assert.equal(s.getState().dragPreview.b.x,-40);
+ assert.equal(s.getState().dragPreview.a.y,s.getState().dragPreview.b.y);
+ s.getState().handleRawUp({x:-40,y:50});
+ assert.equal(s.getState().points.a.x,40);assert.equal(s.getState().points.b.x,-40);
+});
+test('drag infers alignment of an existing horizontal line without explicit locks',()=>{
+ s.getState().clear();s.setState({tool:'select',points:{a:{id:'a',x:20,y:30},b:{id:'b',x:80,y:30}},shapes:[{id:'line',type:'line',p1:'a',p2:'b'}],constraints:[]});
+ s.getState().handleRawDown({x:20,y:30});s.getState().handleRawMove({x:20,y:60});
+ assert.equal(s.getState().dragPreview.b.y,60);
+ s.getState().handleRawUp({x:20,y:60});assert.equal(s.getState().points.b.y,60);
+});

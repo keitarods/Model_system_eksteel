@@ -14,7 +14,27 @@ function crosses(a:{x:number;y:number},b:{x:number;y:number},box:Box){
 /** Place text outside geometry and existing labels; the geometry anchor never changes. */
 export function layoutLeaders(sheet:DrawingSheet):DrawingSheet {
  const {width,height}=sheetDimensionsMm(sheet);
- const occupied:Box[]=sheet.dimensions.map(d=>d.angular?{x:d.x1-Math.abs(d.offset)-6,y:d.y1-Math.abs(d.offset)-6,w:2*Math.abs(d.offset)+12,h:2*Math.abs(d.offset)+12}:labelBox(d));
+ const viewBoxes:Box[]=sheet.views.map(v=>({x:v.x-v.box.width*v.scale/2,y:v.y-v.box.height*v.scale/2,w:v.box.width*v.scale,h:v.box.height*v.scale}));
+ const fixedBoxes:Box[]=sheet.annotations.filter(a=>'x' in a).map(a=>{const text=a as {x:number;y:number;text:string};return {x:text.x,y:text.y-4,w:Math.max(10,text.text.length*1.8),h:6};});
+ const placed:Box[]=sheet.dimensions.filter(d=>!d.automatic).map(labelBox);
+ const dimensions=sheet.dimensions.map(d=>{
+  if(!d.automatic)return d;
+  const offsets=[d.offset];
+  for(let lane=0;lane<24;lane++) {
+   const offset=8+lane*7;
+   offsets.push(d.angular?offset:(Math.sign(d.offset)||1)*offset);
+   if(!d.angular)offsets.push(-(Math.sign(d.offset)||1)*offset);
+  }
+  for(const offset of offsets){
+   const candidate={...d,offset},box=labelBox(candidate);
+   if(box.x<9||box.y<9||box.x+box.w>width-9||box.y+box.h>height-44)continue;
+   if([...placed,...viewBoxes,...fixedBoxes].some(b=>overlaps(box,b)))continue;
+   placed.push(box);return candidate;
+  }
+  placed.push(labelBox(d));return d;
+ });
+ sheet={...sheet,dimensions};
+ const occupied:Box[]=dimensions.map(labelBox);
  for(const v of sheet.views)occupied.push({x:v.x-v.box.width*v.scale/2,y:v.y-v.box.height*v.scale/2,w:v.box.width*v.scale,h:v.box.height*v.scale});
  for(const a of sheet.annotations)if('x' in a)occupied.push({x:a.x,y:a.y-4,w:Math.max(10,a.text.length*1.8),h:6});
  const labelObstacles=occupied.filter(b=>!sheet.views.some(v=>b.x===v.x-v.box.width*v.scale/2&&b.y===v.y-v.box.height*v.scale/2));

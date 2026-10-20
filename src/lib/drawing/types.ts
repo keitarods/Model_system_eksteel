@@ -61,6 +61,8 @@ export type DrawingView = {
   // ficam de fora por ora — só linha reta entra no clique-pra-cotar (igual
   // Inventor: clicar uma aresta reta cota o comprimento dela; clicar 2
   // arestas retas cota a distância entre as duas).
+  panelDimensions?: import("../replicad/drawingBends").FlatBendGeometry[];
+  flatBends?: import("../replicad/drawingBends").FlatBendGeometry[];
   bendProfiles?: import("../replicad/drawingBends").BendProfile[];
   visibleLineEdges?: {x1:number;y1:number;x2:number;y2:number}[];
   arcs?: import("./roundedContour").ContourArc[];

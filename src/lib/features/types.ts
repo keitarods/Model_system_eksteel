@@ -17,10 +17,7 @@ import type { ExtrudeDirection, ProfileSource } from "@/lib/replicad/geometry";
 // furo/ilha.
 type ProfileSources = NonNullable<ProfileSource> | NonNullable<ProfileSource>[];
 
-// Esboço salvo na árvore de histórico (ao estilo Inventor) — é só registro/
-// reabertura; Extrudar/Revolucionar/Furo continuam lendo o sketch "ao vivo"
-// (useSketchStore), não este snapshot. Reabrir um SketchFeature carrega os
-// dados dele de volta pro sketch ao vivo pra continuar editando.
+// Esboço persistente; operações associadas resolvem a geometria na reconstrução.
 export type SketchFeature = {
   /** Shape IDs grouped by original face wires: outer boundary first, then holes. */
   profileWires?: string[][];
@@ -50,6 +47,7 @@ export type ExtrudeFeature = {
   plane: SketchPlane;
   depth: number;
   cut: boolean;
+  through?: boolean;
   // Opcional só por compatibilidade com projetos salvos antes desse campo
   // existir — build-model.ts trata ausência como "normal".
   direction?: ExtrudeDirection;
@@ -191,6 +189,7 @@ export type FaceFeature = {
   cut?: boolean;
   /** Optional cut depth in mm; absent follows the sheet thickness. */
   cutDepth?: number;
+  through?: boolean;
 };
 
 // Dobra (Inventor "Flange"): nasce de uma aresta reta já existente da
@@ -353,6 +352,7 @@ export type Feature = (
   | SweepFeature
   | HelixFeature
   | PatternFeature) & {
+  sketchReference?: import("./sketchDependencies").SketchReference;
   /** Independent reconstructed body. Its contiguous operations rebuild in isolation. */
   bodyGroupId?: string;
   suppressed?: boolean;

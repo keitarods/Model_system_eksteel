@@ -7,11 +7,11 @@ export function toggleCadReference(items:CadReference[],item:CadReference,additi
 type Selection={filter:CadFilter;items:CadReference[];hover:CadReference|null;enabled:boolean;multiple:boolean;setHover:(item:CadReference|null)=>void;pick:(item:CadReference,additive:boolean)=>void;clear:()=>void;};
 const Context=createContext<Selection|null>(null);
 export const useCadSelection=()=>useContext(Context);
-export function CadSelectionProvider({children,enabled,resetKey,assembly=false,onClear,onActiveComponent}:{children:ReactNode;enabled:boolean;resetKey:unknown;assembly?:boolean;onClear?:()=>void;onActiveComponent?:(id:string|null)=>void}){
+export function CadSelectionProvider({children,enabled,resetKey,assembly=false,onClear,onActiveComponent,onSelectionChange}:{children:ReactNode;enabled:boolean;resetKey:unknown;assembly?:boolean;onClear?:()=>void;onActiveComponent?:(id:string|null)=>void;onSelectionChange?:(items:CadReference[])=>void}){
  const [filter,setFilter]=useState<CadFilter>(assembly?'component':'mixed'),[items,setItems]=useState<CadReference[]>([]),[hover,setHover]=useState<CadReference|null>(null),[multiple,setMultiple]=useState(false);
- const update=(next:CadReference[])=>{setItems(next);onActiveComponent?.([...next].reverse().find(item=>item.kind==='component')?.owner??null);};
- const clear=()=>{setItems([]);setHover(null);onClear?.();};
- useEffect(()=>{setItems([]);setHover(null);},[resetKey,enabled]);
+ const update=(next:CadReference[])=>{setItems(next);onSelectionChange?.(next);onActiveComponent?.([...next].reverse().find(item=>item.kind==='component')?.owner??null);};
+ const clear=()=>{setItems([]);onSelectionChange?.([]);setHover(null);onClear?.();};
+ useEffect(()=>{setItems([]);setHover(null);onSelectionChange?.([]);},[resetKey,enabled,onSelectionChange]);
  useEffect(()=>{const key=(e:KeyboardEvent)=>{if(enabled&&e.key==='Escape'&&!(e.target instanceof HTMLElement&&e.target.closest('input,textarea,select,[contenteditable=true]')))clear();};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[enabled,onClear]);
  return <Context.Provider value={{filter,items,hover,enabled,multiple,setHover,pick:(item,additive)=>update(toggleCadReference(items,item,additive||multiple)),clear}}>
   <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-300 bg-slate-50 px-3 py-1 text-xs text-slate-700" aria-label="Filtros de seleção CAD">

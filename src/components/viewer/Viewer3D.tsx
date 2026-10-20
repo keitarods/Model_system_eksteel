@@ -17,7 +17,7 @@ import { planeBasisQuaternion } from "./planeBasis";
 import { planeYDir } from "@/lib/replicad/plane";
 import { useSketchStore } from "@/lib/sketch/store";
 import type { SketchPlane } from "@/lib/sketch/types";
-import { applyCameraPose, orientCamera, type NavigationControls } from "./cameraNavigation";
+import { applyCameraPose, focusSketchPlane, orientCamera, type NavigationControls } from "./cameraNavigation";
 import {CameraApiCapture,ViewCubeOrbitCatcher,ViewCubeRotationArrows,type CameraApi} from "./ViewCubeNavigation";
 
 // Retângulo bem transparente, sem interação — marca os planos de trabalho
@@ -60,10 +60,6 @@ function WorkAxisMarker({
   return <Line points={points} color="#0d9488" lineWidth={1.5} dashed dashSize={6} gapSize={3} />;
 }
 
-// Distância da câmera até a origem do plano ao focar nele — mesma ordem de
-// grandeza das distâncias dos presets de vista abaixo.
-const PLANE_FOCUS_DISTANCE = 260;
-
 export type SketchOverlayData = {
   plane: SketchPlane;
   // Arestas do sólido projetadas no plano — mesma referência de snap que o
@@ -71,9 +67,8 @@ export type SketchOverlayData = {
   // reconhecer os mesmos pontos. Shapes/points/dimensions em si vêm direto
   // da store global (mesma fonte que o editor 2D usa).
   referenceGeometry: { x1: number; y1: number; x2: number; y2: number }[];
-  // false = mostra o esboço só como referência (ao estilo Inventor: um
-  // esboço concluído mas ainda não consumido por uma feature continua
-  // visível, mas só editável reabrindo). true = desenha/seleciona direto.
+  // false = referência exibida explicitamente pelo histórico.
+  // true = sessão de edição, com desenho e seleção habilitados.
   interactive: boolean;
 };
 
@@ -157,9 +152,7 @@ function LinearEdgePicker3D({
 // cubo (dentro do Hud) lê livremente — refs atravessam a fronteira do
 // portal sem problema, ao contrário de useThree().
 // Centro da caixa delimitadora do sólido (fallback (0,0,0) sem sólido
-// ainda) — compartilhado por HomeKeyHandler (enquadra a peça inteira) e
-// PlaneFocusCameraRig (mira nesse centro projetado no plano escolhido, não
-// no ponto exato do clique — ver comentário de PlaneFocusCameraRig).
+// ainda) — usado pelo comando Home para enquadrar a peça inteira.
 function computeMeshBoundsCenter(mesh: ShapeMesh | null): THREE.Vector3 {
   const center = new THREE.Vector3(0, 0, 0);
   if (!mesh || mesh.vertices.length < 3) return center;
@@ -181,14 +174,7 @@ function computeMeshBoundsCenter(mesh: ShapeMesh | null): THREE.Vector3 {
 // o MESMO plano padrão (ex.: XY de novo) ainda reoriente a câmera, mesmo
 // que o objeto plane seja idêntico ao de antes.
 //
-// O ALVO da câmera NÃO é plane.origin (o ponto exato onde o usuário
-// clicou na face) — isso deixava a vista "puxada" pro canto onde o clique
-// caiu em vez de centralizar a peça, principalmente em faces grandes.
-// Em vez disso, projeta o centro da caixa delimitadora do sólido no
-// próprio plano escolhido (mesma normal/orientação do clique, só o ponto
-// de mira que muda) — a câmera sempre encara o plano/face selecionado,
-// mas centralizada na peça, não no pixel exato clicado. plane.origin em
-// si (usado como (0,0) local do esboço) continua intocado.
+// Enquadre a peça inteira no plano com folga, sem aproximar além do zoom atual.
 function PlaneFocusCameraRig({
   plane,
   mesh,
@@ -207,20 +193,8 @@ function PlaneFocusCameraRig({
   useEffect(() => {
     if (!plane || token === 0) return;
 
-    const origin = new THREE.Vector3(plane.origin[0], plane.origin[1], plane.origin[2]);
-    const normalVec = new THREE.Vector3(plane.normal[0], plane.normal[1], plane.normal[2]);
-    const boundsCenter = computeMeshBoundsCenter(mesh);
-    const distAlongNormal = boundsCenter.clone().sub(origin).dot(normalVec);
-    const target = boundsCenter.clone().sub(normalVec.clone().multiplyScalar(distAlongNormal));
-
-    const yDir = planeYDir(plane);
-    const position: [number, number, number] = [
-      target.x + plane.normal[0] * PLANE_FOCUS_DISTANCE,
-      target.y + plane.normal[1] * PLANE_FOCUS_DISTANCE,
-      target.z + plane.normal[2] * PLANE_FOCUS_DISTANCE,
-    ];
-
-    applyCameraPose(camera, controls, new THREE.Vector3(...position), target, new THREE.Vector3(...yDir));
+    const target = focusSketchPlane(camera, controls,
+      new THREE.Vector3(...plane.origin), new THREE.Vector3(...plane.normal), new THREE.Vector3(...planeYDir(plane)), mesh?.vertices);
     onTargetChange([target.x, target.y, target.z]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
@@ -307,6 +281,7 @@ export function Viewer3D({
   appearance,
   pickMode = false,
   onPickPlane,
+  onSelectionChange,
   onPickStandardPlane,
   pickModeHint = "Clique num dos 3 planos ou numa face do sólido para esboçar nela",
   showPlanePicker = true,
@@ -323,6 +298,7 @@ export function Viewer3D({
   onPickLinearEdge,
 }: {
   mesh: ShapeMesh | null;
+  onSelectionChange?: (items: import("./CadSelection").CadReference[]) => void;
   appearance?: Appearance;
   pickMode?: boolean;
   onPickPlane?: (origin: [number, number, number], normal: [number, number, number], selection?: { faceId: number; endpoint: boolean; edge?: boolean; circle?: boolean }) => void;
@@ -395,7 +371,7 @@ export function Viewer3D({
 
   return (
     <div className="flex h-full flex-col">
-      <CadSelectionProvider enabled={!pickMode&&!linearEdgeMode&&!sketchOverlay?.interactive} resetKey={mesh}>
+      <CadSelectionProvider onSelectionChange={onSelectionChange} enabled={!pickMode&&!linearEdgeMode&&!sketchOverlay?.interactive} resetKey={mesh}>
       <div className="flex flex-wrap items-center gap-2 border-b border-primary-100 bg-primary-50 px-3 py-1 text-sm">
         <ProjectionSelector value={projection} onChange={setProjection} />
         {sketchOverlay?.interactive && (
@@ -555,7 +531,7 @@ export function Viewer3D({
             zoomToCursor
             zoomSpeed={1.2}
             minDistance={5}
-            maxDistance={4000}
+            maxDistance={Infinity}
           />
         </CadSelectionCanvas>
 
@@ -592,7 +568,7 @@ export function Viewer3D({
         )}
         {sketchOverlay && !sketchOverlay.interactive && (
           <div className="pointer-events-none absolute bottom-3 left-1/2 w-max max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-xl bg-primary-900/95 px-4 py-2 text-center text-sm font-semibold text-white shadow-lg">
-            Esboço ainda não usado numa operação · clique em "Editar Esboço" pra continuar
+            Esboço de referência · use o histórico para editar ou ocultar
           </div>
         )}
         {faceMenu && (

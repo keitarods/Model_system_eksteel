@@ -1,4 +1,4 @@
-import {projectBends,type NativeDrawingBend} from "./drawingBends";
+import {projectFlatBends,projectBends,type NativeDrawingBend} from "./drawingBends";
 import { circularArc, type ContourArc } from "@/lib/drawing/roundedContour";
 import { drawProjection, makeProjectedEdges, lookFromPlane, ProjectionCamera, drawRectangle, Plane as ReplicadPlane } from "replicad";
 import type { AnyShape, Drawing, ProjectionPlane, Solid } from "replicad";
@@ -136,6 +136,8 @@ export function buildDrawingView(
     id: createId(),
     orientation,
     bendProfiles: flattened?[]:projectBends(options.bends??[],orientation),
+    panelDimensions: flattened ? [] : projectFlatBends(options.bends??[],orientation,false),
+    flatBends: flattened ? projectFlatBends(options.bends??[],orientation) : [],
     flattened,
     x: options.x ?? 0,
     y: options.y ?? 0,

@@ -1,4 +1,12 @@
 "use client";
+import { availableSketches } from "@/lib/features/availableSketches";
+import { moveOperationTo } from "@/lib/features/reorder";
+import { featureHistoryTree, showSketchOverlay, sketchEditingHistory, operationEditingHistory, sheetBaseFace } from "@/lib/features/historyTree";
+import { updateSketchWithDependents } from "@/lib/features/updateSketchWithDependents";
+import { FeatureExpandButton } from "./FeatureExpandButton";
+import { FeatureSketchActions } from "./FeatureSketchActions";
+import { editOperationSketch } from "@/lib/features/editOperationSketch";
+import { bindSketchDependencies } from "@/lib/features/sketchDependencies";
 import {ToolbarResizeHandle,useToolbarSize} from "@/components/layout/ToolbarResizeHandle";
 import {ViewportLayoutControls,useViewportLayout} from "@/components/layout/ViewportLayoutControls";
 import {usePartStudiesStore} from '@/lib/simulation/partStudyStore';
@@ -60,7 +68,7 @@ import { useSketchStore } from "@/lib/sketch/store";
 import { BASE_SKETCH_PLANE, ORIGIN_POINT, ORIGIN_POINT_ID } from "@/lib/sketch/types";
 import type { SketchPlane } from "@/lib/sketch/types";
 import { loadOpenCascade } from "@/lib/replicad/opencascade";
-import { reconstructedSketchProfile, findCenterLine, findLastCircle, findProfileSource, findProfileSources, findSelectedCircles } from "@/lib/replicad/geometry";
+import { sketchOperationProfile, reconstructedSketchProfile, findCenterLine, findLastCircle, findProfileSource, findProfileSources, findSelectedCircles } from "@/lib/replicad/geometry";
 import { IMPORTED_DISPLAY_OPTIONS, type ImportedDisplayQuality } from "@/lib/replicad/displayQuality";
 import { preparedImportModel } from "@/lib/replicad/preparedModel";
 import { rebuildModel, findFlangeParentId } from "@/lib/replicad/build-model";
@@ -235,7 +243,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const [modelHasSolid, setModelHasSolid] = useState(false);
   const [bodyVisible, setBodyVisible] = useState(true);
   const [suppressing, setSuppressing] = useState(false);
-  const addFeature = useFeatureStore((s) => s.addFeature);
+  const storeAddFeature = useFeatureStore((s) => s.addFeature);
   const updateFeature = useFeatureStore((s) => s.updateFeature);
   const removeFeature = useFeatureStore((s) => s.removeFeature);
   const partSimulations=usePartStudiesStore(s=>s.document);
@@ -294,7 +302,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const [faceDirection, setFaceDirection] = useState<ExtrudeDirection>("normal");
   // "Cut" da chapa (Inventor): mesma extrusão da Face, na espessura da
   // chapa, mas subtraindo — recorta a chapa com o perfil desenhado.
-  const [faceCutExtent, setFaceCutExtent] = useState<"thickness" | "distance">("thickness");
+  const [faceCutExtent, setFaceCutExtent] = useState<"thickness" | "distance" | "through">("thickness");
   const [faceCutDepth, setFaceCutDepth] = useState(1);
   const [faceCut, setFaceCut] = useState(false);
   // Flange: clique direto na LINHA de uma aresta reta da chapa (ao estilo
@@ -379,7 +387,33 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // Qual SketchFeature da árvore o esboço ao vivo representa — null quando é
   // um esboço novo ainda não salvo. Concluir Esboço cria ou atualiza essa
   // entrada, em vez de duplicar uma nova toda vez.
+  const sketchEditGeneration = useRef(0);
+  const [selectedOperationSketchId, setSelectedOperationSketchId] = useState<string | null>(null);
   const [editingSketchId, setEditingSketchId] = useState<string | null>(null);
+  const addFeature = useCallback((feature: Feature) => {
+    setSelectedOperationSketchId(null);
+    const source = useFeatureStore.getState().features.find(f => f.id === editingSketchId && f.type === "sketch");
+    if (source) {
+      storeAddFeature(bindSketchDependencies([source, feature])[1]);
+      return;
+    }
+    // Operations can also be created directly from a live, unsaved sketch.
+    if ('profile' in feature || feature.type === "hole") {
+      const live = useSketchStore.getState();
+      const snapshot: Feature = {
+        id: createId(), type: "sketch", visible: false, label: `Esboço ${useFeatureStore.getState().features.filter(f => f.type === "sketch").length + 1}`,
+        plane: live.activePlane, shapes: live.shapes, points: live.points, dimensions: live.dimensions,
+        constraints: live.constraints, fixedPointIds: live.fixedPointIds, layers: live.layers, activeLayerId: live.activeLayerId,
+      };
+      const linked = bindSketchDependencies([snapshot, feature])[1];
+      if (linked.sketchReference) {
+        useFeatureStore.setState(state => ({features: [...state.features, snapshot, linked]}));
+        return;
+      }
+    }
+    storeAddFeature(feature);
+  }, [editingSketchId, storeAddFeature]);
+
   // Incrementa a cada plano escolhido/reaberto — o Viewer3D usa isso (não a
   // referência do plano em si) como gatilho pra reorientar a câmera de
   // frente pro plano, ao estilo Inventor/SolidWorks, mesmo que o mesmo
@@ -408,6 +442,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     setFsAccessSupported(isFileSystemAccessSupported());
   }, []);
 
+  const [extrudeThrough, setExtrudeThrough] = useState(false);
   const [extrudeDepth, setExtrudeDepth] = useState(20);
   const [extrudeCut, setExtrudeCut] = useState(false);
   // Sentido ao estilo Inventor: segue a normal do plano, vai pro lado
@@ -432,9 +467,34 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // (estado ocioso). Cada handleAdd* fecha o diálogo (volta pra null) só
   // quando a feature é criada com sucesso — se cair num early return
   // (validação), o diálogo continua aberto com a mensagem de erro visível.
-  const [featureToolMode, setFeatureToolMode] = useState<
+  const [featureToolMode, setFeatureToolModeState] = useState<
     "extrude" | "face" | "revolve" | "hole" | "split" | "sweep" | "helix" | "patternRect" | "patternCircular" | null
   >(null);
+  const setFeatureToolMode = useCallback((mode: typeof featureToolMode) => {
+    if (mode && ["extrude", "face", "revolve", "hole", "sweep", "helix"].includes(mode)) {
+      const current = useFeatureStore.getState().features;
+      const activeIds = new Set(activeFeatures(current).map(f => f.id));
+      const candidates = availableSketches(current, selectedOperationSketchId).filter(f => activeIds.has(f.id));
+      const live = useSketchStore.getState();
+      const owner = current.find(f => f.type === "sketch" && f.shapes.length > 0 && f.shapes.every(s => live.shapes.some(l => l.id === s.id)));
+      const source = candidates.find(f => f.id === selectedOperationSketchId)
+        ?? candidates.find(f => f.id === owner?.id)
+        ?? ((!live.shapes.length || owner) ? candidates.at(-1) : undefined);
+      if (!source && (!live.shapes.length || owner && !candidates.some(f => f.id === owner.id))) {
+        setErrorMessage("Selecione um esboço no histórico ou crie um esboço ainda não utilizado para esta operação.");
+        return;
+      }
+      if (source) {
+        useSketchStore.setState({ shapes: source.shapes, points: { [ORIGIN_POINT_ID]: ORIGIN_POINT, ...source.points }, dimensions: source.dimensions,
+          constraints: source.constraints ?? [], fixedPointIds: source.fixedPointIds ?? [],
+          layers: source.layers ?? DEFAULT_LAYERS, activeLayerId: source.activeLayerId ?? "0", activePlane: source.plane,
+          multiProfileSelection: [], selectedShapeId: null });
+        setEditingSketchId(source.id);
+        setFaceSketchSource("active");
+      }
+    }
+    setFeatureToolModeState(mode);
+  }, [selectedOperationSketchId]);
   // Varredura — caminho vem de outro sketch já salvo na árvore (não o
   // ativo, que é sempre o PERFIL); null enquanto nenhum foi escolhido ainda.
   const [sweepPathFeatureId, setSweepPathFeatureId] = useState<string | null>(null);
@@ -515,26 +575,32 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // reaproveita o MESMO nome pra virar o array das formas marcadas, unidas
   // entre si em profilesToDrawing (build-model.ts) na hora de construir.
   const [faceSketchSource, setFaceSketchSource] = useState("active");
-  const savedFaceProfiles = useMemo(() => enabledFeatures.flatMap(f => {
-    if (f.type !== "sketch") return [];
-    const savedProfile = reconstructedSketchProfile(f.shapes, f.points, f.profileWires);
+  const eligibleSketches = useMemo(() => availableSketches(features, selectedOperationSketchId).filter(f => enabledIds.has(f.id)), [features, selectedOperationSketchId, enabledIds]);
+  const liveSketchOwner = features.find(f => f.type === "sketch" && f.shapes.length > 0 && f.shapes.every(shape => shapes.some(s => s.id === shape.id)));
+  const liveProfileAllowed = !liveSketchOwner || eligibleSketches.some(f => f.id === liveSketchOwner.id);
+  const savedFaceProfiles = useMemo(() => eligibleSketches.flatMap(f => {
+    const savedProfile = sketchOperationProfile(f.shapes, f.points, f.profileWires);
     return savedProfile ? [{ id: f.id, label: f.label, plane: f.plane, profile: savedProfile }] : [];
-  }), [enabledFeatures]);
+  }), [eligibleSketches]);
   const reconstructedSource = features.find((f): f is Extract<Feature, { type: "sketch" }> =>
     f.type === "sketch" && !!f.profileWires && f.shapes.length === shapes.length && f.shapes.every(s => shapes.some(current => current.id === s.id)));
-  const singleProfile = reconstructedSketchProfile(shapes, points, reconstructedSource?.profileWires);
-  const defaultProfile =
-    multiProfileSelection.length > 0
+  const singleProfile = useMemo(() => sketchOperationProfile(shapes, points, reconstructedSource?.profileWires),
+    [shapes, points, reconstructedSource?.profileWires]);
+  const defaultProfile = useMemo(() =>
+    (!liveProfileAllowed || !shapes.length) ? savedFaceProfiles.at(-1)?.profile ?? null : multiProfileSelection.length > 0
       ? (() => {
           const selected = findProfileSources(shapes, points, multiProfileSelection);
           return selected.length > 0 ? selected : null;
         })()
-      : singleProfile;
+      : singleProfile, [multiProfileSelection, shapes, points, singleProfile, liveProfileAllowed, savedFaceProfiles]);
   const savedFaceSource = faceSketchSource === "active" ? undefined : savedFaceProfiles.find(f => f.id === faceSketchSource);
   const [operationProfileSelection, setOperationProfileSelection] = useState<{ key: string; indices: number[] } | null>(null);
-  const profileSourceSketch = featureToolMode === "face" && faceSketchSource !== "active"
+  const editingProfileOperation = useMemo(() => bindSketchDependencies(features).find(f => f.id === editingFeatureId), [features, editingFeatureId]);
+  const editingProfileSketch = features.find((f): f is Extract<Feature, {type: "sketch"}> => f.type === "sketch" && f.id === editingProfileOperation?.sketchReference?.sketchId);
+  const profileSourceSketch = editingFeatureId ? editingProfileSketch : featureToolMode === "face" && faceSketchSource !== "active"
     ? enabledFeatures.find((f): f is Extract<Feature, { type: "sketch" }> => f.type === "sketch" && f.id === faceSketchSource) : undefined;
   const operationProfiles = useMemo(() => {
+    if (!editingFeatureId && !profileSourceSketch && !liveProfileAllowed) return [];
     const sourceShapes = profileSourceSketch?.shapes ?? shapes;
     const sourcePoints = profileSourceSketch?.points ?? points;
     const wires = profileSourceSketch ? profileSourceSketch.profileWires : reconstructedSource?.profileWires;
@@ -544,11 +610,12 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       return region ? [region, ...(region.kind === "region" ? region.holes : [])] : [];
     }
     return findProfileSources(sourceShapes, sourcePoints, sourceShapes.map(shape => shape.id));
-  }, [profileSourceSketch, shapes, points, reconstructedSource]);
+  }, [profileSourceSketch, shapes, points, reconstructedSource, editingFeatureId, liveProfileAllowed]);
   const operationProfileKey = JSON.stringify([featureToolMode, editingFeatureId, profileSourceSketch?.id, operationProfiles]);
   const chosenProfileIndices = operationProfileSelection?.key === operationProfileKey ? operationProfileSelection.indices : null;
-  const selectableOperation = !editingFeatureId && ["extrude", "face", "revolve"].includes(featureToolMode ?? "");
-  const chosenProfiles = chosenProfileIndices === null ? null : operationProfiles.filter((_, i) => chosenProfileIndices.includes(i));
+  const selectableOperation = (!editingFeatureId || !!editingProfileSketch) && ["extrude", "face", "revolve"].includes(featureToolMode ?? "");
+  const chosenProfiles = useMemo(() => chosenProfileIndices === null ? null : operationProfiles.filter((_, i) => chosenProfileIndices.includes(i)),
+    [chosenProfileIndices, operationProfiles]);
   const profile = selectableOperation && chosenProfiles !== null ? (chosenProfiles.length ? chosenProfiles : null) : defaultProfile;
   const faceProfile = selectableOperation && chosenProfiles !== null ? (chosenProfiles.length ? chosenProfiles : null)
     : faceSketchSource === "active" ? profile : savedFaceSource?.profile ?? null;
@@ -565,16 +632,16 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // contam como 1 perfil só), não perfis de verdade, então deriva do
   // resultado já deduplicado (profile) em vez do array bruto.
   const selectedProfileCount = multiProfileSelection.length > 0 ? (Array.isArray(profile) ? profile.length : profile ? 1 : 0) : 0;
-  const lastCircle = findLastCircle(shapes, points);
-  // Furo com Ctrl+clique: cada círculo marcado em multiProfileSelection
-  // (ver toggleProfileSelection em sketch/store.ts) vira um furo próprio —
-  // sem seleção múltipla, cai pro círculo mais recente de sempre.
-  const selectedCircles = multiProfileSelection.length > 0 ? findSelectedCircles(shapes, points, multiProfileSelection) : [];
-  const holeCircles = selectedCircles.length > 0 ? selectedCircles : lastCircle ? [lastCircle] : [];
-  // Ao estilo Inventor: Revolução exige uma linha de centro explícita no
-  // sketch — sem ela, o eixo não está definido e só Extrudar fica disponível.
-  const centerLine = findCenterLine(shapes, points);
+  // Stable geometry inputs are essential: build status renders must not restart
+  // the preview debounce or cancel an in-flight reconstruction.
+  const holeCircles = useMemo(() => {
+    const selected = multiProfileSelection.length > 0 ? findSelectedCircles(shapes, points, multiProfileSelection) : [];
+    const last = findLastCircle(shapes, points);
+    return selected.length > 0 ? selected : last ? [last] : [];
+  }, [multiProfileSelection, shapes, points]);
+  const centerLine = useMemo(() => findCenterLine(shapes, points), [shapes, points]);
   const hasActiveSolid = modelHasSolid;
+  const editingSheetBase = useMemo(() => sheetBaseFace(features, editingFeatureId), [features, editingFeatureId]);
   const hasFinishedSketch = shapes.length > 0 || Object.keys(points).some(id => id !== ORIGIN_POINT_ID);
   const sheetMetalFeature = enabledFeatures.find(
     (f): f is Extract<Feature, { type: "sheetMetal" }> => f.type === "sheetMetal"
@@ -582,41 +649,69 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const isSheetMetal = !!sheetMetalFeature;
   // Sketches já salvos na árvore — caminho da Varredura escolhe entre eles
   // (nunca o sketch ATIVO, que é sempre o perfil).
-  const pathSketchOptions = enabledFeatures.filter((f): f is Extract<Feature, { type: "sketch" }> => f.type === "sketch");
+  const pathSketchOptions = eligibleSketches;
   // Só Extrudar/Face/Revolução/Furo são "padronizáveis" nessa v1 (ver
   // isPatternable em pattern.ts).
   const patternableFeatures = features.filter(isPatternable);
-  const patternAxisOptions: { id: string; label: string; origin: [number, number, number]; direction: [number, number, number] }[] = [
+  const patternAxisOptions: { id: string; label: string; origin: [number, number, number]; direction: [number, number, number] }[] = useMemo(() => [
     ...STANDARD_AXES,
     ...features
       .filter((f): f is Extract<Feature, { type: "axis" }> => f.type === "axis")
       .map((f) => ({ id: f.id, label: f.label, origin: f.origin, direction: f.direction })),
-  ];
+  ], [features]);
+
+  const editedProfileFields = useMemo(() => {
+    if (!editingProfileOperation || !editingProfileSketch || chosenProfiles === null || !chosenProfiles.length || !('profile' in editingProfileOperation)) return null;
+    const candidate = { ...editingProfileOperation, profile: chosenProfiles, plane: editingProfileSketch.plane, sketchReference: undefined };
+    const linked = bindSketchDependencies([editingProfileSketch, candidate])[1];
+    return linked.sketchReference ? { profile: chosenProfiles, plane: editingProfileSketch.plane, sketchReference: linked.sketchReference } : null;
+  }, [editingProfileOperation, editingProfileSketch, chosenProfiles]);
 
   // Ao estilo Inventor: enquanto o painel de Extrudar/Face/Revolução/Furo/
   // Cortar por Plano/Varredura/Espiral está aberto (criando OU editando),
   // monta a MESMA feature que o botão de confirmar criaria/salvaria — mas
   // sem commitar no histórico — pra alimentar a reconstrução do sólido logo
   // abaixo e dar uma pré-visualização ao vivo conforme os campos mudam.
-  // Padrão/Fillet/Chamfro/Flange/Plano ficam de fora dessa 1ª versão: a
-  // origem deles é uma SELEÇÃO (aresta clicada, feature de origem), não um
-  // punhado de campos numéricos como esses — pré-visualizá-los exigiria
-  // reagir ao hover/clique antes mesmo de confirmar, um mecanismo diferente
-  // deste aqui.
+  // Na edição, também pré-visualiza operações baseadas em referências salvas.
   const draftFeature = useMemo<Feature | null>(() => {
-    if (!featureToolMode) return null;
-
     if (editingFeatureId) {
       const original = features.find((f) => f.id === editingFeatureId);
       if (!original) return null;
+      if (original.type === "flange" && flangePicking) {
+        return { ...original, length: flangeLength, angle: flangeAngle, innerRadius: bendRadius ?? undefined, kFactor: bendKFactor };
+      }
+      if (original.type === "fillet" && edgeToolMode === "fillet") {
+        return { ...original, radius: filletRadius3d, edgePoints: selectedEdgePoints };
+      }
+      if (original.type === "chamfer" && edgeToolMode === "chamfer") {
+        return { ...original, distance: chamferDistance3d, edgePoints: selectedEdgePoints };
+      }
+      if (original.type === "sheetMetal" && creatingSheetMetal) {
+        return { ...original, thickness: newSheetThickness };
+      }
+      if (original.type === "plane" && creatingPlane && planeBase) {
+        return { ...original, offset: planeOffset, plane: { ...planeBase, origin: offsetOrigin(planeBase, planeOffset) } };
+      }
+      if (original.type === "pattern" && original.kind === "rectangular") {
+        return { ...original, sourceFeatureId: patternSourceFeatureId ?? original.sourceFeatureId,
+          dir1: AXIS_VECTORS[patternDir1], count1: patternCount1, spacing1: patternSpacing1,
+          dir2: patternDir2Enabled ? AXIS_VECTORS[patternDir2] : undefined,
+          count2: patternDir2Enabled ? patternCount2 : undefined, spacing2: patternDir2Enabled ? patternSpacing2 : undefined };
+      }
+      if (original.type === "pattern" && original.kind === "circular") {
+        const axis = patternAxisOptions.find(a => a.id === patternAxisChoice);
+        return { ...original, sourceFeatureId: patternSourceFeatureId ?? original.sourceFeatureId,
+          axisOrigin: axis?.origin ?? original.axisOrigin, axisDirection: axis?.direction ?? original.axisDirection,
+          count: patternCount, angle: patternAngle };
+      }
       if (featureToolMode === "extrude" && original.type === "extrude") {
-        return { ...original, depth: extrudeDepth, cut: extrudeCut, direction: extrudeDirection };
+        return { ...original, ...editedProfileFields, depth: extrudeDepth, through: extrudeCut && extrudeThrough, cut: extrudeCut, direction: extrudeDirection };
       }
       if (featureToolMode === "face" && original.type === "face") {
-        return { ...original, direction: faceDirection, cut: faceCut, cutDepth: faceCut && faceCutExtent === "distance" ? faceCutDepth : undefined };
+        return { ...original, ...editedProfileFields, direction: faceDirection, cut: faceCut, through: faceCut && faceCutExtent === "through", cutDepth: faceCut && faceCutExtent === "distance" ? faceCutDepth : undefined };
       }
       if (featureToolMode === "revolve" && original.type === "revolve") {
-        return { ...original, angle: revolveAngle, reversed: revolveReversed, cut: revolveCut };
+        return { ...original, ...editedProfileFields, angle: revolveAngle, reversed: revolveReversed, cut: revolveCut };
       }
       if (featureToolMode === "hole" && original.type === "hole") {
         return { ...original, through: holeThrough, depth: holeDepth, direction: holeDirection };
@@ -641,14 +736,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         label: "",
         profile,
         plane: activePlane,
-        depth: extrudeDepth,
+        depth: extrudeDepth, through: extrudeCut && extrudeThrough,
         cut: extrudeCut,
         direction: extrudeDirection,
       };
     }
     if (featureToolMode === "face") {
       if (!faceProfile || !sheetMetalFeature) return null;
-      return { id: "__preview__", type: "face", label: "", profile: faceProfile, plane: facePlane, direction: faceDirection, cut: faceCut, cutDepth: faceCut && faceCutExtent === "distance" ? faceCutDepth : undefined };
+      return { id: "__preview__", type: "face", label: "", profile: faceProfile, plane: facePlane, direction: faceDirection, cut: faceCut, through: faceCut && faceCutExtent === "through", cutDepth: faceCut && faceCutExtent === "distance" ? faceCutDepth : undefined };
     }
     if (featureToolMode === "revolve") {
       if (!profile || !centerLine) return null;
@@ -715,7 +810,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     }
     return null;
   }, [
-    featureToolMode,
+    flangePicking, flangeLength, flangeAngle, bendRadius, bendKFactor,
+    edgeToolMode, filletRadius3d, chamferDistance3d, selectedEdgePoints,
+    creatingSheetMetal, newSheetThickness, creatingPlane, planeBase, planeOffset,
+    patternSourceFeatureId, patternDir1, patternCount1, patternSpacing1,
+    patternDir2Enabled, patternDir2, patternCount2, patternSpacing2,
+    patternAxisOptions, patternAxisChoice, patternCount, patternAngle,
+    featureToolMode, editedProfileFields,
     editingFeatureId,
     features,
     profile,
@@ -727,7 +828,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     holeCircles,
     hasActiveSolid,
     sweepPathFeatureId,
-    extrudeDepth,
+    extrudeDepth, extrudeThrough,
     extrudeCut,
     extrudeDirection,
     faceDirection,
@@ -767,14 +868,20 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // de verdade (features), só que com a feature rascunho da pré-visualização
   // substituindo a original (editando) ou somada no fim (criando) — nunca
   // commitado em features/useFeatureStore, só existe pra essa reconstrução.
+  const draftId = draftFeature?.id;
+  const draftType = draftFeature?.type;
   const effectiveFeatures = useMemo(() => {
-    if (advancedDraft) return advancedEditing ? features.map(f=>f.id===advancedEditing.id?advancedDraft:f) : [...features,advancedDraft];
-    if (!debouncedDraftFeature) return features;
+    if (sketching) return sketchEditingHistory(features, true, editingSketchId);
+    if (advancedEditing) return operationEditingHistory(features, advancedEditing.id, advancedDraft);
     if (editingFeatureId) {
-      return features.map((f) => (f.id === editingFeatureId ? debouncedDraftFeature : f));
+      const preview = draftId && debouncedDraftFeature && draftId === debouncedDraftFeature.id
+        && draftType === debouncedDraftFeature.type ? debouncedDraftFeature : null;
+      return operationEditingHistory(features, editingFeatureId, preview);
     }
+    if (advancedDraft) return [...features, advancedDraft];
+    if (!draftId || !debouncedDraftFeature || draftId !== debouncedDraftFeature.id || draftType !== debouncedDraftFeature.type) return features;
     return [...features, debouncedDraftFeature];
-  }, [features, debouncedDraftFeature, editingFeatureId, advancedDraft, advancedEditing]);
+  }, [features, draftId, draftType, debouncedDraftFeature, editingFeatureId, advancedDraft, advancedEditing, sketching, editingSketchId]);
 
   const showNotice = useCallback((message: string) => {
     setNoticeMessage(message);
@@ -1034,17 +1141,42 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // planos padrão de origem, mais qualquer face do sólido existente) em vez
   // de assumir XY direto — o usuário escolhe visualmente no 3D ou pelos
   // botões da barra.
+  const selectedCadFaces = useRef<import("../viewer/CadSelection").CadReference[]>([]);
+  const handleCadSelection = useCallback((items: import("../viewer/CadSelection").CadReference[]) => { selectedCadFaces.current = items; }, []);
+  const selectedFacePlane = useCallback((): SketchPlane | null => {
+    const items = selectedCadFaces.current;
+    if (!items.length) return null;
+    if (items.length !== 1 || items[0].kind !== "face") throw new Error("Selecione apenas uma face plana para apoiar o esboço.");
+    const faces = measurementSolid.current?.faces ?? [];
+    try {
+      const face = faces.find(f => f.hashCode === items[0].id);
+      if (!face || face.geomType !== "PLANE") throw new Error("O esboço requer uma face plana válida.");
+      const center = face.center;
+      try {
+        const normal = face.normalAt(center.toTuple());
+        try { return sketchPlaneFromHit(center.toTuple(), normal.toTuple()); }
+        finally { normal.delete(); }
+      } finally { center.delete(); }
+    } finally { faces.forEach(f => f.delete()); }
+  }, []);
   const handleCreateSketch = useCallback(() => {
+    setSelectedOperationSketchId(null);
     setRedefiningSketchId(null);
     setEditingSketchId(null);
-    setPickingPlane(true);
-  }, []);
-
-  const applyRedefinedSketchPlane = useCallback((plane: SketchPlane) => {
-    if (!redefiningSketchId) return false;
     try {
-      const updated = redefineSketchPlane(features, redefiningSketchId, plane, { preserveWorldPosition: preserveSketchPosition });
-      const sketch = updated.find((f): f is Extract<Feature, { type: "sketch" }> => f.id === redefiningSketchId && f.type === "sketch")!;
+      const plane = selectedFacePlane();
+      if (plane) {
+        clearSketch(); setActivePlane(plane); setPickingPlane(false); setSketching(true);
+        setPlaneFocusToken(t => t + 1); setErrorMessage(null);
+      } else setPickingPlane(true);
+    } catch (error) { setErrorMessage(error instanceof Error ? error.message : "Face inválida."); }
+  }, [selectedFacePlane, clearSketch, setActivePlane]);
+
+  const applyRedefinedSketchPlane = useCallback((plane: SketchPlane, sketchId = redefiningSketchId, preserve = preserveSketchPosition) => {
+    if (!sketchId) return false;
+    try {
+      const updated = redefineSketchPlane(features, sketchId, plane, { preserveWorldPosition: preserve });
+      const sketch = updated.find((f): f is Extract<Feature, { type: "sketch" }> => f.id === sketchId && f.type === "sketch")!;
       useFeatureStore.setState({ features: updated });
       useSketchStore.setState({ shapes: sketch.shapes, points: { [ORIGIN_POINT_ID]: ORIGIN_POINT, ...sketch.points },
         dimensions: sketch.dimensions, constraints: sketch.constraints ?? [], fixedPointIds: sketch.fixedPointIds ?? [],
@@ -1055,7 +1187,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       setRedefiningSketchId(null);
       setSketching(true);
       setPlaneFocusToken(t => t + 1);
-      showNotice("Plano redefinido: geometria e cotas locais preservadas. Operações existentes que copiaram o perfil mantêm seu plano anterior.");
+      showNotice("Plano redefinido: geometria e cotas locais preservadas. Operações vinculadas acompanham o novo plano.");
     } catch (error) { setErrorMessage(error instanceof Error ? error.message : "Não foi possível redefinir o plano."); }
     return true;
   }, [features, redefiningSketchId, preserveSketchPosition, showNotice]);
@@ -1276,6 +1408,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     }
     const arrow = faceDirection === "flipped" ? " ←" : faceDirection === "symmetric" ? " ↔" : " →";
 
+    if (editingFeatureId && chosenProfiles !== null && !editedProfileFields) {
+      setErrorMessage("Selecione pelo menos um perfil fechado válido do esboço de origem."); return;
+    }
     if (editingFeatureId) {
       const original = features.find((f) => f.id === editingFeatureId && f.type === "face") as
         | Extract<Feature, { type: "face" }>
@@ -1290,11 +1425,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         return;
       }
       updateFeature(editingFeatureId, {
-        ...original,
+        ...original, ...editedProfileFields,
         direction: faceDirection,
         cut: faceCut,
-        cutDepth: faceCut && faceCutExtent === "distance" ? faceCutDepth : undefined,
-        label: `${faceCut ? "Recortar" : "Face"} ${faceCut && faceCutExtent === "distance" ? faceCutDepth : sheetMetalFeature?.thickness}mm${arrow}`,
+        through: faceCut && faceCutExtent === "through", cutDepth: faceCut && faceCutExtent === "distance" ? faceCutDepth : undefined,
+        label: `${faceCut ? "Recortar" : "Face"} ${faceCut && faceCutExtent === "through" ? "passante" : `${faceCut && faceCutExtent === "distance" ? faceCutDepth : sheetMetalFeature?.thickness}mm`}${arrow}`,
       });
       setEditingFeatureId(null);
       setFeatureToolMode(null);
@@ -1312,12 +1447,12 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     addFeature({
       id: createId(),
       type: "face",
-      label: `${faceCut ? "Recortar" : "Face"} ${faceCut && faceCutExtent === "distance" ? faceCutDepth : sheetMetalFeature.thickness}mm${arrow}`,
+      label: `${faceCut ? "Recortar" : "Face"} ${faceCut && faceCutExtent === "through" ? "passante" : `${faceCut && faceCutExtent === "distance" ? faceCutDepth : sheetMetalFeature.thickness}mm`}${arrow}`,
       profile: faceProfile,
       plane: facePlane,
       direction: faceDirection,
       cut: faceCut,
-      cutDepth: faceCut && faceCutExtent === "distance" ? faceCutDepth : undefined,
+      through: faceCut && faceCutExtent === "through", cutDepth: faceCut && faceCutExtent === "distance" ? faceCutDepth : undefined,
     });
     if (faceSketchSource === "active" && chosenProfileIndices === null) {
       clearSketch();
@@ -1341,7 +1476,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     addFeature,
     clearSketch,
     clearProfileSelection,
-    editingFeatureId,
+    editingFeatureId, chosenProfiles, editedProfileFields,
     features,
     updateFeature,
     showNotice,
@@ -1463,7 +1598,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // enquanto flangePicking está ativo não deve fazer nada.
   const handleFacePicked = useCallback(
     (origin: [number, number, number], normal: [number, number, number], selection?: { faceId: number }) => {
-      if (redefiningSketchId) {
+      if (redefiningSketchId || pickingPlane) {
         const faces = measurementSolid.current?.faces ?? [];
         try {
           const face = faces.find(f => f.hashCode === selection?.faceId);
@@ -1471,7 +1606,14 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             setErrorMessage("Escolha uma face plana ou um plano de trabalho para o esboço.");
             return;
           }
-          applyRedefinedSketchPlane(sketchPlaneFromHit(origin, normal));
+          const center = face.center;
+          try {
+            const exactNormal = face.normalAt(center.toTuple());
+            try {
+              if (redefiningSketchId) applyRedefinedSketchPlane(sketchPlaneFromHit(center.toTuple(), exactNormal.toTuple()));
+              else handlePickPlane(center.toTuple(), exactNormal.toTuple());
+            } finally { exactNormal.delete(); }
+          } finally { center.delete(); }
         } finally { faces.forEach(f => f.delete()); }
         return;
       }
@@ -1499,7 +1641,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       planeBase,
       handleAxisFacePicked,
       handlePickPlane,
-      redefiningSketchId,
+      redefiningSketchId, pickingPlane,
       applyRedefinedSketchPlane,
     ]
   );
@@ -1572,6 +1714,23 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   // quando "Concluir Esboço" for clicado de novo.
   const handleOpenSketch = useCallback(
     (feature: Extract<Feature, { type: "sketch" }>) => {
+      sketchEditGeneration.current++;
+      const currentFeatures = useFeatureStore.getState().features;
+      if (currentFeatures.some(f => f.type === "sketch" && f.visible === true)) {
+        useFeatureStore.setState({features: currentFeatures.map(f => f.type === "sketch" ? { ...f, visible: false } : f)});
+      }
+      setEditingFeatureId(null);
+      setFeatureToolMode(null);
+      setEdgeToolMode(null);
+      setFlangePicking(false);
+      setCreatingPlane(false);
+      setCreatingSheetMetal(false);
+      setPickingAxisFace(false);
+      setAdvancedEditing(null);
+      setAdvancedDraft(null);
+      setFlattenView(false);
+      setMobileTab("viewer");
+      setMobileToolsOpen(true);
       useSketchStore.setState({
         shapes: feature.shapes,
         // Mescla a origem — esboços salvos antes dela existir não têm esse
@@ -1584,8 +1743,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         layers:feature.layers??DEFAULT_LAYERS,activeLayerId:feature.activeLayerId??"0",
         fixedPointIds: feature.fixedPointIds ?? [],
         activePlane: feature.plane,
+        multiProfileSelection: [], selectedShapeId: null,
+        selectDrag: null, dragPreview: {}, dragRadiusPreview: null,
       });
+      useSketchStore.getState().setTool("select");
+      setErrorMessage(null);
       setEditingSketchId(feature.id);
+      setSelectedOperationSketchId(feature.id);
       setPickingPlane(false);
       setSketching(true);
       setPlaneFocusToken((t) => t + 1);
@@ -1593,6 +1757,16 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     },
     [showNotice]
   );
+
+  const handleEditOperationSketch = useCallback((feature: Feature) => {
+    try {
+      const result = editOperationSketch(useFeatureStore.getState().features, feature.id, createId);
+      useFeatureStore.setState({features: result.features});
+      handleOpenSketch(result.sketch);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Não foi possível abrir o esboço.");
+    }
+  }, [handleOpenSketch]);
 
   const handleReconstructFace = useCallback((origin: [number, number, number], normal: [number, number, number]) => {
     if (!solidRef.current) return;
@@ -1608,14 +1782,17 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     }
   }, [addFeature, clearSketch, handleOpenSketch, showNotice]);
 
-  const handleFinishSketch = useCallback(() => {
+  const handleFinishSketch = useCallback(async () => {
+    const generation = ++sketchEditGeneration.current;
     const sketchCount = features.filter((f) => f.type === "sketch").length;
 
     if (editingSketchId) {
       const existing = features.find((f) => f.id === editingSketchId);
-      updateFeature(editingSketchId, {
+      const replacement: Feature = {
+        ...existing,
         id: editingSketchId,
         type: "sketch",
+        visible: false,
         profileWires: existing?.type === "sketch" ? existing.profileWires : undefined,
         label: existing?.type === "sketch" ? existing.label : `Esboço ${sketchCount + 1}`,
         plane: activePlane,
@@ -1625,12 +1802,30 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         constraints,
         layers, activeLayerId,
         fixedPointIds,
-      });
+      };
+      let proposed: Feature[];
+      try {
+        await loadOpenCascade();
+        if (generation !== sketchEditGeneration.current) return false;
+        const live = useSketchStore.getState();
+        if (useFeatureStore.getState().features !== features || live.shapes !== shapes || live.points !== points) {
+          setErrorMessage("O esboço mudou durante a validação. Conclua novamente para aplicar a versão atual.");
+          return false;
+        }
+        proposed = updateSketchWithDependents(features, replacement);
+        const check = rebuildModel(proposed);
+        check?.delete();
+      } catch (error) {
+        setErrorMessage(`${describeThrown(error)} A alteração não foi aplicada. Corrija o esboço e conclua novamente, ou cancele a edição.`);
+        return false;
+      }
+      useFeatureStore.setState({ features: proposed });
     } else {
       const id = createId();
       addFeature({
         id,
         type: "sketch",
+        visible: false,
         label: `Esboço ${sketchCount + 1}`,
         plane: activePlane,
         shapes,
@@ -1641,10 +1836,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         fixedPointIds,
       });
       setEditingSketchId(id);
+      setSelectedOperationSketchId(id);
     }
 
     setSketching(false);
-  }, [features, editingSketchId, activePlane, shapes, points, dimensions, constraints, fixedPointIds, layers, activeLayerId, addFeature, updateFeature]);
+    setErrorMessage(null);
+    return true;
+  }, [features, editingSketchId, activePlane, shapes, points, dimensions, constraints, fixedPointIds, layers, activeLayerId, addFeature]);
 
   const handleEditSketch = useCallback(() => {
     setSketching(true);
@@ -1653,6 +1851,9 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const handleAddExtrude = useCallback(() => {
     const directionArrow = extrudeDirection === "flipped" ? " ←" : extrudeDirection === "symmetric" ? " ↔" : " →";
 
+    if (editingFeatureId && chosenProfiles !== null && !editedProfileFields) {
+      setErrorMessage("Selecione pelo menos um perfil fechado válido do esboço de origem."); return;
+    }
     if (editingFeatureId) {
       const original = features.find((f) => f.id === editingFeatureId && f.type === "extrude") as
         | Extract<Feature, { type: "extrude" }>
@@ -1667,11 +1868,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         return;
       }
       updateFeature(editingFeatureId, {
-        ...original,
-        depth: extrudeDepth,
+        ...original, ...editedProfileFields,
+        depth: extrudeDepth, through: extrudeCut && extrudeThrough,
         cut: extrudeCut,
         direction: extrudeDirection,
-        label: `Extrudar ${extrudeDepth}mm${extrudeCut ? " (corte)" : ""}${directionArrow}`,
+        label: `Extrudar ${extrudeCut && extrudeThrough ? "passante" : `${extrudeDepth}mm`}${extrudeCut ? " (corte)" : ""}${directionArrow}`,
       });
       setEditingFeatureId(null);
       setFeatureToolMode(null);
@@ -1689,10 +1890,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     addFeature({
       id: createId(),
       type: "extrude",
-      label: `Extrudar ${extrudeDepth}mm${extrudeCut ? " (corte)" : ""}${directionArrow}`,
+      label: `Extrudar ${extrudeCut && extrudeThrough ? "passante" : `${extrudeDepth}mm`}${extrudeCut ? " (corte)" : ""}${directionArrow}`,
       profile,
       plane: activePlane,
-      depth: extrudeDepth,
+      depth: extrudeDepth, through: extrudeCut && extrudeThrough,
       cut: extrudeCut,
       direction: extrudeDirection,
     });
@@ -1705,20 +1906,23 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     chosenProfileIndices,
     profile,
     extrudeCut,
-    extrudeDepth,
+    extrudeDepth, extrudeThrough,
     extrudeDirection,
     hasActiveSolid,
     activePlane,
     addFeature,
     clearSketch,
     clearProfileSelection,
-    editingFeatureId,
+    editingFeatureId, chosenProfiles, editedProfileFields,
     features,
     updateFeature,
     showNotice,
   ]);
 
   const handleAddRevolve = useCallback(() => {
+    if (editingFeatureId && chosenProfiles !== null && !editedProfileFields) {
+      setErrorMessage("Selecione pelo menos um perfil fechado válido do esboço de origem."); return;
+    }
     if (editingFeatureId) {
       const original = features.find((f) => f.id === editingFeatureId && f.type === "revolve") as
         | Extract<Feature, { type: "revolve" }>
@@ -1733,7 +1937,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         return;
       }
       updateFeature(editingFeatureId, {
-        ...original,
+        ...original, ...editedProfileFields,
         angle: revolveAngle,
         reversed: revolveReversed,
         cut: revolveCut,
@@ -1781,7 +1985,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
     addFeature,
     clearSketch,
     clearProfileSelection,
-    editingFeatureId,
+    editingFeatureId, chosenProfiles, editedProfileFields,
     features,
     updateFeature,
     showNotice,
@@ -1872,7 +2076,13 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       // fantasma que faz a árvore de ternários da barra mostrar o painel
       // errado (ela decide qual mostrar pela ordem: plano > eixo > aresta >
       // flange > featureToolMode).
-      setFeatureToolMode(null);
+      setFeatureToolModeState(null);
+      setCreatingSheetMetal(false);
+      setAdvancedDraft(null);
+      setSketching(false);
+      setFlattenView(false);
+      setMobileTab("viewer");
+      setMobileToolsOpen(true);
       setEdgeToolMode(null);
       setSelectedEdgePoints([]);
       setFlangePicking(false);
@@ -1886,10 +2096,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
 
       if (feature.type === "extrude") {
         setExtrudeDepth(feature.depth);
+        setExtrudeThrough(feature.through ?? false);
         setExtrudeCut(feature.cut);
         setExtrudeDirection(feature.direction ?? "normal");
         setEditingFeatureId(feature.id);
-        setFeatureToolMode("extrude");
+        setFeatureToolModeState("extrude");
         return;
       }
 
@@ -1898,7 +2109,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         setRevolveReversed(feature.reversed ?? false);
         setRevolveCut(feature.cut ?? false);
         setEditingFeatureId(feature.id);
-        setFeatureToolMode("revolve");
+        setFeatureToolModeState("revolve");
         return;
       }
 
@@ -1907,7 +2118,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         setHoleDepth(feature.depth);
         setHoleDirection(feature.direction ?? "flipped");
         setEditingFeatureId(feature.id);
-        setFeatureToolMode("hole");
+        setFeatureToolModeState("hole");
         return;
       }
 
@@ -1946,12 +2157,12 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       }
 
       if (feature.type === "face") {
-        setFaceCutExtent(feature.cutDepth === undefined ? "thickness" : "distance");
+        setFaceCutExtent(feature.through ? "through" : feature.cutDepth === undefined ? "thickness" : "distance");
         setFaceCutDepth(feature.cutDepth ?? 1);
         setFaceDirection(feature.direction ?? "normal");
         setFaceCut(feature.cut ?? false);
         setEditingFeatureId(feature.id);
-        setFeatureToolMode("face");
+        setFeatureToolModeState("face");
         return;
       }
 
@@ -1970,7 +2181,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         setSweepPathFeatureId(feature.pathFeatureId);
         setSweepCut(feature.cut ?? false);
         setEditingFeatureId(feature.id);
-        setFeatureToolMode("sweep");
+        setFeatureToolModeState("sweep");
         return;
       }
 
@@ -1980,7 +2191,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         setHelixReversed(feature.reversed ?? false);
         setHelixCut(feature.cut ?? false);
         setEditingFeatureId(feature.id);
-        setFeatureToolMode("helix");
+        setFeatureToolModeState("helix");
         return;
       }
 
@@ -1996,7 +2207,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           if (feature.count2) setPatternCount2(feature.count2);
           if (feature.spacing2) setPatternSpacing2(feature.spacing2);
           setEditingFeatureId(feature.id);
-          setFeatureToolMode("patternRect");
+          setFeatureToolModeState("patternRect");
         } else {
           const match = patternAxisOptions.find(
             (a) => sameVec3(a.origin, feature.axisOrigin) && sameVec3(a.direction, feature.axisDirection)
@@ -2005,7 +2216,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
           setPatternCount(feature.count);
           setPatternAngle(feature.angle);
           setEditingFeatureId(feature.id);
-          setFeatureToolMode("patternCircular");
+          setFeatureToolModeState("patternCircular");
         }
         return;
       }
@@ -2013,7 +2224,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
       // Só sobra "split" depois de eliminar os outros tipos do union.
       setSplitKeepSide(feature.keepSide);
       setEditingFeatureId(feature.id);
-      setFeatureToolMode("split");
+      setFeatureToolModeState("split");
     },
     [updateFeature, patternAxisOptions]
   );
@@ -2585,7 +2796,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
   const partSheetSource = useMemo(
     () => ({
       kind: "peca" as const,
-      buildShape: ({ flatten, onBend }: { flatten: boolean; onBend?:(bend:import("@/lib/replicad/drawingBends").NativeDrawingBend)=>void }) => rebuildModel(features, { flatten, onFlange:(feature,link)=>onBend?.({id:feature.id,label:feature.label,link}) }),
+      buildShape: ({ flatten, onBend }: { flatten: boolean; onBend?:(bend:import("@/lib/replicad/drawingBends").NativeDrawingBend)=>void }) => rebuildModel(features, { flatten, onFlange:(feature,link,_parent,chain)=>onBend?.({id:feature.id,label:feature.label,link,chain}) }),
       bends: features.filter(f => f.type === "flange").map(f => ({id:f.id,label:f.label,length:f.length,angle:f.angle,innerRadius:f.innerRadius})),
       signature: JSON.stringify(features),
       supportsFlatten: features.some((f) => f.type === "sheetMetal"),
@@ -2612,8 +2823,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         if (key === "e") {
           event.preventDefault();
           if (!profile) { showNotice("Feche um perfil antes de extrudar."); return; }
-          handleFinishSketch(); setFeatureToolMode(isSheetMetal ? "face" : "extrude");
-          if (isSheetMetal) { setFaceSketchSource("active"); setFaceCut(false); }
+          void handleFinishSketch().then(ok => {
+            if (!ok) return;
+            setFeatureToolMode(isSheetMetal ? "face" : "extrude");
+            if (isSheetMetal) { setFaceSketchSource("active"); setFaceCut(false); }
+          });
         }
         return;
       }
@@ -2849,7 +3063,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         data-mobile-open={mobileToolsOpen}
         ref={element=>{toolbarSize.ref.current=element;}} style={toolbarSize.style}
         className="cad-model-tools flex shrink-0 items-start gap-x-2 gap-y-1 overflow-auto border-b border-primary-100 bg-primary-50 px-2 py-1 text-sm">
-        {enabledFeatures.at(-1)?.type === "unfold" ? (
+        {enabledFeatures.at(-1)?.type === "unfold" && !editingFeatureId && !advancedEditing && !sketching && !pickingPlane ? (
           <FeaturePanel label="Chapas — desdobrada">
             <FeatureToolButton icon={IconFlange} label="Redobrar" title="Retorna à geometria dobrada para continuar modelando."
               onClick={() => { addFeature({ id: createId(), type: "refold", label: "Redobrar chapa" }); setFlattenView(false); }} />
@@ -3035,6 +3249,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               />
               mm
             </label>
+            {editingSheetBase && <button type="button" onClick={() => handleEditOperationSketch(editingSheetBase)}
+              className="rounded-lg border border-primary-200 bg-white px-3 py-1.5 text-primary-700">Editar esboço da Face base</button>}
             <button
               type="button"
               onClick={handleConfirmSheetMetal}
@@ -3128,6 +3344,17 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               <IconFinish />
               Concluir Esboço
             </button>
+            <button type="button" className="rounded-lg bg-white px-3 py-1.5" onClick={() => {
+              sketchEditGeneration.current++;
+              const saved = features.find(f => f.id === editingSketchId && f.type === "sketch");
+              if (saved?.type === "sketch") {
+                handleOpenSketch(saved);
+                updateFeature(saved.id, { ...saved, visible: false });
+              }
+              else clearSketch();
+              setSketching(false);
+              setErrorMessage(null);
+            }}>Cancelar edição</button>
             <div className="hidden h-6 w-px shrink-0 bg-primary-200 sm:block" />
             <SketchToolPalette />
           </>
@@ -3174,6 +3401,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                     type="number"
                     min={0.1}
                     step={1}
+                    disabled={extrudeCut && extrudeThrough}
                     value={extrudeDepth}
                     onChange={(e) => setExtrudeDepth(Number(e.target.value))}
                     className="w-16 rounded-lg border border-primary-200 bg-white px-2 py-1 text-foreground"
@@ -3187,6 +3415,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                   />
                   Corte
                 </label>
+                {extrudeCut && <label className="flex items-center gap-2 text-primary-700">Extensão
+                  <select aria-label="Extensão do corte por extrusão" value={extrudeThrough ? "through" : "distance"} onChange={e => setExtrudeThrough(e.target.value === "through")} className="rounded border bg-white px-2 py-1">
+                    <option value="distance">Distância</option><option value="through">Passante</option>
+                  </select>
+                </label>}
                 <div className="flex items-center gap-0.5 rounded-lg bg-white p-0.5" title="Sentido da extrusão">
                   {(
                     [
@@ -3247,9 +3480,10 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                 </label>
                 {faceCut && <>
                   <label className="flex items-center gap-2 text-primary-700">Profundidade
-                    <select aria-label="Modo de profundidade do corte" value={faceCutExtent} onChange={e => setFaceCutExtent(e.target.value as "thickness" | "distance")} className="rounded border bg-white px-2 py-1">
+                    <select aria-label="Modo de profundidade do corte" value={faceCutExtent} onChange={e => setFaceCutExtent(e.target.value as "thickness" | "distance" | "through")} className="rounded border bg-white px-2 py-1">
                       <option value="thickness">Espessura da chapa ({sheetMetalFeature?.thickness ?? 1} mm)</option>
                       <option value="distance">Distância</option>
+                      <option value="through">Passante</option>
                     </select>
                   </label>
                   {faceCutExtent === "distance" && <label className="flex items-center gap-1 text-primary-700">
@@ -3277,6 +3511,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
                     </button>
                   ))}
                 </div>
+                {editingFeatureId && <button type="button" className="rounded-lg border border-primary-200 bg-white px-3 py-1.5 text-primary-700"
+                  onClick={() => {
+                    const operation = features.find(f => f.id === editingFeatureId && f.type === "face");
+                    if (operation) handleEditOperationSketch(operation);
+                  }}>Editar esboço da Face</button>}
                 <button
                   type="button"
                   onClick={handleAddFace}
@@ -4027,7 +4266,8 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         </p>
       )}
       {selectableOperation && (
-        <ProfilePicker profiles={operationProfiles} selected={chosenProfileIndices}
+        <ProfilePicker profiles={operationProfiles} selected={chosenProfileIndices ?? (editingProfileOperation && 'profile' in editingProfileOperation
+          ? operationProfiles.flatMap((p, i) => (Array.isArray(editingProfileOperation.profile) ? editingProfileOperation.profile : [editingProfileOperation.profile]).some(original => JSON.stringify(original) === JSON.stringify(p)) ? [i] : []) : null)}
           onChange={indices => setOperationProfileSelection(indices === null ? null : { key: operationProfileKey, indices })} />
       )}
       {noticeMessage && (
@@ -4124,11 +4364,42 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
         >
           <FeatureHistoryPanel
             features={features}
+            reorderDisabled={suppressing || status === "loading" || sketching || !!editingFeatureId || !!advancedEditing || !!featureToolMode || creatingPlane || creatingSheetMetal || flangePicking || !!edgeToolMode || pickingPlane}
+            onMove={async (id, targetId, placement) => {
+              if (suppressing) return;
+              const original = useFeatureStore.getState().features;
+              setSuppressing(true);
+              try {
+                const proposed = moveOperationTo(original, id, targetId, placement);
+                if (proposed === original) return;
+                await loadOpenCascade();
+                const check = rebuildModel(proposed);
+                try { check?.mesh(); } finally { check?.delete(); }
+                if (useFeatureStore.getState().features !== original) throw new Error("O modelo mudou; tente novamente.");
+                useFeatureStore.setState({ features: proposed });
+                setErrorMessage(null);
+                showNotice("Ordem das operações atualizada.");
+              } catch (error) {
+                setErrorMessage(error instanceof Error ? error.message : "Não foi possível reordenar as operações.");
+              } finally { setSuppressing(false); }
+            }}
             activeIds={enabledIds}
             bodyVisible={bodyVisible}
             onBodyVisibility={() => setBodyVisible(v => !v)}
-            busy={suppressing || status === "loading" || sketching || pickingPlane || !!featureToolMode}
-            onVisibility={feature => updateFeature(feature.id, { ...feature, visible: feature.visible === false })}
+            busy={suppressing || status === "loading" || sketching}
+            onVisibility={feature => {
+              const visible = feature.type === "sketch" ? feature.visible !== true : feature.visible === false;
+              if (feature.type === "sketch" && visible) {
+                useSketchStore.setState({ shapes: feature.shapes, points: { [ORIGIN_POINT_ID]: ORIGIN_POINT, ...feature.points },
+                  dimensions: feature.dimensions, constraints: feature.constraints ?? [], fixedPointIds: feature.fixedPointIds ?? [],
+                  layers: feature.layers ?? DEFAULT_LAYERS, activeLayerId: feature.activeLayerId ?? "0", activePlane: feature.plane,
+                  multiProfileSelection: [], selectedShapeId: null });
+                setEditingSketchId(feature.id);
+                setSelectedOperationSketchId(feature.id);
+              }
+              useFeatureStore.setState(state => ({features: state.features.map(f => f.id === feature.id
+                ? { ...f, visible } : feature.type === "sketch" && visible && f.type === "sketch" ? { ...f, visible: false } : f)}));
+            }}
             onSuppression={async feature => {
               if (suppressing) return;
               setSuppressing(true);
@@ -4147,7 +4418,11 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             }}
             onRemove={removeFeature}
             onRedefineSketch={feature => {
-              setPreserveSketchPosition(true);
+              try {
+                const plane = selectedFacePlane();
+                if (plane) { applyRedefinedSketchPlane(plane, feature.id, false); return; }
+              } catch (error) { setErrorMessage(error instanceof Error ? error.message : "Face inválida."); return; }
+              setPreserveSketchPosition(false);
               setRedefiningSketchId(feature.id);
               setPickingPlane(true);
               setFlattenView(false);
@@ -4155,6 +4430,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             }}
             onOpenSketch={handleOpenSketch}
             onEditFeature={handleEditFeature}
+            onEditOperationSketch={handleEditOperationSketch}
           />
         </div>
         {/* Divisória arrastável (só md+, só faz sentido com os 2 painéis
@@ -4176,6 +4452,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
               !!edgeToolMode ||
               (flangePicking && !flangeCandidate)
             }
+            onSelectionChange={handleCadSelection}
             onPickPlane={measuring3d ? (point, _normal, selection) => {
               if (!selection || !measurementSolid.current) return;
               try {
@@ -4238,7 +4515,7 @@ export function ModeladorWorkspace({ userEmail }: { userEmail: string }) {
             sketchOverlay={
               sketching
                 ? { plane: activePlane, referenceGeometry, interactive: true }
-                : hasFinishedSketch && (!editingSketchId || enabledFeatures.some(f => f.id === editingSketchId && f.visible !== false))
+                : hasFinishedSketch && showSketchOverlay(false, editingSketchId, enabledFeatures)
                   ? { plane: activePlane, referenceGeometry, interactive: false }
                   : null
             }
@@ -4460,11 +4737,13 @@ function PartPropertiesDialog({
 }
 
 function FeatureHistoryPanel({
-  features,
+  features, onMove, reorderDisabled,
   onRemove,
   onOpenSketch,
-  onEditFeature, activeIds, bodyVisible, onBodyVisibility, onVisibility, onSuppression, busy, onRedefineSketch,
+  onEditFeature, onEditOperationSketch, activeIds, bodyVisible, onBodyVisibility, onVisibility, onSuppression, busy, onRedefineSketch,
 }: {
+  onMove: (id: string, targetId: string, placement: 'before' | 'after') => void;
+  reorderDisabled: boolean;
   activeIds: Set<string>;
   bodyVisible: boolean;
   onBodyVisibility: () => void;
@@ -4476,7 +4755,13 @@ function FeatureHistoryPanel({
   onRedefineSketch: (feature: Extract<Feature, { type: "sketch" }>) => void;
   onOpenSketch: (feature: Extract<Feature, { type: "sketch" }>) => void;
   onEditFeature: (feature: Feature) => void;
+  onEditOperationSketch: (feature: Feature) => void;
 }) {
+  const history = useMemo(() => featureHistoryTree(features), [features]);
+  const [expandedOperations, setExpandedOperations] = useState<Set<string>>(() => new Set());
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: string; placement: 'before' | 'after' } | null>(null);
+  const clearDrag = () => { setDraggedId(null); setDropTarget(null); };
   const simulations=usePartStudiesStore(s=>s.document.studies);
   const router=useRouter();
   return (
@@ -4490,13 +4775,43 @@ function FeatureHistoryPanel({
         <p className="text-xs text-primary-400">Nenhuma operação ainda.</p>
       )}
       <ul className="space-y-1.5">
-        {features.map((feature, index) => {
+        {history.map(({feature, index, sketches}) => {
           const badge = FEATURE_BADGE[feature.type];
+          const expandable = !!sheetBaseFace(features, feature.id) || sketches.length > 0 || ["face", "extrude", "revolve", "sweep", "helix", "hole", "loft"].includes(feature.type);
+          const expanded = expandedOperations.has(feature.id);
+          const childrenId = `feature-sketches-${feature.id}`;
           return (
             <li
               key={feature.id}
-              className="flex items-center gap-2 rounded-lg bg-white px-2 py-1.5 text-xs text-primary-800 shadow-sm"
+              onDragOver={event => {
+                if (reorderDisabled || !draggedId || draggedId === feature.id) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                const rect = event.currentTarget.getBoundingClientRect();
+                const placement = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                setDropTarget(current => current?.id === feature.id && current.placement === placement ? current : { id: feature.id, placement });
+              }}
+              onDragLeave={event => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(null);
+              }}
+              onDrop={event => {
+                event.preventDefault();
+                if (!reorderDisabled && draggedId && draggedId !== feature.id) {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  onMove(draggedId, feature.id, event.clientY < rect.top + rect.height / 2 ? 'before' : 'after');
+                }
+                clearDrag();
+              }}
+              className={`relative rounded-lg bg-white px-2 py-1.5 text-xs text-primary-800 shadow-sm ${draggedId === feature.id ? "opacity-40" : ""}`}
+              style={dropTarget?.id === feature.id ? { boxShadow: `0 ${dropTarget.placement === 'before' ? '-2px' : '2px'} 0 0 #2563eb` } : undefined}
             >
+              <div className="flex min-w-0 items-center gap-2">
+              {expandable ? <FeatureExpandButton label={feature.label} expanded={expanded} controls={childrenId}
+                onToggle={() => setExpandedOperations(current => {
+                  const next = new Set(current);
+                  if (next.has(feature.id)) next.delete(feature.id); else next.add(feature.id);
+                  return next;
+                })} /> : <span className="w-4 shrink-0" />}
               <span
                 className={`flex h-5 w-6 shrink-0 items-center justify-center rounded text-[10px] font-bold ${badge.className}`}
               >
@@ -4505,19 +4820,28 @@ function FeatureHistoryPanel({
               <button
                 type="button"
                 onClick={() => (feature.type === "sketch" ? onOpenSketch(feature) : onEditFeature(feature))}
-                title={feature.type === "sketch" ? "Reabrir esboço para editar" : "Editar parâmetros"}
-                disabled={!activeIds.has(feature.id) || busy}
-                className={`flex-1 truncate text-left hover:underline ${!activeIds.has(feature.id) ? "line-through opacity-50" : ""}`}
+                draggable={!reorderDisabled}
+                onDragStart={event => {
+                  if (reorderDisabled) { event.preventDefault(); return; }
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", feature.id);
+                  setDraggedId(feature.id);
+                }}
+                onDragEnd={clearDrag}
+                title="Clique para editar; arraste para reordenar"
+                aria-label={feature.type === "sketch" ? `Editar ${feature.label}` : `Editar parâmetros de ${feature.label}`}
+                disabled={busy}
+                className={`min-w-0 flex-1 truncate text-left hover:underline ${!activeIds.has(feature.id) ? "line-through opacity-50" : ""}`}
               >
                 {index + 1}. {feature.label}
               </button>
               {feature.type === "sketch" && <button type="button" disabled={busy || !activeIds.has(feature.id)}
                 title="Redefinir plano ou face do esboço" aria-label={`Redefinir plano de ${feature.label}`}
-                onClick={() => onRedefineSketch(feature)} className="rounded border px-1 disabled:opacity-40">Plano</button>}
+                onClick={() => onRedefineSketch(feature)} className="rounded border px-1 disabled:opacity-40">Redefinir esboço</button>}
               {(["plane", "axis", "sketch", "imported"].includes(feature.type)) && <button type="button" disabled={busy || !activeIds.has(feature.id)}
                 title={feature.type === "sketch" ? "Visibilidade do esboço quando carregado; durante edição permanece visível" : feature.type === "imported" ? "Ocultar/mostrar este corpo e seus modificadores dependentes; operações independentes permanecem visíveis" : "Visibilidade da referência"}
-                aria-label={`${feature.visible === false ? "Mostrar" : "Ocultar"} ${feature.label}`} aria-pressed={feature.visible !== false}
-                onClick={() => onVisibility(feature)} className="rounded border px-1 disabled:opacity-40">{feature.visible === false ? "○" : "●"}</button>}
+                aria-label={`${(feature.type === "sketch" ? feature.visible === true : feature.visible !== false) ? "Ocultar" : "Mostrar"} ${feature.label}`} aria-pressed={feature.type === "sketch" ? feature.visible === true : feature.visible !== false}
+                onClick={() => onVisibility(feature)} className="rounded border px-1 disabled:opacity-40">{(feature.type === "sketch" ? feature.visible === true : feature.visible !== false) ? "●" : "○"}</button>}
               <button type="button" disabled={busy || (!activeIds.has(feature.id) && !feature.suppressed)}
                 title={!activeIds.has(feature.id) && !feature.suppressed ? "Inativa por dependência suprimida" : feature.suppressed ? "Reativar operação" : "Suprimir operação (recalcula a peça)"}
                 aria-label={`${feature.suppressed ? "Reativar" : "Suprimir"} ${feature.label}`} aria-pressed={!!feature.suppressed}
@@ -4530,6 +4854,11 @@ function FeatureHistoryPanel({
               >
                 ×
               </button>
+              </div>
+              <div id={childrenId} hidden={expandable && !expanded}>
+                <FeatureSketchActions feature={feature} features={features} sketches={sketches} busy={busy} onEdit={onEditOperationSketch}
+                  onOpenSketch={onOpenSketch} onVisibility={onVisibility} onRedefineSketch={onRedefineSketch} />
+              </div>
             </li>
           );
         })}

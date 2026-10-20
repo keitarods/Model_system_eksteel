@@ -221,6 +221,14 @@ export function reconstructedSketchProfile(shapes: SketchShape[], points: Record
   return contours.length === 1 ? contours[0] : { kind: "region", outer: contours[0], holes: contours.slice(1) };
 }
 
+/** Resolve independent closed contours for operation creation. Explicit boundary
+ * groups keep their hole semantics and must never fall back to filled contours. */
+export function sketchOperationProfile(shapes: SketchShape[], points: Record<string, SketchPoint>, wires?: string[][]): NonNullable<ProfileSource> | NonNullable<ProfileSource>[] | null {
+  if (wires) return reconstructedSketchProfile(shapes, points, wires);
+  const profiles = findProfileSources(shapes, points, shapes.map(shape => shape.id));
+  return profiles.length ? profiles : null;
+}
+
 // Perfil de UMA forma específica — só rect/circle/slot; LINHA é tratada à
 // parte em findProfileSources (precisa achar o contorno fechado INTEIRO
 // que ela pertence, e ela sozinha não chega lá — ver findClosedLoopContaining).

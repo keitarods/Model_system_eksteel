@@ -1,3 +1,5 @@
+import { flatSketchPlane } from "./flatSketchPlane";
+import { bindSketchDependencies, resolveSketchDependencies } from "@/lib/features/sketchDependencies";
 import { activeFeatures } from "@/lib/features/suppression";
 import { sheetIsUnfolded } from "@/lib/features/sheetState";
 import { buildLoft, buildShell } from "./advancedFeatures";
@@ -7,7 +9,7 @@ import type { Feature, SketchFeature } from "@/lib/features/types";
 import type { SketchPlane } from "@/lib/sketch/types";
 import { extrudeProfile, pathToDrawing, profileReferencePoint, pointToLineDistance2D, profileToDrawing, profilesToDrawing } from "./geometry";
 import { findEdgesByPoints, listLinearEdges } from "./edgeTools";
-import { buildFlangeSolid, attachPointToFlange, undoFlattenChain, type FlattenLink } from "./sheetMetal";
+import { buildFlangeSolid, attachPointToFlange, pointOnFlange, undoFlattenChain, type FlattenLink } from "./sheetMetal";
 import { applyPatternOffset, computePatternOffsets, isPatternable } from "./pattern";
 import {
   localToWorldDirection,
@@ -17,11 +19,18 @@ import {
   toReplicadPlane,
 } from "./plane";
 
+/** Span measured from the sketch origin also covers planes outside the body. */
+function throughDepth(solid: Solid | null | undefined, plane: SketchPlane): number {
+  if (!solid) throw new Error('O corte passante precisa de um sólido anterior.');
+  const bounds = solid.boundingBox.bounds;
+  return 2 * (Math.hypot(...plane.origin.map((v, i) => Math.max(Math.abs(bounds[0][i] - v), Math.abs(bounds[1][i] - v)))) + 1);
+}
+
 function buildExtrudeSolid(
-  feature: Extract<Feature, { type: "extrude" }>
+  feature: Extract<Feature, { type: "extrude" }>, activeSolid?: Solid | null
 ): Solid | null {
   const drawing = profilesToDrawing(feature.profile);
-  return drawing ? extrudeProfile(drawing, feature.depth, feature.plane, feature.direction ?? "normal") : null;
+  return drawing ? extrudeProfile(drawing, feature.cut && feature.through ? throughDepth(activeSolid, feature.plane) : feature.depth, feature.plane, feature.direction ?? "normal") : null;
 }
 
 // "Face" (Inventor) é um extrude igual, mas a profundidade nunca é da
@@ -30,10 +39,10 @@ function buildExtrudeSolid(
 // espessura consistente.
 function buildFaceSolid(
   feature: Extract<Feature, { type: "face" }>,
-  thickness: number
+  thickness: number, activeSolid?: Solid | null
 ): Solid | null {
   const drawing = profilesToDrawing(feature.profile);
-  const depth = feature.cut ? feature.cutDepth ?? thickness : thickness;
+  const depth = feature.cut && feature.through ? throughDepth(activeSolid, feature.plane) : feature.cut ? feature.cutDepth ?? thickness : thickness;
   if (!Number.isFinite(depth) || depth <= 0) throw new Error("Recortar: informe uma distância positiva.");
   return drawing ? extrudeProfile(drawing, depth, feature.plane, feature.direction ?? "normal") : null;
 }
@@ -237,8 +246,8 @@ function buildHelixSolid(feature: Extract<Feature, { type: "helix" }>): Solid | 
 // operação (fuse/corte/fillet/chamfro) em active E em shadow, exceto Flange
 // — que faz a versão arredondada na sombra e a versão reta (ou arredondada,
 // se flatten=false) no sólido exibido.
-export function rebuildModel(features: Feature[], options: { flatten?: boolean; onFlange?: (feature: Extract<Feature, { type: "flange" }>, link: FlattenLink, parent?: FlattenLink) => void } = {}): Solid | null {
-  features = activeFeatures(features);
+export function rebuildModel(features: Feature[], options: { flatten?: boolean; onFlange?: (feature: Extract<Feature, { type: "flange" }>, link: FlattenLink, parent?: FlattenLink, chain?: FlattenLink[]) => void } = {}): Solid | null {
+  features = resolveSketchDependencies(activeFeatures(bindSketchDependencies(features)));
   // Imported independent bodies need a single flat compound, not a growing
   // series of cloned compounds. Keep the general operation path for booleans.
   if (features.length && features.every((f, i) => f.type === "imported" && !f.bodyGroupId && (i === 0 || f.preserveBody))) {
@@ -312,14 +321,15 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean; 
   // Aplica a MESMA peça de geometria (fuse ou corte) em active e, se
   // existir, em shadow — usado por toda feature que não seja Flange (que
   // tem tratamento próprio, com geometria DIFERENTE em cada um).
-  function mergeInto(built: Solid, cut: boolean) {
+  function mergeInto(built: Solid, cut: boolean, foldedBuilt?: Solid | null) {
     if (!active) {
       if (cut) {
+        foldedBuilt?.delete();
         built.delete(); // corte sem sólido pra cortar: no-op
         return;
       }
       active = built;
-      shadow = flatten ? (built.clone() as unknown as Solid) : null;
+      shadow = flatten ? (foldedBuilt ?? built.clone() as unknown as Solid) : null;
       return;
     }
 
@@ -328,15 +338,17 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean; 
     active = result;
 
     if (flatten && shadow) {
-      const shadowResult = cut ? (shadow.cut(built) as unknown as Solid) : (shadow.fuse(built) as unknown as Solid);
+      const shadowResult = cut ? (shadow.cut(foldedBuilt ?? built) as unknown as Solid) : (shadow.fuse(foldedBuilt ?? built) as unknown as Solid);
       shadow.delete();
       shadow = shadowResult;
     }
 
     built.delete();
+    foldedBuilt?.delete();
   }
 
   let buildingFeature: Feature | undefined;
+  let validatingFlatResult = false;
   try {
   for (const feature of features) {
     buildingFeature = feature;
@@ -377,10 +389,14 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean; 
     if (feature.type === "sketch" || feature.type === "plane" || feature.type === "axis") continue;
 
     if (feature.type === "face") {
-      chains.set(feature.id, []);
-      const built = buildFaceSolid(feature, sheetThickness);
+      const mapped = flatten ? flatSketchPlane(feature.plane, [...chains.values()], !!feature.cut) : { plane: feature.plane, chain: [] };
+      chains.set(feature.id, mapped.chain);
+      const built = buildFaceSolid(flatten ? { ...feature, plane: mapped.plane } : feature, sheetThickness, active);
       if (!built) continue;
-      mergeInto(built, !!feature.cut);
+      let foldedBuilt: Solid | null = null;
+      try { if (flatten) foldedBuilt = buildFaceSolid(feature, sheetThickness, shadow); }
+      catch (error) { built.delete(); throw error; }
+      mergeInto(built, !!feature.cut, foldedBuilt);
       continue;
     }
 
@@ -398,18 +414,28 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean; 
         active,
         shadow ?? active,
         flatten,
-        parentChain
+        parentChain,
+        (() => {
+          const parent = features.find(f => f.id === feature.parentId);
+          return parent?.type === "face" ? parent.plane.normal : undefined;
+        })()
       );
       chains.set(feature.id, [...parentChain, link]);
       active = solid;
       shadow = flatten ? shadowSolid : null;
-      options.onFlange?.(feature, link, parentChain.at(-1));
+      options.onFlange?.(feature, link, parentChain.at(-1), [...parentChain, link]);
       continue;
     }
 
     if (feature.type === "hole") {
       if (!active) continue; // nada pra furar ainda
-      mergeInto(buildHoleTool(feature, active), true);
+      if (flatten && shadow) {
+        const mapped = flatSketchPlane(feature.plane, [...chains.values()], true);
+        const tool = buildHoleTool({ ...feature, plane: mapped.plane }, active);
+        let foldedTool: Solid;
+        try { foldedTool = buildHoleTool(feature, shadow); } catch (error) { tool.delete(); throw error; }
+        mergeInto(tool, true, foldedTool);
+      } else mergeInto(buildHoleTool(feature, active), true);
       continue;
     }
 
@@ -477,9 +503,9 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean; 
           copy.type === "hole"
             ? active && buildHoleTool(copy, active)
             : copy.type === "face"
-              ? buildFaceSolid(copy, sheetThickness)
+              ? buildFaceSolid(copy, sheetThickness, active)
               : copy.type === "extrude"
-                ? buildExtrudeSolid(copy)
+                ? buildExtrudeSolid(copy, active)
                 : buildRevolveSolid(copy);
         if (!built) continue;
         mergeInto(built, copy.type === "hole" ? true : !!copy.cut);
@@ -487,20 +513,45 @@ export function rebuildModel(features: Feature[], options: { flatten?: boolean; 
       continue;
     }
 
+    if (flatten && feature.type === "extrude") {
+      const mapped = flatSketchPlane(feature.plane, [...chains.values()], feature.cut);
+      const tool = buildExtrudeSolid({ ...feature, plane: mapped.plane }, active);
+      if (tool) {
+        let foldedTool: Solid | null;
+        try { foldedTool = buildExtrudeSolid(feature, shadow); } catch (error) { tool.delete(); throw error; }
+        mergeInto(tool, feature.cut, foldedTool);
+      }
+      continue;
+    }
     const built =
       feature.type === "extrude"
-        ? buildExtrudeSolid(feature)
+        ? buildExtrudeSolid(feature, active)
         : buildRevolveSolid(feature);
 
     if (!built) continue;
     mergeInto(built, !!feature.cut);
   }
 
+  if (flatten && active) {
+    validatingFlatResult = true;
+    const base = features.find((f): f is Extract<Feature, { type: "face" }> => f.type === "face" && !f.cut);
+    if (base) {
+      const vertices = active.mesh().vertices;
+      let min = Infinity, max = -Infinity;
+      for (let i = 0; i < vertices.length; i += 3) {
+        const distance = base.plane.normal.reduce((sum, n, axis) => sum + n * (vertices[i + axis] - base.plane.origin[axis]), 0);
+        min = Math.min(min, distance); max = Math.max(max, distance);
+      }
+      const thickness = Math.max(...features.filter((f): f is Extract<Feature, { type: "sheetMetal" }> => f.type === "sheetMetal").map(f => f.thickness));
+      if (max - min > thickness + 0.01) throw new Error(`O resultado ainda contém faces fora do plano da chapa: extensão normal de ${(max - min).toFixed(3)} mm para espessura de ${thickness.toFixed(3)} mm. A planificação incompleta não será exibida.`);
+    }
+  }
   } catch (error) {
     // Some failed boolean operations have already released their input wrappers.
     try { active?.delete(); } catch { /* Preserve the original geometry error. */ }
     try { shadow?.delete(); } catch { /* Preserve the original geometry error. */ }
     const detail = error instanceof Error ? error.message : `Falha do kernel geométrico (código ${String(error)}).`;
+    if (validatingFlatResult) throw new Error(`Planificação: verificação final da peça. ${detail}`);
     throw new Error(`${flatten ? 'Planificação' : 'Reconstrução'}: operação "${buildingFeature?.label ?? buildingFeature?.type ?? 'desconhecida'}" (${buildingFeature?.id ?? '?'}): ${detail}`);
   }
   shadow?.delete();
@@ -601,6 +652,44 @@ export function editFlangeWithDependents(features: Feature[], replacement: Extra
   }
   const updated = attached.map(f => f.id === replacement.id && f.type === 'flange'
     ? { ...replacement, attachment: f.attachment } : f);
+  // Edge tools store world-space picks. Move only unambiguous straight-panel
+  // edge picks with the edited flange; never choose an arbitrary nearby edge.
+  const activeIds = new Set(activeFeatures(updated).map(f => f.id));
+  const edgeTools = updated.filter(f => activeIds.has(f.id) && (f.type === 'fillet' || f.type === 'chamfer'));
+  if (edgeTools.length) {
+    const oldLinks = new Map<string, FlattenLink>();
+    const originalSolid = rebuildModel(attached, { onFlange: (f, link) => { oldLinks.set(f.id, link); } });
+    originalSolid?.delete();
+    for (let index = 0; index < updated.length; index++) {
+      const feature = updated[index];
+      if (!activeIds.has(feature.id) || (feature.type !== 'fillet' && feature.type !== 'chamfer')) continue;
+      const newLinks = new Map<string, FlattenLink>();
+      const prefix = rebuildModel(updated.slice(0, index), { onFlange: (f, link) => { newLinks.set(f.id, link); } });
+      try {
+        const edgePoints = feature.edgePoints.map(point => {
+          const candidates: [number, number, number][] = [];
+          for (const id of descendants) {
+            const oldLink = oldLinks.get(id), newLink = newLinks.get(id);
+            if (!oldLink || !newLink) continue;
+            let uvw: [number, number, number];
+            try { uvw = attachPointToFlange(oldLink, point); } catch { continue; }
+            const boundaryCount = uvw.filter((v, i) => Math.abs(v) < 1e-6 || Math.abs(v - (i === 2 ? -1 : 1)) < 1e-6).length;
+            if (boundaryCount !== 2) continue;
+            candidates.push(pointOnFlange(newLink, uvw));
+          }
+          if (!candidates.length) return point;
+          const target = candidates[0];
+          if (candidates.some(p => Math.hypot(...p.map((v, i) => v - target[i])) > 1e-6)) {
+            throw new Error(`A referência de aresta de "${feature.label}" ficou ambígua após alterar o flange.`);
+          }
+          // Validate against the actual solid before this operation, including cuts.
+          if (prefix) findEdgesByPoints(prefix, [target]).forEach(edge => edge.delete());
+          return target;
+        });
+        updated[index] = { ...feature, edgePoints };
+      } finally { prefix?.delete(); }
+    }
+  }
   const resolved = new Map<string, FlattenLink>();
   const solid = rebuildModel(updated, { onFlange: (feature, link) => { resolved.set(feature.id, link); } });
   try { solid?.mesh(); } finally { solid?.delete(); }

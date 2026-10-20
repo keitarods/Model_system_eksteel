@@ -1,5 +1,6 @@
 "use client";
 
+import { hitsSketchSupport } from "./planePickPriority";
 import { useState } from "react";
 import { Html } from "@react-three/drei";
 import * as THREE from "three";
@@ -33,6 +34,7 @@ export function PlanePicker3D({ onPick }: { onPick: (plane: SketchPlane) => void
               position={plane.origin}
               quaternion={[quaternion.x, quaternion.y, quaternion.z, quaternion.w]}
               onPointerOver={(e) => {
+                if (hitsSketchSupport(e.intersections)) { setHoveredId(null); return; }
                 e.stopPropagation();
                 setHoveredId(id);
               }}
@@ -41,6 +43,7 @@ export function PlanePicker3D({ onPick }: { onPick: (plane: SketchPlane) => void
                 setHoveredId((cur) => (cur === id ? null : cur));
               }}
               onClick={(e) => {
+                if (hitsSketchSupport(e.intersections)) return;
                 e.stopPropagation();
                 onPick(plane);
               }}
@@ -57,7 +60,6 @@ export function PlanePicker3D({ onPick }: { onPick: (plane: SketchPlane) => void
             <Html
               position={localToWorldPoint(plane, { x: PLANE_SIZE * 0.35, y: PLANE_SIZE * 0.35 })}
               center
-              distanceFactor={110}
               pointerEvents="none"
             >
               <span

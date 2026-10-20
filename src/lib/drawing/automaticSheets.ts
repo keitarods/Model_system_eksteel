@@ -40,7 +40,7 @@ export async function generateAutomaticSheets(documentSource: SheetShapeSource, 
         sheet.scale = scale;
         sheet.views = views.map((v,i)=>({...v,x:cells[i].x,y:cells[i].y,scale,scaleLabel:scaleToLabel(scale),label:VIEW_ORIENTATION_LABELS[v.orientation],sourceSignature:featuresSignature}));
         sheet.dimensions = sheet.views.flatMap(v=>[...autoDimensions(v,autoDetails),...bendAngles(v,(source.bends??[]).map(b=>b.angle))]);
-        sheet.annotations = sheet.views.flatMap(v=>[...autoCircleNotes(v),...autoRadiusNotes(v)]);
+        sheet.annotations = sheet.views.flatMap(v=>[...(!flatten && source.bends?.length ? [] : autoCircleNotes(v)),...autoRadiusNotes(v,!flatten && !!source.bends?.length)]);
         if (!flatten && source.bends?.length) {
           sheet.annotations.push(...bendSchedule(source.bends.slice(0, 14)));
         }

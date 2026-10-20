@@ -558,7 +558,7 @@ export function DrawingSheetWorkspace({
       }
       const angles=views.flatMap(v=>bendAngles(v,(source.bends??[]).map(b=>b.angle)));
       setReplaceAutoSheet(true);
-      setAutoPreview([layoutLeaders({...activeSheet,views,annotations:[...activeSheet.annotations.filter(a=>!a.id.startsWith("auto-radius-")),...views.flatMap(autoRadiusNotes)],dimensions:[...activeSheet.dimensions.filter(d=>!d.automatic),...views.flatMap(v=>autoDimensions(v,autoDetails)),...angles]})]);
+      setAutoPreview([layoutLeaders({...activeSheet,views,annotations:[...activeSheet.annotations.filter(a=>!a.id.startsWith("auto-radius-")),...views.flatMap(v=>autoRadiusNotes(v,!v.flattened && !!source.bends?.length))],dimensions:[...activeSheet.dimensions.filter(d=>!d.automatic),...views.flatMap(v=>autoDimensions(v,autoDetails)),...angles]})]);
       if(source.bends?.length&&!angles.length&&!views.every(v=>v.flattened)) setErrorMessage("Não foi reconhecido um perfil de dobra adequado. Use Cota angular em duas arestas da vista de perfil. Confira também as cotas manuais após atualizar a geometria.");
     }catch(err){setErrorMessage(err instanceof Error?err.message:"Erro ao atualizar cotas.");}
     finally{setComputing(false);}
@@ -1436,7 +1436,7 @@ export function DrawingSheetWorkspace({
           {autoPreview.map(sheet=><div key={sheet.id}><h3>{sheet.name} · {sheet.dimensions.length} cotas</h3>
             <svg viewBox="0 0 420 297" className="my-2 w-full border bg-white">
               <rect x="8" y="8" width="404" height="281" fill="none" stroke="#aaa" strokeWidth="0.3" />
-              {sheet.views.map(v=><g key={v.id} transform={`translate(${v.x} ${v.y}) scale(${v.scale}) translate(${-v.box.minX-v.box.width/2} ${-v.box.minY-v.box.height/2})`} fill="none" stroke="#263238" strokeWidth={0.3/v.scale}>{v.visiblePaths.map((d,i)=><path key={i} d={d}/>)}</g>)}
+              {sheet.views.map(v=><g key={v.id} transform={`translate(${v.x} ${v.y}) scale(${v.scale}) translate(${-v.box.minX-v.box.width/2} ${-v.box.minY-v.box.height/2})`} fill="none" stroke="#263238" strokeWidth={0.3/v.scale}>{v.visiblePaths.map((d,i)=><path key={i} d={d}/>)}{(v.flatBends??[]).map(b=><line key={b.id} {...b.line} stroke="#2563eb" strokeDasharray="4 2"/>)}</g>)}
               {sheet.bomTables?.map(table => <BomTableSvg key={table.id} table={table} effective={null} onDragStart={()=>{}} onEditCell={()=>{}} onRefresh={()=>{}} onRemove={()=>{}} />)}
               {sheet.annotations.map(annotation=><AnnotationSvg key={annotation.id} annotation={annotation} effectivePatch={null} onDragStart={()=>{}} onRemove={()=>{}} />)}
               {sheet.dimensions.map(dim=><DimensionSvg key={dim.id} dim={dim} effectiveOffset={null} onDragStart={()=>{}} onRemove={()=>{}} />)}
@@ -1815,6 +1815,9 @@ function DrawingViewGroup({
         {view.visiblePaths.map((d, i) => (
           <path key={`v${i}`} d={d} fill="none" stroke="#0d1b2a" strokeWidth={1} vectorEffect="non-scaling-stroke" />
         ))}
+        {(view.flatBends ?? []).map(bend => <line key={`bend-${bend.id}`} data-bend-id={bend.id}
+          x1={bend.line.x1} y1={bend.line.y1} x2={bend.line.x2} y2={bend.line.y2}
+          stroke="#2563eb" strokeWidth={1} strokeDasharray="8 3 2 3" vectorEffect="non-scaling-stroke"><title>{bend.label}</title></line>)}
         {view.hiddenPaths.map((d, i) => (
           <path
             key={`h${i}`}

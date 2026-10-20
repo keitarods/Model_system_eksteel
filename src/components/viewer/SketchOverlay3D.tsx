@@ -351,12 +351,7 @@ function DimensionLabel({
 }) {
   const { camera, gl } = useThree();
   const inputRef = useRef<HTMLInputElement>(null);
-  // distanceFactor controla o tamanho "no mundo": drei escala o HTML por
-  // objectScale(câmera) * distanceFactor, onde objectScale ~ 1/distância —
-  // ou seja, o rótulo cresce ao aproximar e encolhe ao afastar, do mesmo
-  // jeito que a peça na tela (proporcional ao zoom). 220 deixa o texto em
-  // tamanho natural (~100%) na distância padrão da câmera ao focar um
-  // plano (260mm).
+  // Keep labels and inputs in screen pixels in both camera projections.
   // Editando: a ÚNICA hora que aparece uma caixinha branca de verdade — o
   // <input> pra digitar o valor OU uma fórmula (ex.: "d9*2", ver
   // formula.ts), com os controles de referência/fórmula/remover do lado
@@ -375,7 +370,7 @@ function DimensionLabel({
     // blur nativo. suppressBlurRef marca os dois casos pra onBlur ignorar.
     const suppressBlurRef = { current: false };
     return (
-      <Html position={position} center distanceFactor={220} pointerEvents="auto">
+      <Html position={position} center pointerEvents="auto">
         <span className="flex items-center gap-1 rounded-lg border border-primary bg-white px-2 py-1 shadow-md">
           <input
             ref={inputRef}
@@ -550,7 +545,7 @@ function DimensionLabel({
   }
 
   return (
-    <Html position={position} center distanceFactor={220} pointerEvents="auto">
+    <Html position={position} center pointerEvents="auto">
       <button
         type="button"
         onPointerDown={handlePointerDown}

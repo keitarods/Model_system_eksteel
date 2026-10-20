@@ -33,3 +33,8 @@ test('same-angle fillets are not bends and distinct equal-angle bends are retain
  const second={...view,bendProfiles:[...view.bendProfiles,{...view.bendProfiles[0],id:'bend2',x:290}],arcs:[...view.arcs,shiftedArc],visibleLineEdges:[...view.visibleLineEdges,...view.visibleLineEdges.map(e=>({...e,x1:e.x1+200,x2:e.x2+200}))]};
  assert.deepEqual(bendAngles(second,[90]).map(d=>d.bendId),['bend1','bend2']);
 });
+
+test('native full-panel dimensions replace redundant automatic angle arcs',()=>{
+ assert.equal(bendAngles({...view,panelDimensions:[{id:'bend1',measurePanel:true}]},[90]).length,0);
+ assert.equal(bendAngles({...view,panelDimensions:[{id:'bend1',measurePanel:false}]},[90]).length,1);
+});

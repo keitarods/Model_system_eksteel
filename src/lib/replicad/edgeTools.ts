@@ -171,7 +171,8 @@ export function listLinearEdges(
 export function findMainFaceForEdge(
   solid: Solid,
   edgeStart: [number, number, number],
-  edgeEnd: [number, number, number]
+  edgeEnd: [number, number, number],
+  supportNormal?: [number, number, number]
 ): { center: [number, number, number]; normal: [number, number, number] } | null {
   const edgeMid: [number, number, number] = [
     (edgeStart[0] + edgeEnd[0]) / 2,
@@ -179,49 +180,29 @@ export function findMainFaceForEdge(
     (edgeStart[2] + edgeEnd[2]) / 2,
   ];
 
-  const PLANE_TOLERANCE = 0.5;
+  const tolerance = 1e-5;
+  const samples = [edgeStart, edgeMid, edgeEnd].map(point => makeVertex(point));
+  const distance = new DistanceTool();
+  const faces = solid.faces;
   let best: { center: [number, number, number]; normal: [number, number, number]; area: number } | null = null;
-  // Reserva do candidato mais próximo do plano mesmo fora da tolerância —
-  // uma rede de segurança pra planificação de dobra-sobre-dobra, onde a
-  // posição desfeita da aresta pode ficar com um pouco de erro numérico
-  // residual (arredondamento acumulado na cadeia de FlattenLink); melhor
-  // usar a face mais próxima do que travar a reconstrução inteira.
-  let fallback: { center: [number, number, number]; normal: [number, number, number]; planeDist: number } | null =
-    null;
-
-  for (const face of solid.faces) {
-    if (face.geomType !== "PLANE") continue;
-
-    const centerVec = face.center;
-    const center: [number, number, number] = [centerVec.x, centerVec.y, centerVec.z];
-    centerVec.delete();
-
-    const normalVec = face.normalAt(center);
-    const faceNormal: [number, number, number] = [normalVec.x, normalVec.y, normalVec.z];
-    normalVec.delete();
-
-    const toEdge: [number, number, number] = [edgeMid[0] - center[0], edgeMid[1] - center[1], edgeMid[2] - center[2]];
-    const planeDist = Math.abs(toEdge[0] * faceNormal[0] + toEdge[1] * faceNormal[1] + toEdge[2] * faceNormal[2]);
-
-    if (!fallback || planeDist < fallback.planeDist) {
-      fallback = { center, normal: faceNormal, planeDist };
+  try {
+    for (const face of faces) {
+      if (face.geomType !== "PLANE") continue;
+      const edges = face.edges;
+      try {
+        // A nearby large face is not necessarily incident to the selected edge.
+        if (!samples.every(vertex => edges.some(edge => distance.distanceBetween(vertex, edge) <= tolerance))) continue;
+        const centerVec = face.center;
+        const center = centerVec.toTuple(); centerVec.delete();
+        const normalVec = face.normalAt(center);
+        const normal = normalVec.toTuple(); normalVec.delete();
+        if (supportNormal && Math.abs(normal.reduce((sum,v,i)=>sum+v*supportNormal[i],0)) < 1-1e-6) continue;
+        const area = measureArea(face);
+        if (!best || area > best.area) best = { center, normal, area };
+      } finally { edges.forEach(edge => edge.delete()); }
     }
-    if (planeDist > PLANE_TOLERANCE) continue; // aresta não está no plano dessa face
-
-    const area = measureArea(face);
-    if (!best || area > best.area) {
-      best = { center, normal: faceNormal, area };
-    }
-  }
-
-  if (best) return { center: best.center, normal: best.normal };
-  if (fallback) {
-    console.warn(
-      `findMainFaceForEdge: nenhuma face dentro da tolerância (${PLANE_TOLERANCE}mm) — usando a mais próxima (${fallback.planeDist.toFixed(3)}mm).`
-    );
-    return { center: fallback.center, normal: fallback.normal };
-  }
-  return null;
+    return best ? { center: best.center, normal: best.normal } : null;
+  } finally { faces.forEach(face => face.delete()); samples.forEach(vertex => vertex.delete()); distance.delete(); }
 }
 
 // Reencontra, num sólido reconstruído do zero, as arestas mais próximas dos

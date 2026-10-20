@@ -92,7 +92,7 @@ export function PlaneOffsetDragger3D({
         <meshBasicMaterial color={COLOR} transparent opacity={0.28} side={THREE.DoubleSide} depthWrite={false} />
       </mesh>
       <Line points={[basePlane.origin, origin]} color={COLOR} lineWidth={2} />
-      <Html position={origin} center distanceFactor={80} pointerEvents="none">
+      <Html position={origin} center pointerEvents="none">
         <span className="whitespace-nowrap rounded-full border-2 border-white bg-amber-500 px-3 py-1.5 text-sm font-bold text-white shadow-lg">
           {offset.toFixed(1)}mm — arraste ou digite o valor
         </span>

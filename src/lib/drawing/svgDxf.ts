@@ -47,7 +47,7 @@ export function drawingSvgDxf(svg: SVGSVGElement): string {
       for (let i=1;i<=count;i++) {
         const next=geometry.getPointAtLength(length*i/count);
         const a=point(previous.x,previous.y), b=point(next.x,next.y);
-        rows.push('0','LINE','8',style.strokeDasharray==='none'?'CONTORNOS':'OCULTAS','10',n(a.x),'20',n(height-a.y),'11',n(b.x),'21',n(height-b.y));
+        rows.push('0','LINE','8',el.hasAttribute('data-bend-id')?'DOBRAS':style.strokeDasharray==='none'?'CONTORNOS':'OCULTAS','10',n(a.x),'20',n(height-a.y),'11',n(b.x),'21',n(height-b.y));
         previous=next;
       }
       }

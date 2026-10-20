@@ -8,6 +8,7 @@ export function bendAngles(view:DrawingView,angles:number[]):DrawingDimension[] 
   const u={x:arc.start.x-arc.x,y:arc.start.y-arc.y},v={x:arc.end.x-arc.x,y:arc.end.y-arc.y};
   const sweep=Math.acos(Math.max(-1,Math.min(1,(u.x*v.x+u.y*v.y)/(arc.radius**2))))*180/Math.PI;
   const bend=view.bendProfiles.find(b=>Math.hypot(b.x-arc.x,b.y-arc.y)<0.05 && (Math.abs(b.radius-arc.radius)<0.01||Math.abs(b.outerRadius-arc.radius)<0.01) && Math.abs(Math.abs(b.angle)-sweep)<0.05);
+  if(view.panelDimensions?.some(p=>p.id===bend?.id && p.measurePanel !== false)) continue;
   if(sweep<1||sweep>179||!bend||!angles.some(a=>Math.abs(Math.abs(a)-sweep)<0.05)) continue;
   const lines=view.visibleLineEdges??view.lineEdges;
   const at=(p:{x:number;y:number})=>lines.filter(e=>{

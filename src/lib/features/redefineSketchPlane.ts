@@ -1,3 +1,4 @@
+import { bindSketchDependencies } from "./sketchDependencies";
 import type { Feature } from './types';
 import type { SketchPlane } from '@/lib/sketch/types';
 
@@ -22,5 +23,5 @@ export function redefineSketchPlane(features: Feature[], id: string, plane: Sket
     // orientation or the origin-point reference just because the click moved.
     plane = previous;
   }
-  return features.map(f => f.id === id && f.type === 'sketch' ? { ...f, plane: { origin: [...plane.origin], normal: [...plane.normal], xDir: [...plane.xDir] } } : f);
+  return bindSketchDependencies(features).map(f => f.id === id && f.type === 'sketch' ? { ...f, plane: { origin: [...plane.origin], normal: [...plane.normal], xDir: [...plane.xDir] } } : f);
 }

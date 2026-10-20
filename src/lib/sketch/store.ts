@@ -442,7 +442,8 @@ function reapplyConstraints(
   shapes: SketchShape[],
   points: Record<string, SketchPoint>,
   fixedPointIds: ReadonlySet<string> = EMPTY_FIXED_SET,
-  cascadeBlocked: (pointId: string) => boolean = () => false
+  cascadeBlocked: (pointId: string) => boolean = () => false,
+  drivingPoints: ReadonlySet<string> = EMPTY_FIXED_SET
 ): Record<string, SketchPoint> {
   if (constraints.length === 0) return points;
   let current = points;
@@ -463,10 +464,13 @@ function reapplyConstraints(
       if(a?.type!=="line"||b?.type!=="line")continue;
       const target=angularTarget(a,b,current,c.degrees);if(target)applyPointUpdates({[b.p2]:target});
     } else if (c.kind === "symmetric") {
-      const source=current[c.sourcePointId],line=shapes.find(s=>s.id===c.lineId);
+      const reverse = drivingPoints.has(c.pointId) && !drivingPoints.has(c.sourcePointId);
+      const sourceId = reverse ? c.pointId : c.sourcePointId;
+      const targetId = reverse ? c.sourcePointId : c.pointId;
+      const source=current[sourceId],line=shapes.find(s=>s.id===c.lineId);
       if(!source||line?.type!=="line"||!current[line.p1]||!current[line.p2])continue;
       const target=reflectPoint(source,current[line.p1],current[line.p2]);
-      if(target)applyPointUpdates({[c.pointId]:target});
+      if(target)applyPointUpdates({[targetId]:target});
     } else if (c.kind === "perpendicular" || c.kind === "parallel") {
       const lineA = shapes.find((sh) => sh.id === c.lineAId);
       const lineB = shapes.find((sh) => sh.id === c.lineBId);
@@ -512,13 +516,22 @@ function computeDragPreview(
   constraints: SketchConstraint[],
   fixedPointIds: ReadonlySet<string>
 ): Record<string, Point> {
-  const expanded = propagateAxisLocks(updates, shapes, points, fixedPointIds);
+  // Infer only existing horizontal/vertical segments, never unrelated nearby points.
+  const alignedShapes = shapes.map(shape => {
+    if (shape.type !== "line" || shape.axisLock || shape.isCenterLine) return shape;
+    const a = points[shape.p1], b = points[shape.p2];
+    if (!a || !b || Math.hypot(a.x - b.x, a.y - b.y) < 1e-6) return shape;
+    if (Math.abs(a.y - b.y) < 1e-6) return { ...shape, axisLock: "horizontal" as const };
+    if (Math.abs(a.x - b.x) < 1e-6) return { ...shape, axisLock: "vertical" as const };
+    return shape;
+  });
+  const expanded = propagateAxisLocks(updates, alignedShapes, points, fixedPointIds);
   const merged: Record<string, SketchPoint> = { ...points };
   for (const [id, pos] of Object.entries(expanded)) {
     if (!merged[id] || id === ORIGIN_POINT_ID) continue;
     merged[id] = { id, x: pos.x, y: pos.y };
   }
-  const reapplied = reapplyConstraints(constraints, shapes, merged, fixedPointIds);
+  const reapplied = reapplyConstraints(constraints, alignedShapes, merged, fixedPointIds, undefined, new Set(Object.keys(updates)));
 
   const diff: Record<string, Point> = {};
   for (const [id, p] of Object.entries(reapplied)) {
@@ -651,6 +664,28 @@ function dimensionCurrentValue(
   const render = resolveDimension(dim, shapes, points);
   if (!render) return null;
   return render.kind === "radius" ? render.r * (dim.kind === "radius" && dim.isDiameter ? 2 : 1) : Math.hypot(render.x2 - render.x1, render.y2 - render.y1);
+}
+
+// A dimension constrains a measurement, not every coordinate of its endpoints.
+// Propagate the complete side first, then reject changes to other driving values.
+function dimensionPointMove(state: {points: Record<string, SketchPoint>; shapes: SketchShape[]; constraints: SketchConstraint[]; dimensions: DimensionAnnotation[]; fixedPointIds: string[]; layers: SketchLayer[]}, id: string, value: number, updates: Record<string, Point>) {
+  const fixed = new Set([...state.fixedPointIds, ...lockedLayerPoints(state.shapes, state.layers), ORIGIN_POINT_ID]);
+  const expanded = propagateAxisLocks(updates, state.shapes, state.points, fixed);
+  let points = { ...state.points };
+  for (const [key, pos] of Object.entries(expanded)) if (points[key]) points[key] = { ...points[key], ...pos };
+  points = reapplyConstraints(state.constraints, state.shapes, points, fixed, undefined, new Set(Object.keys(updates)));
+  for (const shape of state.shapes) {
+    if (shape.type !== 'line' || !shape.axisLock) continue;
+    const a = points[shape.p1], b = points[shape.p2];
+    if (a && b && Math.abs(shape.axisLock === 'horizontal' ? a.y-b.y : a.x-b.x) > 1e-6) return null;
+  }
+  for (const dim of state.dimensions) {
+    if (dim.isReference && dim.id !== id) continue;
+    const before = dim.id === id ? value : dimensionCurrentValue(dim, state.shapes, state.points);
+    const after = dimensionCurrentValue(dim, state.shapes, points);
+    if (before !== null && (after === null || Math.abs(before-after) > 1e-6 * Math.max(1,Math.abs(before)))) return null;
+  }
+  return points;
 }
 
 // Cota clicada perto o bastante da sua PRÓPRIA linha de cota (já deslocada
@@ -1793,7 +1828,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
         // acima — é isso que faz essas ferramentas continuarem "de pé"
         // depois de editar a geometria de novo, em vez de só valerem no
         // instante em que foram usadas.
-        nextPoints = reapplyConstraints(s.constraints, s.shapes, nextPoints, locked, cascadeBlocked);
+        nextPoints = reapplyConstraints(s.constraints, s.shapes, nextPoints, locked, cascadeBlocked, new Set(Object.keys(allowed)));
         return { points: nextPoints };
       }),
 
@@ -1870,9 +1905,9 @@ export const useSketchStore = create<SketchState>((set, get) => {
     // pra satisfazer o valor novo sem violar uma cota/restrição já
     // definida).
     updateDistanceDimension: (id, newLength) => {
-      const { dimensions, points, shapes, fixedPointIds } = get();
+      const { dimensions, points } = get();
       const dim = dimensions.find((d) => d.id === id);
-      if (!dim || dim.kind !== "distance" || newLength <= 0) return;
+      if (!dim || dim.kind !== "distance" || !Number.isFinite(newLength) || newLength <= 0) return;
 
       const p1 = points[dim.p1];
       const p2 = points[dim.p2];
@@ -1886,13 +1921,8 @@ export const useSketchStore = create<SketchState>((set, get) => {
       const ux = dx / currentLength;
       const uy = dy / currentLength;
 
-      const fixed = new Set(fixedPointIds);
-      // Também usado como cascadeBlocked de movePoints abaixo: além de
-      // decidir qual lado é o SEED, impede que a propagação de axisLock
-      // vaze pra dentro de um ponto que já pertence a OUTRA cota (nunca
-      // filtra o próprio seed, ver propagateAxisLocks).
-      const restrictive = (pid: string) => isPointRestrictive(pid, dimensions, shapes, fixed, dim.id);
-      if (!restrictive(dim.p2)) {
+      // Try the second endpoint first, preserving all other driving dimensions.
+      {
         const newP2 = { x: p1.x + ux * newLength, y: p1.y + uy * newLength };
         const updates: Record<string, Point> = { [p2.id]: newP2 };
         // Cota de espaçamento do Padrão Retangular (ver
@@ -1911,9 +1941,12 @@ export const useSketchStore = create<SketchState>((set, get) => {
             };
           }
         }
-        get().movePoints(updates, restrictive);
-      } else if (!restrictive(dim.p1)) {
-        get().movePoints({ [p1.id]: { x: p2.x - ux * newLength, y: p2.y - uy * newLength } }, restrictive);
+        const next = dimensionPointMove(get(), id, newLength, updates);
+        if (next) { set({ points: next }); return; }
+      }
+      {
+        const next = dimensionPointMove(get(), id, newLength, { [p1.id]: { x: p2.x - ux * newLength, y: p2.y - uy * newLength } });
+        if (next) set({ points: next });
       }
     },
 
@@ -1991,7 +2024,7 @@ export const useSketchStore = create<SketchState>((set, get) => {
     updateEdgeDistanceDimension: (id, newValue) => {
       const { dimensions, shapes, points, fixedPointIds } = get();
       const dim = dimensions.find((d) => d.id === id);
-      if (!dim || dim.kind !== "edgeDistance" || newValue <= 0) return;
+      if (!dim || dim.kind !== "edgeDistance" || !Number.isFinite(newValue) || newValue <= 0) return;
 
       const render = resolveDimension(dim, shapes, points);
       if (!render || render.kind !== "distance") return;
@@ -2014,18 +2047,16 @@ export const useSketchStore = create<SketchState>((set, get) => {
       // definida (nunca filtra o próprio seed, ver propagateAxisLocks).
       const fixed = new Set(fixedPointIds);
       const restrictive = (pid: string) => isPointRestrictive(pid, dimensions, shapes, fixed, dim.id);
-      const bLocked = edgeRefPointIds(dim.b, shapes).some(restrictive);
-      const target = !bLocked
-        ? { ref: dim.b, dx: delta * ux, dy: delta * uy }
-        : { ref: dim.a, dx: -delta * ux, dy: -delta * uy };
-      if (bLocked && edgeRefPointIds(dim.a, shapes).some(restrictive)) {
-        return; // os dois lados são restritivos, nenhum pode se mover
+      for (const target of [{ ref: dim.b, dx: delta * ux, dy: delta * uy }, { ref: dim.a, dx: -delta * ux, dy: -delta * uy }]) {
+        const patch = translateEdgeRef(target.ref, target.dx, target.dy, shapes, points);
+        if (!patch) continue;
+        if ("points" in patch) {
+          const next = dimensionPointMove(get(), id, newValue, patch.points);
+          if (next) { set({ points: next }); return; }
+        } else if (!edgeRefPointIds(target.ref, shapes).some(restrictive)) {
+          set({ shapes: patch.shapes }); return;
+        }
       }
-
-      const patch = translateEdgeRef(target.ref, target.dx, target.dy, shapes, points);
-      if (!patch) return;
-      if ("points" in patch) get().movePoints(patch.points, restrictive);
-      else set({ shapes: patch.shapes });
     },
 
     // Retângulo só guarda p1/p2 (cantos diagonais) — largura mexe só no x de
@@ -2723,10 +2754,9 @@ export const useSketchStore = create<SketchState>((set, get) => {
             const current = points[cornerPointId];
             const snapped = previewSnap(raw, referenceGeometry);
             set({
-              dragPreview: {
-                [cornerPointId]:
-                  selectDrag.axis === "x" ? { x: snapped.x, y: current.y } : { x: current.x, y: snapped.y },
-              },
+              dragPreview: computeDragPreview({
+                [cornerPointId]: selectDrag.axis === "x" ? { x: snapped.x, y: current.y } : { x: current.x, y: snapped.y },
+              }, shapes, points, constraints, fixedSet),
             });
           }
         } else if (selectDrag.mode === "translate" && downRaw) {

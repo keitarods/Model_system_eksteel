@@ -167,6 +167,7 @@ export function SolidMesh({
     <group position={transform?.position} quaternion={transform?.quaternion}>
       <mesh
         geometry={geometry}
+        userData={{ sketchSupport: true }}
         castShadow
         receiveShadow
         onClick={pickMode ? handleClick : inspecting ? event=>{event.stopPropagation();if(event.button!==0||event.delta>4)return;const hit=inspectHit(event);if(hit){selection!.pick(hit,event.ctrlKey||event.metaKey||event.shiftKey);}}:undefined}
