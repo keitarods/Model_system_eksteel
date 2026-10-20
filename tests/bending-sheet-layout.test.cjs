@@ -16,3 +16,14 @@ test('automatic dimension labels occupy separate lanes without moving their refe
  }
  assert.deepEqual(sheet.dimensions,dims);
 });
+test('overall vertical dimension stays outside the three bend dimension lanes',()=>{
+ const dim=(id,y1,y2)=>({id,viewId:'v',x1:80,y1,x2:80,y2,offset:8,value:y2-y1,automatic:true});
+ const dimensions=[dim('overall',50,200),dim('upper',50,95),dim('middle',95,165),dim('lower',165,200)];
+ const sheet={size:'A3',orientation:'landscape',views:[{id:'v',x:130,y:125,scale:1,box:{width:100,height:150}}],annotations:[],dimensions};
+ const result=layoutLeaders(sheet).dimensions;
+ const overall=result.find(d=>d.id==='overall');
+ for(const d of result.filter(d=>d.id!=='overall'))assert.ok(overall.offset>=d.offset+7,'total outside local dimensions');
+ assert.deepEqual(result.map(d=>d.id),dimensions.map(d=>d.id));
+ for(const d of result){const original=dimensions.find(x=>x.id===d.id);assert.equal(d.y1,original.y1);assert.equal(d.y2,original.y2);}
+ const twice=layoutLeaders({...sheet,dimensions:result});assert.deepEqual(twice.dimensions,result,'layout is stable when regenerated');
+});
