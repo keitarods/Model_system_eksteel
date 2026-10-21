@@ -1,0 +1,22 @@
+{
+  "filename": "emekaengCommunicator-Setup.exe",
+  "size": 57438501,
+  "sha256": "b944a48cb592747912e5a9f354b5e0ca8cc99ff188ae2655f76f068b98cacf02",
+  "parts": [
+    {
+      "url": "https://cxnlmyhumendhdpmzlwf.supabase.co/storage/v1/object/public/fea-releases/windows/2026.10.20.1/payload/installer.part01",
+      "size": 25165824,
+      "sha256": "433f4260399778f9e2deab915f8def563fa997146cea2f7988833cdf624c83e4"
+    },
+    {
+      "url": "https://cxnlmyhumendhdpmzlwf.supabase.co/storage/v1/object/public/fea-releases/windows/2026.10.20.1/payload/installer.part02",
+      "size": 25165824,
+      "sha256": "a0b6a7723d24b454d289dbcf9263dbcb4346604be06ef582e0ff37f09c4da7cf"
+    },
+    {
+      "url": "https://cxnlmyhumendhdpmzlwf.supabase.co/storage/v1/object/public/fea-releases/windows/2026.10.20.1/payload/installer.part03",
+      "size": 7106853,
+      "sha256": "37ba7677c6ebdae6827a2ef15082175fe280e154de57ff6f43fd76420a3ea23c"
+    }
+  ]
+}
