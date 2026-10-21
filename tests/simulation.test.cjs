@@ -2,6 +2,14 @@ const {test}=require('node:test');const assert=require('node:assert/strict');
 const {emptyStudy}=require('../src/lib/simulation/types.ts');
 const {parseStudy,serializeStudy,validateMesh,validateResults}=require('../src/lib/simulation/format.ts');
 const mesh={nodes:[[0,0,0],[1,0,0],[0,1,0],[0,0,1]],tetrahedra:[[0,1,2,3]],faces:[{id:1,triangles:[[0,2,1]],elements:[0],area:.5,center:[.33,.33,0]}],quality:{minimum:.8,mean:.8},volume:1/6,size:1,refinements:[],elementType:'C3D4'};
+test('automatic refinement report roundtrips and rejects invalid face sizes',()=>{
+ const automaticRefinement=[{attempt:1,refinements:[{faceId:1,size:.25}]}];
+ const study={...emptyStudy(),mesh:{...mesh,automaticRefinement}};
+ assert.deepEqual(parseStudy(serializeStudy(study)),study);
+ for(const report of [null,{},[{attempt:3,refinements:[]}],[{attempt:1,refinements:[{faceId:99,size:.25}]}],[{attempt:1,refinements:[{faceId:1,size:'small'}]}]]){
+  assert.throws(()=>validateMesh({...mesh,automaticRefinement:report}),/refinamento automático/);
+ }
+});
 test('simulation native study roundtrip preserves geometry, loads, supports and mesh',()=>{
  const s={...emptyStudy(),step:'ISO-10303-21;',mesh,supports:[{id:'s',faceIds:[1],axes:[true,true,true]}],loads:[{id:'l',kind:'force',faceIds:[1],vector:[100,0,0],pressure:0}]};
  assert.deepEqual(parseStudy(serializeStudy(s)),s);

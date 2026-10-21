@@ -11,7 +11,7 @@
 [Setup]
 AppId=Eksteel.Communicator.FEA
 AppName=emekaengCommunicator
-AppVersion=2026.10.18.1
+AppVersion=2026.10.20.1
 DefaultDirName={localappdata}\Programs\EksteelFEA
 DefaultGroupName=emekaengCommunicator
 PrivilegesRequired=lowest

@@ -52,5 +52,5 @@ services/fea/packaging/vendor/
 # Esquema novo sem credenciais ou dados de clientes
 !database/emeka/001_audits.sql
 
-# Projetos CAD locais podem conter dados de clientes e desenhos privados
-/artifacts/*.eks3d
+# Projetos CAD, diagnósticos e capturas locais podem conter dados privados
+/artifacts/

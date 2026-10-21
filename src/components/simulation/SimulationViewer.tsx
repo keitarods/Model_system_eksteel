@@ -6,12 +6,14 @@ import * as THREE from 'three';
 import type { BodyDiagnostic } from '@/lib/simulation/bodyDiagnostics';
 import type { ShapeMesh } from 'replicad';
 import { SolidMesh } from '@/components/viewer/SolidMesh';
+import {VisualStyleSelector,useVisualStyle,VisualSurfaceMaterial,VisualEdges,type VisualStyle} from '@/components/viewer/VisualStyle';
+import {MaterialLighting} from '@/components/materials/MaterialLighting';
 import type { Study, Load } from '@/lib/simulation/types';
 import {displayRange,surfaceExtrema,type ColorRange,fieldRange,fieldHue,resultValues,resultFields,type ResultField} from '@/lib/simulation/resultFields';
 import {faceBoundaries,selectReference} from '@/lib/simulation/selection';
 export {fieldRange};
 export type {ResultField};
-function Model({study,selected,onSelect,field,scale,wireframe,visibleBody,previewLoad,colorRange,showExtrema,selectionMode,multiple,selectedEdges,onEdges,onHover,selectionDisabled}:{study:Study;selected:number[];onSelect:(id:number,additive:boolean)=>void;field:ResultField;scale:number;wireframe:boolean;visibleBody?:number|null;previewLoad?:Load;colorRange?:ColorRange|null;showExtrema?:boolean;selectionMode:'face'|'edge';multiple:boolean;selectedEdges:string[];onEdges:(ids:string[])=>void;onHover:(text:string)=>void;selectionDisabled?:boolean}){
+function Model({study,selected,onSelect,field,scale,wireframe,visualStyle,visibleBody,previewLoad,colorRange,showExtrema,selectionMode,multiple,selectedEdges,onEdges,onHover,selectionDisabled}:{study:Study;selected:number[];onSelect:(id:number,additive:boolean)=>void;field:ResultField;scale:number;wireframe:boolean;visualStyle:VisualStyle;visibleBody?:number|null;previewLoad?:Load;colorRange?:ColorRange|null;showExtrema?:boolean;selectionMode:'face'|'edge';multiple:boolean;selectedEdges:string[];onEdges:(ids:string[])=>void;onHover:(text:string)=>void;selectionDisabled?:boolean}){
   const mesh=study.mesh!;
   const {camera,size}=useThree();
   const [hoverFace,setHoverFace]=useState<number|null>(null),[hoverEdge,setHoverEdge]=useState<string|null>(null);
@@ -44,6 +46,7 @@ function Model({study,selected,onSelect,field,scale,wireframe,visibleBody,previe
   const edgeGeometry=useMemo(()=>{const g=new THREE.BufferGeometry(),vertices:number[]=[],colors:number[]=[];for(const edge of boundaries){if(visibleBody&&!edge.faceIds.some(id=>mesh.faces.some(f=>f.id===id&&f.bodyId===visibleBody)))continue;const active=selectedEdges.includes(edge.id),over=hoverEdge===edge.id;if(selectionMode!=='edge'&&!active)continue;const color=new THREE.Color(active?'#1565c0':over?'#00b8d4':'#455a64');for(const seg of edge.segments)for(const n of seg){vertices.push(...position(n).toArray());colors.push(color.r,color.g,color.b);}}g.setAttribute('position',new THREE.Float32BufferAttribute(vertices,3));g.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));return g;},[boundaries,selectedEdges,hoverEdge,selectionMode,visibleBody,scale,study.results]);
   useEffect(()=>()=>hoverGeometry.dispose(),[hoverGeometry]);
   useEffect(()=>()=>edgeGeometry.dispose(),[edgeGeometry]);
+  const outlines=useMemo(()=>boundaries.filter(edge=>!visibleBody||edge.faceIds.some(id=>mesh.faces.some(f=>f.id===id&&f.bodyId===visibleBody))).flatMap(edge=>edge.segments.flatMap(pair=>pair.flatMap(n=>position(n).toArray()))),[boundaries,mesh,visibleBody,scale,study.results]);
   const loads=previewLoad?[...study.loads,previewLoad]:study.loads;
   const {geometry,faceIds,highlight}=useMemo(()=>{
     const geometry=new THREE.BufferGeometry(),highlight=new THREE.BufferGeometry();
@@ -66,8 +69,9 @@ function Model({study,selected,onSelect,field,scale,wireframe,visibleBody,previe
   const extrema=useMemo(()=>showExtrema?surfaceExtrema(study,field,scale,visibleBody):[],[study,field,scale,visibleBody,showExtrema]);
   const extent=useMemo(()=>{const box=new THREE.Box3();mesh.nodes.forEach(p=>box.expandByPoint(new THREE.Vector3(...p)));return box.getSize(new THREE.Vector3()).length();},[mesh]);
   return <>
-    <Bounds fit clip observe margin={1.3}><mesh geometry={geometry} onPointerMove={hover} onPointerOut={()=>{setHoverFace(null);setHoverEdge(null);onHover('');}} onClick={pick}>{study.results?<meshBasicMaterial vertexColors side={THREE.DoubleSide}/>:<meshStandardMaterial vertexColors side={THREE.DoubleSide} roughness={0.7}/>}</mesh></Bounds>
-    {wireframe&&<mesh geometry={geometry}><meshBasicMaterial wireframe color="#233e51" transparent opacity={0.35}/></mesh>}
+    <Bounds fit clip observe margin={1.3}><mesh geometry={geometry} renderOrder={-10} onPointerMove={hover} onPointerOut={()=>{setHoverFace(null);setHoverEdge(null);onHover('');}} onClick={pick}><VisualSurfaceMaterial style={visualStyle} vertexColors color="#ffffff" results={!!study.results}/></mesh></Bounds>
+    <VisualEdges positions={outlines} style={visualStyle}/>
+    {wireframe&&<mesh geometry={geometry} raycast={()=>{}} renderOrder={1}><meshBasicMaterial wireframe color="#233e51" transparent opacity={0.35}/></mesh>}
     <mesh geometry={highlight} renderOrder={2} raycast={()=>{}}><meshBasicMaterial color="#1976d2" transparent opacity={0.45} depthWrite={false} polygonOffset polygonOffsetFactor={-2} side={THREE.DoubleSide}/></mesh>
     <mesh geometry={hoverGeometry} renderOrder={3} raycast={()=>{}}><meshBasicMaterial color="#00c8e8" transparent opacity={0.35} depthWrite={false} polygonOffset polygonOffsetFactor={-3} side={THREE.DoubleSide}/></mesh>
     <lineSegments geometry={edgeGeometry} raycast={()=>{}} renderOrder={4}><lineBasicMaterial vertexColors depthWrite={false}/></lineSegments>
@@ -112,6 +116,7 @@ function DiagnosticRegion({diagnostic}:{diagnostic:BodyDiagnostic}){
   return <><primitive object={helper}/><Html position={helper.box.getCenter(new THREE.Vector3())} center><span className="pointer-events-none whitespace-nowrap rounded bg-white/90 px-2 py-1 text-xs text-red-800">Corpo preparado {diagnostic.bodyId} · região aproximada</span></Html></>;
 }
 export function SimulationViewer({diagnostic,study,preview,selected,onSelect,field,scale,wireframe,visibleBody,previewLoad,colorRange,showExtrema,onClear,selectionDisabled}:{diagnostic?:BodyDiagnostic|null;study:Study;preview:ShapeMesh|null;selected:number[];onSelect:(id:number,additive:boolean)=>void;field:ResultField;scale:number;wireframe:boolean;visibleBody?:number|null;previewLoad?:Load;colorRange?:ColorRange|null;showExtrema?:boolean;onClear:()=>void;selectionDisabled?:boolean}){
+  const [visualStyle,setVisualStyle]=useVisualStyle('simulacao');
   const [selectionMode,setSelectionMode]=useState<'face'|'edge'>('face');const [multiple,setMultiple]=useState(false);const [selectedEdges,setSelectedEdges]=useState<string[]>([]);const [hoverText,setHoverText]=useState('');
   const boundaries=useMemo(()=>study.mesh?faceBoundaries(study.mesh):[],[study.mesh]);
   const clear=()=>{onClear();setSelectedEdges([]);};
@@ -120,11 +125,13 @@ export function SimulationViewer({diagnostic,study,preview,selected,onSelect,fie
   const [min,max]=displayRange(study,field,colorRange);
   return <div className="relative h-full min-h-72 bg-gradient-to-b from-[#b6c5d5] via-[#dbe3eb] to-[#f0f3f6]">
     <Canvas camera={{position:[180,-240,180],up:[0,0,1],near:0.01,far:100000}} onPointerMissed={e=>{if(e.type==='click'&&!selectionDisabled&&!e.ctrlKey&&!e.shiftKey&&!e.metaKey)clear();}}>
+      {visualStyle==='realistic'&&<MaterialLighting/>}
       <ambientLight intensity={1.1}/><directionalLight position={[100,-100,200]} intensity={2}/>
-      {study.mesh?<Model selectionMode={selectionMode} multiple={multiple} selectedEdges={selectedEdges} onEdges={setSelectedEdges} onHover={setHoverText} selectionDisabled={selectionDisabled} colorRange={colorRange} showExtrema={showExtrema} previewLoad={previewLoad} visibleBody={visibleBody} study={study} selected={selected} onSelect={onSelect} field={field} scale={scale} wireframe={wireframe}/>:preview?<Bounds fit clip observe margin={1.3}><SolidMesh mesh={preview} pickMode={false} wireframe={false}/></Bounds>:null}
+      {study.mesh?<Model visualStyle={visualStyle} selectionMode={selectionMode} multiple={multiple} selectedEdges={selectedEdges} onEdges={setSelectedEdges} onHover={setHoverText} selectionDisabled={selectionDisabled} colorRange={colorRange} showExtrema={showExtrema} previewLoad={previewLoad} visibleBody={visibleBody} study={study} selected={selected} onSelect={onSelect} field={field} scale={scale} wireframe={wireframe}/>:preview?<Bounds fit clip observe margin={1.3}><SolidMesh mesh={preview} pickMode={false} visualStyle={visualStyle}/></Bounds>:null}
       {diagnostic&&<DiagnosticRegion diagnostic={diagnostic}/>}
       <OrbitControls makeDefault/><axesHelper args={[10]}/><GizmoHelper alignment="top-right" margin={[72,72]}><GizmoViewcube faces={['DIREITA','ESQUERDA','TRÁS','FRENTE','TOPO','BASE']} color="#f5f7fa" hoverColor="#c5def4" textColor="#34465c" strokeColor="#8b9aab"/></GizmoHelper>
     </Canvas>
+    <div className="absolute left-3 top-3 rounded bg-white/95 px-2 py-1 shadow-sm"><VisualStyleSelector value={visualStyle} onChange={setVisualStyle}/></div>
     {!study.mesh&&!preview&&<div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8 text-center text-sm text-slate-500">{study.step?'Geometria carregada. Gere a malha para selecionar faces e configurar o estudo.':'Importe uma peça STEP ou uma montagem, ou use a geometria aberta no Modelador/Montagem.'}</div>}
     {study.mesh&&<div className="absolute bottom-3 left-3 max-w-[calc(100%-1.5rem)] space-y-2 rounded border border-slate-300 bg-white/95 p-2 text-xs text-slate-700 shadow md:max-w-sm">
       <fieldset disabled={selectionDisabled} className="flex flex-wrap items-center gap-2"><label>Selecionar <select aria-label="Filtro de seleção" className="rounded border p-1" value={selectionMode} onChange={e=>{clear();setSelectionMode(e.target.value as 'face'|'edge');}}><option value="face">Faces</option><option value="edge">Contornos / arestas</option></select></label><label className="flex items-center gap-1"><input type="checkbox" checked={multiple} onChange={e=>setMultiple(e.target.checked)}/>Múltipla</label><button type="button" className="rounded border px-2 py-1" onClick={clear}>Limpar · Esc</button></fieldset>

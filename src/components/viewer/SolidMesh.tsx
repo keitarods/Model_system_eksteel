@@ -8,6 +8,8 @@ import type { ShapeMesh } from "replicad";
 
 import {cadEdgeCoordinates} from '@/lib/replicad/selectionEdges';
 import {useCadSelection,type CadReference} from './CadSelection';
+import {VisualEdges,VisualSurfaceMaterial,type VisualStyle} from './VisualStyle';
+import {modelEdgePositions} from '@/lib/viewer/visualStyles';
 
 type CadMesh=ShapeMesh&{cadEdges?:{lines:number[];edgeGroups:{start:number;count:number;edgeId:number}[]}};
 // Extraído de Viewer3D.tsx pra ser reaproveitado também pelo
@@ -17,7 +19,8 @@ type CadMesh=ShapeMesh&{cadEdges?:{lines:number[];edgeGroups:{start:number;count
 // antes da extração.
 export function SolidMesh({
   mesh,
-  wireframe,
+  wireframe=false,
+  visualStyle,
   pickMode,
   onPick,
   onContextMenu,
@@ -27,7 +30,8 @@ export function SolidMesh({
   selectionOwner="part",selectionLabel,
 }: {
   mesh: ShapeMesh;
-  wireframe: boolean;
+  wireframe?: boolean;
+  visualStyle?: VisualStyle;
   pickMode: boolean;
   onPick?: (origin: [number, number, number], normal: [number, number, number], selection?: { faceId: number; endpoint: boolean; edge?: boolean; circle?: boolean }) => void;
   // Botão direito numa face (fora de modo de escolha) — usado pro menu de
@@ -51,6 +55,8 @@ export function SolidMesh({
   const selection=useCadSelection();const inspecting=!!selection?.enabled&&!pickMode;
   const {camera,size}=useThree();
   const cadEdges=(mesh as CadMesh).cadEdges;
+  const style=visualStyle??(wireframe?'wireframe':'realistic');
+  const outlines=useMemo(()=>modelEdgePositions(mesh as CadMesh),[mesh]);
   const reference=(kind:CadReference['kind'],id:number):CadReference=>({owner:selectionOwner,kind,id,key:`${selectionOwner}/${kind}/${id}`,label:`${kind==='edge'?'Aresta':kind==='face'?'Face':'Componente'} ${kind==='component'?(selectionLabel??selectionOwner):id}`});
   function inspectHit(event:ThreeEvent<MouseEvent|PointerEvent>):CadReference|null{
     if(!selection)return null;
@@ -167,6 +173,7 @@ export function SolidMesh({
     <group position={transform?.position} quaternion={transform?.quaternion}>
       <mesh
         geometry={geometry}
+        renderOrder={-10}
         userData={{ sketchSupport: true }}
         castShadow
         receiveShadow
@@ -175,17 +182,13 @@ export function SolidMesh({
         onPointerMove={pickMode ? handlePointerMove : inspecting?event=>{event.stopPropagation();const hit=inspectHit(event);if(hit?.key!==selection!.hover?.key)selection!.setHover(hit);}:undefined}
         onPointerOut={pickMode ? handlePointerOut : inspecting?()=>selection!.setHover(null):undefined}
       >
-        <meshStandardMaterial
+        <VisualSurfaceMaterial
+          style={style}
+          appearance={appearance}
           color={color ?? appearance?.color ?? (pickMode ? "#78909C" : "#546E7A")}
-          wireframe={wireframe}
-          side={THREE.DoubleSide}
-          metalness={appearance?.metalness ?? 0.05}
-          roughness={appearance?.roughness ?? 0.65}
-          transparent={(appearance?.opacity ?? 1)<1}
-          opacity={appearance?.opacity ?? 1}
-          depthWrite={(appearance?.opacity ?? 1)>=1}
         />
       </mesh>
+      <VisualEdges positions={outlines} style={style}/>
       {inspecting&&<><mesh geometry={inspection.faceGeometry} raycast={()=>{}} renderOrder={3}><meshBasicMaterial vertexColors transparent opacity={0.45} depthWrite={false} polygonOffset polygonOffsetFactor={-2} side={THREE.DoubleSide}/></mesh><lineSegments geometry={inspection.edgeGeometry} raycast={()=>{}} renderOrder={4}><lineBasicMaterial vertexColors depthWrite={false}/></lineSegments></>}
       {pickMode && highlightGeometry && (
         <mesh geometry={highlightGeometry}>

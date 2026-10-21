@@ -7,6 +7,7 @@ export type MeshControls = {minimumSize:number;curvature:number;qualityTarget:nu
 export type FeaMesh = {
   regions?:{id:number;elements:number[];volume:number;center:Vec3}[];
   preparationReport?: {originalBodies:number;preparedBodies:number;originalVolume:number;preparedVolume:number;volumeChangePercent:number;tolerance:number};
+  automaticRefinement?: {attempt:number;refinements:{faceId:number;size:number}[]}[];
   geometryMode?: "part" | "assemblyBonded";
   bodyCount?: number;
   nodes: Vec3[]; tetrahedra: number[][];

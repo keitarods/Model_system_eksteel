@@ -27,6 +27,60 @@ def assembly_step(folder, separated=False):
 
 
 class MeshingErrorTests(unittest.TestCase):
+    def test_local_recovery_clears_partial_mesh_and_preserves_cad(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            payload = {'step': box_step(folder), 'size': 5,
+                       'refinements': [{'faceId': 2, 'size': 2}]}
+            baseline = generate_mesh(payload, folder)
+            generate = gmsh.model.mesh.generate
+            calls = []
+            def fail_once(dim):
+                calls.append(dim)
+                if len(calls) == 1:
+                    generate(2)
+                    raise Exception('Invalid boundary mesh (overlapping facets) on surface 1 surface 9999')
+                self.assertEqual(len(gmsh.model.mesh.getNodes()[0]), 0)
+                generate(dim)
+            stages = []
+            with patch.object(gmsh.model.mesh, 'generate', side_effect=fail_once):
+                recovered = generate_mesh(payload, folder, lambda p, s: stages.append(p))
+            self.assertEqual(calls, [3, 3])
+            self.assertEqual(recovered['automaticRefinement'], [
+                {'attempt': 1, 'refinements': [{'faceId': 1, 'size': 1.25}]}])
+            self.assertEqual(recovered['refinements'], payload['refinements'])
+            self.assertEqual(recovered['volume'], baseline['volume'])
+            self.assertEqual([f['id'] for f in recovered['faces']], [f['id'] for f in baseline['faces']])
+            self.assertGreater(len(recovered['tetrahedra']), len(baseline['tetrahedra']))
+            self.assertEqual(stages, sorted(stages))
+            self.assertEqual(baseline['automaticRefinement'], [])
+
+    def test_recovery_is_bounded_and_ignores_unlocated_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            payload = {'step': box_step(folder), 'size': 5}
+            for message, count in [('overlapping facets on surface 1', 3),
+                                   ('overlapping facets on surface 9999', 1),
+                                   ('PLC Error: segment intersects facet', 1),
+                                   ('Unexpected failure on surface 1', 1)]:
+                with patch.object(gmsh.model.mesh, 'generate', side_effect=Exception(message)) as generate:
+                    with self.assertRaises(Exception) as caught:
+                        generate_mesh(payload, folder)
+                self.assertEqual(generate.call_count, count)
+                if count == 3:
+                    self.assertIn('após 2 tentativa(s)', str(caught.exception))
+                self.assertEqual(gmsh.isInitialized(), 0)
+
+    def test_recovery_stops_at_node_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            payload = {'step': box_step(folder), 'size': 5}
+            with patch.object(gmsh.model.mesh, 'generate', side_effect=Exception('overlapping facets on surface 1')) as generate:
+                with patch('engine.MAX_NODES', -1):
+                    with self.assertRaisesRegex(ValueError, 'Refinamento automático interrompido'):
+                        generate_mesh(payload, folder)
+            self.assertEqual(generate.call_count, 1)
+
     def test_diagnostic_meshes_only_the_requested_body(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

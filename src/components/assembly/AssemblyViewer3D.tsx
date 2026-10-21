@@ -14,6 +14,7 @@ import { MaterialLighting } from "@/components/materials/MaterialLighting";
 import type { Appearance } from "@/lib/materials/library";
 import {CadSelectionCanvas,CadSelectionProvider,useCadSelection} from '@/components/viewer/CadSelection';
 import { SolidMesh } from "@/components/viewer/SolidMesh";
+import {VisualStyleSelector,useVisualStyle,type VisualStyle} from "@/components/viewer/VisualStyle";
 import type { ComponentPlacement } from "@/lib/assembly/types";
 
 type ViewPreset = "isometrica" | "frontal" | "superior";
@@ -209,7 +210,7 @@ export function AssemblyViewer3D({
   const cameraApiRef=useRef<CameraApi|null>(null);
   const [fitToken,setFitToken] = useState(0);
   const [projection, setProjection] = useState<ProjectionMode>("orthographic");
-  const [wireframe, setWireframe] = useState(false);
+  const [visualStyle, setVisualStyle] = useVisualStyle("montagem");
   const [view, setView] = useState<ViewPreset>("isometrica");
   const [viewToken, setViewToken] = useState(0);
 
@@ -217,7 +218,7 @@ export function AssemblyViewer3D({
     <div className="relative flex h-full min-h-0 flex-col">
       <CadSelectionProvider assembly enabled={!pickMode&&!draggableInstanceId} resetKey={bodies} onClear={()=>onSelectInstance?.(null)} onActiveComponent={onSelectInstance}>
       <div aria-label="Visualização da montagem" className="pointer-events-none z-10 flex shrink-0 items-start justify-between gap-2 px-2 py-1">
-        <div className="pointer-events-auto flex shrink-0 items-center gap-0.5 rounded-lg border border-primary-100 bg-white/95 p-1 shadow-sm">
+        <div className="pointer-events-auto flex flex-wrap items-center gap-0.5 rounded-lg border border-primary-100 bg-white/95 p-1 shadow-sm">
           <ProjectionSelector value={projection} onChange={setProjection} />
           {(Object.keys(VIEW_PRESETS) as ViewPreset[]).map(preset=><button key={preset} type="button" title={`Vista ${preset}`} aria-label={`Vista ${preset}`} aria-pressed={view===preset}
             onClick={()=>{setView(preset);setViewToken(t=>t+1);}}
@@ -232,9 +233,7 @@ export function AssemblyViewer3D({
           <button type="button" onClick={()=>setFitToken(t=>t+1)} title="Enquadrar tudo" aria-label="Enquadrar tudo" className="flex h-8 w-8 items-center justify-center rounded text-primary-700 hover:bg-primary-50">
             <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3H3v5 M16 3h5v5 M21 16v5h-5 M8 21H3v-5"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
           </button>
-          <button type="button" onClick={()=>setWireframe(v=>!v)} title="Wireframe — exibir arestas" aria-label="Wireframe" aria-pressed={wireframe} className={`flex h-8 w-8 items-center justify-center rounded ${wireframe?'bg-primary text-primary-foreground':'text-primary-700 hover:bg-primary-50'}`}>
-            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m4 7 8-4 8 4v10l-8 4-8-4Z M4 7l8 4 8-4 M12 11v10"/><path strokeDasharray="2 2" d="m4 17 8-4 8 4 M12 3v10"/></svg>
-          </button>
+          <VisualStyleSelector value={visualStyle} onChange={setVisualStyle}/>
         </div>
       </div>
       <div className={`relative min-h-0 flex-1 ${pickMode ? "cursor-crosshair" : ""}`}>
@@ -248,7 +247,7 @@ export function AssemblyViewer3D({
           <CameraRig position={VIEW_PRESETS[view]} token={viewToken} />
           <AssemblyBodies
             bodies={bodies}
-            wireframe={wireframe}
+            visualStyle={visualStyle}
             pickMode={pickMode}
             onPickFace={onPickFace}
             selectedInstanceId={selectedInstanceId}
@@ -298,7 +297,7 @@ export function AssemblyViewer3D({
 
 function AssemblyBodies({
   bodies,
-  wireframe,
+  visualStyle,
   pickMode,
   onPickFace,
   selectedInstanceId,
@@ -308,7 +307,7 @@ function AssemblyBodies({
   onEditInstance,
 }: {
   bodies: AssemblyBody[];
-  wireframe: boolean;
+  visualStyle: VisualStyle;
   pickMode: boolean;
   onPickFace?: (pick: FacePick) => void;
   selectedInstanceId: string | null;
@@ -353,7 +352,7 @@ function AssemblyBodies({
             >
               <SolidMesh selectionLabel={body.label??body.instanceId.slice(0,8)} selectionOwner={body.instanceId}
                 mesh={body.mesh}
-                wireframe={wireframe}
+                visualStyle={visualStyle}
                 pickMode={pickMode}
                 color={color}
                 appearance={body.appearance}

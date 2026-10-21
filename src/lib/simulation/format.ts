@@ -25,6 +25,10 @@ export function validateMesh(mesh: FeaMesh) {
     const r=mesh.preparationReport;
     if(!r||![r.originalBodies,r.preparedBodies,r.originalVolume,r.preparedVolume,r.volumeChangePercent,r.tolerance].every(finite)||!Number.isInteger(r.originalBodies)||r.originalBodies<1||!Number.isInteger(r.preparedBodies)||r.preparedBodies<1||r.originalVolume<=0||r.preparedVolume<=0||r.tolerance<=0)throw new Error('Relatório de preparação inválido.');
   }
+  if(mesh.automaticRefinement!==undefined){
+    const faces=new Set(mesh.faces.map(f=>f.id));
+    if(!Array.isArray(mesh.automaticRefinement)||mesh.automaticRefinement.length>2||mesh.automaticRefinement.some((a,i)=>!a||a.attempt!==i+1||!Array.isArray(a.refinements)||!a.refinements.length||a.refinements.length>faces.size||a.refinements.some(r=>!r||!faces.has(r.faceId)||!finite(r.size)||r.size<0.01||r.size>mesh.size)))throw new Error('Relatório de refinamento automático inválido.');
+  }
   if(mesh.quality&&[mesh.quality.p05,mesh.quality.belowTarget,mesh.quality.target].some(v=>v!==undefined&&!finite(v)))throw new Error('Diagnóstico de qualidade inválido.');
   if(!mesh.quality||!finite(mesh.quality.minimum)||!finite(mesh.quality.mean)||!finite(mesh.volume)||mesh.volume<=0||!['C3D4','C3D10'].includes(mesh.elementType))throw new Error('Qualidade de malha inválida.');
 }

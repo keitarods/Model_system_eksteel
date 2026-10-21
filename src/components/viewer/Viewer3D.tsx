@@ -13,6 +13,7 @@ import { MaterialLighting } from "@/components/materials/MaterialLighting";
 import type { Appearance } from "@/lib/materials/library";
 import {CadSelectionCanvas,CadSelectionProvider} from './CadSelection';
 import { SolidMesh } from "./SolidMesh";
+import {VisualStyleSelector,useVisualStyle} from "./VisualStyle";
 import { planeBasisQuaternion } from "./planeBasis";
 import { planeYDir } from "@/lib/replicad/plane";
 import { useSketchStore } from "@/lib/sketch/store";
@@ -344,7 +345,7 @@ export function Viewer3D({
   onPickLinearEdge?: (start: [number, number, number], end: [number, number, number]) => void;
 }) {
   const [projection, setProjection] = useState<ProjectionMode>("orthographic");
-  const [wireframe, setWireframe] = useState(false);
+  const [visualStyle, setVisualStyle] = useVisualStyle("modelador");
   const [showGrid, setShowGrid] = useState(true);
   const [orbitTarget, setOrbitTarget] = useState<[number, number, number]>([0, 0, 0]);
   const cameraApiRef = useRef<CameraApi | null>(null);
@@ -423,14 +424,9 @@ export function Viewer3D({
             </button>
           </div>
         )}
-        <label className={`flex items-center gap-2 text-primary-700 ${sketchOverlay?.interactive ? "" : "ml-auto"}`}>
-          <input
-            type="checkbox"
-            checked={wireframe}
-            onChange={(e) => setWireframe(e.target.checked)}
-          />
-          Wireframe
-        </label>
+        <div className={sketchOverlay?.interactive ? "" : "ml-auto"}>
+          <VisualStyleSelector value={visualStyle} onChange={setVisualStyle}/>
+        </div>
         <button
           type="button"
           aria-pressed={showGrid}
@@ -458,7 +454,7 @@ export function Viewer3D({
             <SolidMesh
               appearance={appearance}
               mesh={mesh}
-              wireframe={wireframe}
+              visualStyle={visualStyle}
               pickMode={pickMode && !linearEdgeMode}
               onPick={linearEdgeMode ? undefined : onPickPlane}
               onContextMenu={
