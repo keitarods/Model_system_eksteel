@@ -102,6 +102,88 @@ def intersection_location(error, volumes):
             + '; corpos preparados: ' + ', '.join(map(str, owners)) + '.')
 
 
+def generate_with_local_recovery(size, minimum, face_tags, fields, progress):
+    """Retry only located boundary intersections, without changing CAD topology.
+
+    Two retries at most. Existing sizing fields remain active. The lower bound
+    may be reduced locally down to 0.01 mm; the original global size is retained.
+    """
+    import gmsh
+    attempts = []
+    local_sizes = {}
+    for attempt in range(3):
+        try:
+            # Let Gmsh unwind its native meshing state before raising. With the
+            # default AbortOnError, a boundary error can leave it "busy" and
+            # subsequent generate() calls silently return without elements.
+            abort = gmsh.option.getNumber('General.AbortOnError')
+            gmsh.option.setNumber('General.AbortOnError', 0)
+            gmsh.logger.start()
+            try:
+                gmsh.model.mesh.generate(3)
+                errors = [line for line in gmsh.logger.get() if line.startswith('Error:')]
+                if errors:
+                    raise RuntimeError('\n'.join(errors))
+            finally:
+                gmsh.logger.stop()
+                gmsh.option.setNumber('General.AbortOnError', abort)
+            return attempts
+        except Exception as error:
+            faces = sorted(set(map(int, re.findall(r'\bsurface\s+(\d+)\b', str(error), re.I)))
+                           .intersection(face_tags))
+            if not intersection_failure(error) or not faces or attempt == 2:
+                error.automatic_refinement = attempts
+                raise
+            # A trimmed planar end can intersect several curved neighbours.
+            # Include those sharing its edges so the next error does not simply
+            # move to another corner of the same detail.
+            nearby = set(faces)
+            for face in faces:
+                for dim, edge in gmsh.model.getBoundary([(2, face)], oriented=False):
+                    if dim == 1:
+                        adjacent, _ = gmsh.model.getAdjacencies(1, edge)
+                        nearby.update(int(tag) for tag in adjacent
+                                      if tag in face_tags and gmsh.model.getType(2, int(tag)) != 'Plane')
+            faces = sorted(nearby)
+            if len(gmsh.model.mesh.getNodes()[0]) > MAX_NODES:
+                raise ValueError('Refinamento automático interrompido: limite de 30 mil nós atingido.') from error
+            sizes = []
+            for face in faces:
+                bounds = gmsh.model.getBoundingBox(2, face)
+                spans = [bounds[i+3] - bounds[i] for i in range(3)
+                         if bounds[i+3] - bounds[i] > 1e-5]
+                feature_size = min(spans) if spans else size
+                local = max(0.01, min(size / 4, feature_size / 2,
+                                     local_sizes.get(face, size) / 2))
+                if local >= local_sizes.get(face, size):
+                    continue
+                local_sizes[face] = local
+                edges = gmsh.model.getBoundary([(2, face)], oriented=False)
+                points = gmsh.model.getBoundary(edges, oriented=False, combined=False)
+                constant = gmsh.model.mesh.field.add('MathEval')
+                gmsh.model.mesh.field.setString(constant, 'F', str(local))
+                restricted = gmsh.model.mesh.field.add('Restrict')
+                gmsh.model.mesh.field.setNumber(restricted, 'InField', constant)
+                gmsh.model.mesh.field.setNumbers(restricted, 'SurfacesList', [face])
+                gmsh.model.mesh.field.setNumbers(restricted, 'CurvesList', [tag for dim, tag in edges if dim == 1])
+                gmsh.model.mesh.field.setNumbers(restricted, 'PointsList', sorted({tag for dim, tag in points if dim == 0}))
+                fields.append(restricted)
+                sizes.append({'faceId': face, 'size': local})
+            if not sizes:
+                error.automatic_refinement = attempts
+                raise
+            field = gmsh.model.mesh.field.add('Min')
+            gmsh.model.mesh.field.setNumbers(field, 'FieldsList', fields)
+            gmsh.model.mesh.field.setAsBackgroundMesh(field)
+            gmsh.option.setNumber('Mesh.MeshSizeMin', min(minimum, *local_sizes.values()))
+            gmsh.option.setNumber('Mesh.MeshSizeExtendFromBoundary', 0)
+            # Clear incomplete elements, preserving geometry, visibility and fields.
+            gmsh.model.mesh.clear()
+            attempts.append({'attempt': attempt + 1, 'refinements': sizes})
+            progress(30 + attempt * 10, 'Refinamento automático: tentativa '
+                     + str(attempt + 1) + '/2, faces ' + ', '.join(map(str, faces)))
+
+
 def generate_mesh(payload, folder, progress=lambda percent, stage: None, *, diagnostic_body=None):
     progress(5, "Preparando geometria")
     import gmsh
@@ -221,8 +303,14 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None, *, diag
             gmsh.model.mesh.field.setNumbers(field, 'FieldsList', fields)
             gmsh.model.mesh.field.setAsBackgroundMesh(field)
         progress(25, "Gerando malha volumétrica")
+        automatic_refinement = []
         try:
-            gmsh.model.mesh.generate(3)
+            if diagnostic is not None:
+                # Diagnostics test the requested settings, without masking failures.
+                gmsh.model.mesh.generate(3)
+            else:
+                automatic_refinement = generate_with_local_recovery(
+                    size, min_size, face_tags, fields, progress)
         except Exception as error:
             intersection = intersection_failure(error)
             location = intersection_location(error, volumes) if intersection else ''
@@ -230,10 +318,13 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None, *, diag
                 return {**diagnostic, 'status': 'failed' if intersection else 'inconclusive',
                         'message': ('Interseção na malha de superfície reproduzida neste corpo isolado.' + location) if intersection else 'O teste deste corpo não pôde ser concluído.'}
             if intersection:
+                retries = len(getattr(error, 'automatic_refinement', []))
+                recovery_note = (f'O refinamento automático não resolveu a falha após {retries} tentativa(s). '
+                                 if retries else '')
                 raise ValueError(
                     'Não foi possível gerar a malha: foram detectadas interseções entre arestas e faces '
                     'ou triângulos sobrepostos na malha de superfície.' + location + ' '
-                    'Isso não prova, por si só, que o sólido CAD é inválido. '
+                    + recovery_note + 'Isso não prova, por si só, que o sólido CAD é inválido. '
                     'Teste os corpos isoladamente. Para detalhes curvos, combine divisões por curvatura '
                     'com um tamanho mínimo menor; reduzir apenas o mínimo não ativa o refinamento. '
                     'A união de corpos só deve ser ativada quando representar a ligação física do conjunto.'
@@ -317,7 +408,7 @@ def generate_mesh(payload, folder, progress=lambda percent, stage: None, *, diag
         quality = np.array(gmsh.model.mesh.getElementQualities(element_tags[0], 'minSICN'))
         if not len(quality) or float(quality.min()) <= 1e-8:
             raise ValueError('Malha contém elementos degenerados. Revise geometria e refinamento.')
-        return {'regions': regions, 'preparationReport': report, 'nodes': nodes.tolist(), 'tetrahedra': tetrahedra, 'faces': faces, 'quality': {'minimum': float(quality.min()), 'mean': float(quality.mean()), 'p05': float(np.percentile(quality, 5)), 'belowTarget': int(np.sum(quality < quality_target)), 'target': quality_target}, 'geometryMode': mode, 'bodyCount': len(bodies), 'volume': float(sum(gmsh.model.occ.getMass(3, tag) for _, tag in volumes)), 'size': size, 'refinements': refinements, 'elementType': element_type}
+        return {'automaticRefinement': automatic_refinement, 'regions': regions, 'preparationReport': report, 'nodes': nodes.tolist(), 'tetrahedra': tetrahedra, 'faces': faces, 'quality': {'minimum': float(quality.min()), 'mean': float(quality.mean()), 'p05': float(np.percentile(quality, 5)), 'belowTarget': int(np.sum(quality < quality_target)), 'target': quality_target}, 'geometryMode': mode, 'bodyCount': len(bodies), 'volume': float(sum(gmsh.model.occ.getMass(3, tag) for _, tag in volumes)), 'size': size, 'refinements': refinements, 'elementType': element_type}
     finally:
         gmsh.finalize()
 
